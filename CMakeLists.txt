@@ -36,6 +36,19 @@ else()
     message(FATAL_ERROR "METIS library not found in user directory!")
 endif()
 
+# 查找 GKlib 库
+find_library(GKLIB_LIBRARY
+    NAMES GKlib libGKlib
+    PATHS
+    $ENV{HOME}/local/lib
+    PATH_SUFFIXES lib
+)
+if (GKLIB_LIBRARY) 
+    message(STATUS "Found GKlib library: ${GKLIB_LIBRARY}")
+else()
+    message(FATAL_ERROR "GKlib library not found in user directory!")
+endif()
+
 include_directories(./
                     core
                     thirdparty

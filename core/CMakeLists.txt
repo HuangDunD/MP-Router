@@ -6,5 +6,12 @@ set(Metis_SRC
 add_library(core STATIC
             ${Metis_SRC})
 
-target_link_libraries(core ${METIS_LIBRARIES})
+target_link_libraries(core ${METIS_LIBRARY} ${GKLIB_LIBRARY})
         
+
+set(Metis_test_SRC 
+        clump.cc)
+
+add_executable(clump ${Metis_test_SRC})
+
+target_link_libraries(clump core global)

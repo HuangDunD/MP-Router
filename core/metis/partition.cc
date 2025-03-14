@@ -1,96 +1,135 @@
-#include <metis.h>
-#include <partition.h>
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <unordered_map>
-#include <memory>
+#include "config.h"
+#include "partition.h"
 
-void metis_partition_graph(const std::string& output_path_) {
-    /**
-     * @brief 
-     * 
-     */
+void Metis::process_transactions_to_graph(const std::string& input_path, const std::string& output_path) {
+    std::ifstream infile(input_path);
+    if (!infile.is_open()) {
+        std::cerr << "Error: Could not open input file " << input_path << std::endl;
+        return;
+    }
 
-    std::vector<idx_t> xadj(0);   // 压缩邻接矩阵
-    std::vector<idx_t> adjncy(0); // 压缩图表示
-    std::vector<idx_t> adjwgt(0); // 边权重
-    std::vector<idx_t> vwgt(0);   // 点权重
+    std::unordered_map<int, std::set<int>> page_graph;  // 邻接表
+    std::unordered_map<int, int> page_weight;           // 页面权重
+    std::unordered_map<int, int> page_id_map;           // 页面ID重映射
+    int next_page_id = 0;
+
+    std::string line;
+    while (std::getline(infile, line)) {
+        std::istringstream iss(line);
+        int txn_id, num_pages;
+        iss >> txn_id >> num_pages;
+
+        std::vector<int> pages;
+        for (int i = 0; i < num_pages; i++) {
+            int page;
+            iss >> page;
+
+            if (page_id_map.find(page) == page_id_map.end()) {
+                page_id_map[page] = next_page_id++;  // 重新编号
+            }
+
+            int mapped_page = page_id_map[page];
+            page_weight[mapped_page]++;  // 统计每个页面的访问次数
+            pages.push_back(mapped_page);
+        }
+
+        // 在访问相同事务的页面之间建立边
+        for (size_t i = 0; i < pages.size(); i++) {
+            for (size_t j = i + 1; j < pages.size(); j++) {
+                page_graph[pages[i]].insert(pages[j]);
+                page_graph[pages[j]].insert(pages[i]);
+            }
+        }
+    }
+    infile.close();
+
+    // 计算总节点数和边数
+    int num_nodes = page_graph.size();
+    int num_edges = 0;
+    for (const auto& entry : page_graph) {
+        num_edges += entry.second.size();
+    }
+    num_edges /= 2;  // 无向图，每条边算两次
+
+    std::ofstream outfile(output_path);
+    if (!outfile.is_open()) {
+        std::cerr << "Error: Could not open output file " << output_path << std::endl;
+        return;
+    }
+
+    outfile << num_nodes << " " << num_edges << std::endl;
+
+    for (int i = 0; i < num_nodes; i++) {
+        outfile << page_weight[i];  // 写入页面权重
+        for (int neighbor : page_graph[i]) {
+            outfile << " " << (neighbor + 1) << " 1";  // 邻接点 + 默认权重1
+        }
+        outfile << "-1" << std::endl;
+    }
     
+    outfile.close();
+    std::cout << "Graph successfully written to " << output_path << std::endl;
+}
+
+void Metis::metis_partition_graph(const std::string& input_path, const std::string& output_path) {
+    std::ifstream infile(input_path);
+    if (!infile.is_open()) {
+        std::cerr << "Error: Could not open input file " << input_path << std::endl;
+        return;
+    }
+
+    idx_t num_nodes, num_edges;
+    infile >> num_nodes >> num_edges; // 读取图的基本信息
+
+    std::vector<idx_t> xadj(num_nodes + 1, 0);  // 邻接表索引
+    std::vector<idx_t> adjncy;                  // 邻接点
+    std::vector<idx_t> adjwgt;                  // 边权重
+    std::vector<idx_t> vwgt(num_nodes, 1);      // 节点权重（默认1）
 
     std::unordered_map<uint64_t, int32_t> key_coordinator_cache;
 
-    for(size_t i = 0 ; i < hottest_tuple_index_seq.size(); i ++ ){                
-        uint64_t key = hottest_tuple_index_seq[i];
-
-        xadj.push_back(adjncy.size()); // 
-        vwgt.push_back(hottest_tuple[key]);
-
-        myValueType* it = (myValueType*)record_degree.search_value(&key);
+    idx_t edge_count = 0;  // 记录边数
+    for (idx_t i = 0; i < num_nodes; i++) {
+        xadj[i] = adjncy.size();  // 记录当前节点的邻接表起始位置
         
-        for(auto edge: *it){
-            adjncy.push_back(hottest_tuple_index_[edge.first]); // 节点id从0开始
-            adjwgt.push_back(edge.second.degree);
-
-            // cache coordinator
-            key_coordinator_cache[edge.second.from] = edge.second.from_c_id;
-            key_coordinator_cache[edge.second.to] = edge.second.to_c_id;
+        idx_t vertex_weight;
+        infile >> vertex_weight;
+        vwgt[i] = vertex_weight;  // 读取节点权重
+        
+        idx_t neighbor, weight;
+        while (infile >> neighbor >> weight) {
+            if (neighbor == -1) break;  // 约定 -1 结束一行
+            adjncy.push_back(neighbor - 1);  // METIS 采用 0-based 索引
+            adjwgt.push_back(weight);
+            edge_count++;
         }
     }
-    xadj.push_back(adjncy.size());
-    
-    idx_t nVertices = xadj.size() - 1;      // 节点数
-    idx_t nWeights = 1;                     // 节点权重维数
-    idx_t nParts = key_coordinator_cache.size() / 50;   // 子图个数≥2
-    idx_t objval;                           // 目标函数值
-    std::vector<idx_t> parts(nVertices, 0); // 划分结果
-    std::cout << key_coordinator_cache.size() << " " << key_coordinator_cache.size() / 50 << std::endl;
-    int ret = METIS_PartGraphKway(&nVertices, &nWeights, xadj.data(), adjncy.data(),
+    xadj[num_nodes] = adjncy.size(); // 记录最后一个节点的边界
+
+    infile.close(); // 关闭文件
+
+    // 设置 METIS 参数
+    idx_t nVertices = num_nodes;
+    idx_t nWeights = 1;
+    idx_t nParts = ComputeNodeCount;
+    idx_t objval;
+    std::vector<idx_t> parts(nVertices, 0);
+
+    int ret = METIS_PartGraphKway(
+        &nVertices, &nWeights, xadj.data(), adjncy.data(),
         vwgt.data(), NULL, adjwgt.data(), &nParts, NULL,
         NULL, NULL, &objval, parts.data());
 
-    if (ret != rstatus_et::METIS_OK) { 
-        std::cout << "METIS_ERROR" << std::endl; 
+    if (ret != METIS_OK) {
+        std::cerr << "METIS partitioning failed!" << std::endl;
+        return;
     }
 
-    // print for logs
-    std::cout << "METIS_OK" << std::endl;
-    std::cout << "objval: " << objval << std::endl;
-    
-    std::vector<std::shared_ptr<myMove<WorkloadType>>> metis_move(nParts);
-    for(size_t j = 0; j < nParts; j ++ ){
-        metis_move[j] = std::make_shared<myMove<WorkloadType>>();
-        metis_move[j]->metis_dest_coordinator_id = j;
-    }
-
-    for(size_t i = 0 ; i < parts.size(); i ++ ){
-        uint64_t key_ = hottest_tuple_index_seq[i];
-        int32_t source_c_id = key_coordinator_cache[key_];
-        int32_t dest_c_id = parts[i];
-
-        MoveRecord<WorkloadType> new_move_rec;
-        new_move_rec.set_real_key(key_);
-
-        metis_move[dest_c_id]->records.push_back(new_move_rec);
-    }
-
-
-    std::ofstream outpartition(output_path_);
-    for (size_t i = 0; i < parts.size(); i++) { 
-    }
-    
-    for(size_t j = 0; j < metis_move.size(); j ++ ){
-        if(metis_move[j]->records.size() > 0){
-            outpartition << j << "\t";
-            for(int i = 0 ; i < metis_move[j]->records.size(); i ++ ){
-                outpartition << metis_move[j]->records[i].record_key_ << "\t";
-            }
-            outpartition << "\n";
-            move_plans.push_no_wait(metis_move[j]);
-        }
+    std::ofstream outpartition(output_path);
+    for (idx_t i = 0; i < nVertices; i++) {
+        outpartition << i + 1 << " " << parts[i] << "\n";
     }
     outpartition.close();
 
-    movable_flag.store(false);
+    std::cout << "METIS partitioning completed successfully!" << std::endl;
 }
-
