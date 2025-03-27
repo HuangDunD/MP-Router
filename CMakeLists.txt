@@ -50,13 +50,18 @@ else()
 endif()
 
 include_directories(./
-                    core
-                    thirdparty
-                    workload
+        core
+        thirdparty
+        workload
+        serve  # 添加serve目录以包含serve.cpp的头文件（如果有）
 )
 
 set(CONFIG_SRC config.cc)
 add_library(global STATIC ${CONFIG_SRC})
+
+# 添加serve目录下的server可执行文件
+set(SERVER_SRC serve/serve.cpp)
+add_executable(server ${SERVER_SRC})
 
 add_subdirectory(core)
 
