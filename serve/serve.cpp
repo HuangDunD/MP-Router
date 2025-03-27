@@ -6,9 +6,13 @@
 #include <sys/socket.h>  // For socket API
 
 #include "./parse.cpp"    // Include parsing functionality
+#include "metis_partitioner.h"
 
 #define PORT 8500        // Port number to listen on
 #define BUFFER_SIZE 1024 // Buffer size for receiving data
+
+
+NewMetis metis;
 
 int main() {
     std::cout << "Server starting..." << std::endl;
@@ -81,6 +85,11 @@ int main() {
                 std::cout << id << " ";
             }
             std::cout << std::endl;
+
+
+            //建图
+            metis.build_internal_graph(region_ids);
+
 
             // Send processed data back to the client
             send(new_socket, received_data.c_str(), received_data.length(), 0);

@@ -59,10 +59,9 @@ include_directories(./
 set(CONFIG_SRC config.cc)
 add_library(global STATIC ${CONFIG_SRC})
 
-# 添加serve目录下的server可执行文件
-set(SERVER_SRC serve/serve.cpp)
-add_executable(server ${SERVER_SRC})
 
 add_subdirectory(core)
 
 add_subdirectory(workload)
+
+add_subdirectory(serve)
