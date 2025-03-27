@@ -64,7 +64,7 @@ void Metis::process_transactions_to_graph(const std::string& input_path, const s
         for (int neighbor : page_graph[i]) {
             outfile << " " << (neighbor + 1) << " 1";  // 邻接点 + 默认权重1
         }
-        outfile << "-1" << std::endl;
+        outfile << " -1" << std::endl;
     }
     
     outfile.close();

@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<parameters>
+    <!-- Connection details -->
+    <type>MYSQL</type>
+    <driver>com.mysql.cj.jdbc.Driver</driver>
+    <!-- <url>jdbc:mysql://10.77.70.212:4000/benchbase?rewriteBatchedStatements=true&amp;allowPublicKeyRetrieval=True&amp;sslMode=DISABLED</url> -->
+    <url>jdbc:mysql://10.77.110.148:6033/benchbase?rewriteBatchedStatements=true&amp;allowPublicKeyRetrieval=True&amp;sslMode=DISABLED</url>
+    <!-- <url>jdbc:mysql://10.77.110.145:4000/benchbase?rewriteBatchedStatements=true&amp;allowPublicKeyRetrieval=True&amp;sslMode=DISABLED</url> -->
+    <username>root</username>
+    <password>root123</password>
+    <reconnectOnConnectionFailure>false</reconnectOnConnectionFailure>
+    <isolation>TRANSACTION_SERIALIZABLE</isolation>
+    <batchsize>2024</batchsize>
+
+    <!-- Scalefactor in YCSB is *1000 the number of rows in the USERTABLE-->
+    <scalefactor>1000</scalefactor>
+    <crossratio>100</crossratio>
+    <keysperregion>10000</keysperregion>
+    <ycsbkeys>10</ycsbkeys>
+    
+    <!-- Optional: Override the zipfian constant to modify the skew -->
+    <!-- <skewFactor>0.65</skewFactor> -->
+    <skewFactor>0</skewFactor>
+    <myskewfactor>80</myskewfactor>
+    <!-- The workload -->
+    <terminals>500</terminals>
+    <works>
+        <work>
+            <time>120</time>
+            <rate>10000</rate>
+            <weights>0,0,0,0,0,100</weights>
+        </work>
+    </works>
+
+    <!-- YCSB Procedures declaration -->
+    <transactiontypes>
+        <transactiontype>
+            <name>ReadRecord</name>
+        </transactiontype>
+        <transactiontype>
+            <name>InsertRecord</name>
+        </transactiontype>
+        <transactiontype>
+            <name>ScanRecord</name>
+        </transactiontype>
+        <transactiontype>
+            <name>UpdateRecord</name>
+        </transactiontype>
+        <transactiontype>
+            <name>DeleteRecord</name>
+        </transactiontype>
+        <transactiontype>
+            <name>MyUpdateRecord</name>
+        </transactiontype>
+    </transactiontypes>
+</parameters>
