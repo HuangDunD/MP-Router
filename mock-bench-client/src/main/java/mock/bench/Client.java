@@ -26,7 +26,7 @@ public class Client {
     // 发送消息
     public static void sendMessage(String message) {
         try {
-            System.out.println("Sending message: " + "***" + message + "###");
+//            System.out.println("Sending message: " + "***" + message + "###");
             out.println("***" + message + "###");
         } catch (Exception e) {
             System.err.println("Error sending message: " + e.getMessage());
