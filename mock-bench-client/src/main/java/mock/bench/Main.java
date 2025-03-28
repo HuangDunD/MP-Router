@@ -29,7 +29,7 @@ public class Main {
 
         // 初始化调度器
         scheduler = Executors.newScheduledThreadPool(threadPoolSize);
-        scheduler.scheduleAtFixedRate(Main::workload_simulate, 0, taskIntervalSeconds, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(Main::workload_simulate, 0, taskIntervalSeconds, TimeUnit.MICROSECONDS);
     }
 
     public static void workload_simulate() {
