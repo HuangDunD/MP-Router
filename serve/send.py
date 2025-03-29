@@ -3,7 +3,8 @@ import time
 
 # 服务器地址和端口
 HOST = '127.0.0.1'  # 本地主机，可以改为服务器的实际IP
-PORT = 8500         # 与服务器监听的端口一致
+PORT = 8500  # 与服务器监听的端口一致
+
 
 def send_test_data():
     # 创建TCP socket
@@ -35,17 +36,18 @@ def send_test_data():
         ]
 
         # 发送测试数据
-        for message in test_messages:
-            # 发送消息
-            client_socket.send(message.encode('utf-8'))
-            print(f"发送: {message}")
+        while True:
+            for message in test_messages:
+                # 发送消息
+                client_socket.send(message.encode('utf-8'))
+                print(f"发送: {message}")
 
-            # 接收服务器响应
-            response = client_socket.recv(1024).decode('utf-8')
-            print(f"收到响应: {response}")
+                # 接收服务器响应
+                response = client_socket.recv(1024).decode('utf-8')
+                print(f"收到响应: {response}")
 
-            # 短暂等待，避免消息发送过快
-            time.sleep(1)
+                # 短暂等待，避免消息发送过快
+                time.sleep(0.1)
 
     except ConnectionRefusedError:
         print(f"连接失败，请确保服务器在 {HOST}:{PORT} 上运行")
@@ -55,6 +57,7 @@ def send_test_data():
         # 关闭socket
         client_socket.close()
         print("连接已关闭")
+
 
 if __name__ == "__main__":
     send_test_data()
