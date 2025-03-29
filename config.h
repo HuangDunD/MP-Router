@@ -22,3 +22,4 @@ extern int WORKLOAD_MODE;
 extern int ComputeNodeCount;
 extern uint64_t ATTEMPTED_NUM;
 extern double CrossNodeAccessRatio;
+extern int REGION_SIZE;

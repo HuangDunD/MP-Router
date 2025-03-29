@@ -109,6 +109,7 @@ public:
 private:
     // Internal Graph Representation
     std::set<int> active_nodes_; // Stores IDs of nodes actually present
+    // ! MT TODO here: add weights for edge. 
     std::unordered_map<int, std::set<int> > partition_graph_; // Adjacency list (u -> {v1, v2, ...})
     std::unordered_map<int, int> partition_weight_; // Node weights (id -> weight), default 1
     size_t num_edges_ = 0; // Cached count of unique undirected edges

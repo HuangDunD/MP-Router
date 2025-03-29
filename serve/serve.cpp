@@ -5,6 +5,7 @@
 #include <arpa/inet.h>  // For socket-related functions
 #include <sys/socket.h> // For socket API
 
+#include "util/json_config.h"
 #include "threadpool.h" // Include your thread pool header
 
 #include "./parse.cpp"   // Include parsing functionality
@@ -56,6 +57,11 @@ void process_client_data(const std::string &data, int socket_fd) {
 
 int main() {
     std::cout << "Server starting..." << std::endl;
+
+    std::string config_filepath = "../../config/ycsb_config.json";
+    auto json_config = JsonConfig::load_file(config_filepath);
+    auto conf = json_config.get("ycsb");
+    REGION_SIZE = conf.get("key_cnt_per_partition").get_int64();
 
     // Determine number of threads (e.g., based on hardware)
     unsigned int num_threads = std::thread::hardware_concurrency() - 1; // Leave one thread for the main thread

@@ -1,9 +1,8 @@
+#include "config.h"
 #include <vector>
 #include <string>
 #include <regex>
 #include <algorithm>
-
-#define REGION_SIZE 1000 // 假设每个 region 包含 1000 个 YCSB_KEY
 
 // 解析 SQL 语句中的 YCSB_KEY，返回涉及的 region_id 数组
 void ParseYcsbKey(const std::string& sql, std::vector<int>& region_ids) {
