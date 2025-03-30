@@ -108,7 +108,7 @@ public:
      */
     void partition_internal_graph(const std::string &output_partition_file,
                                   const std::string &log_file_path,
-                                  int ComputeNodeCount) const;
+                                  int ComputeNodeCount);
 
 private:
     // Internal Graph Representation
@@ -116,6 +116,7 @@ private:
     // Adjacency list storing neighbors and edge weights (u -> {v1 -> weight1, v2 -> weight2, ...})
     std::unordered_map<int, std::unordered_map<int, int> > partition_graph_;
     std::unordered_map<int, int> partition_weight_; // Node weights (id -> weight), default 1
+    std::unordered_map<int, int> partition_node_map; // Map the partition id to the affinity 
     // size_t num_edges_ = 0; // Removed: No longer caching unique edge count
 
     // Mutex for thread safety protecting access to the graph members above
@@ -128,7 +129,7 @@ private:
     std::string partition_output_file_ = "graph_partitions.csv"; // Default output file
     std::string partition_log_file_ = "partitioning.log"; // Default log file
     int num_partitions_ = 8; // Default number of partitions
-    static const int PARTITION_INTERVAL = 10000; // Trigger partition every 10000 calls
+    static const int PARTITION_INTERVAL = 1000; // Trigger partition every 10000 calls
     // --- End Automatic Partitioning Members ---
 
     /**
@@ -256,7 +257,7 @@ inline void NewMetis::build_internal_graph(const std::vector<int> &unique_mapped
 // --- Implementation for partitioning the internal graph ---
 inline void NewMetis::partition_internal_graph(const std::string &output_partition_file,
                                                const std::string &log_file_path,
-                                               int ComputeNodeCount) const {
+                                               int ComputeNodeCount) {
     // --- Open Log File (append mode) ---
     std::ofstream log_stream(log_file_path, std::ios::app);
     if (!log_stream.is_open()) {
@@ -542,6 +543,34 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
     outpartition.close();
     log_message("Partition results successfully written to " + output_partition_file, log_stream);
     log_message("Finished internal graph partitioning task.", log_stream);
+
+    // --- Write Router Rules to File ---
+    std::ofstream outpartition2("router_rules.csv");
+    if (!outpartition2.is_open()) {
+        log_message("Error: Cannot open partition output file router_rules.csv", log_stream);
+        return;
+    }
+    outpartition2 << "PartitionID,Primary Node ID\n"; // Write CSV header
+
+    // ! To MT: I assume the the number of nodes in the graph is equal to the number of partitions
+    int primary_id = 0;
+    for (idx_t i = 0; i < nvtx_metis; ++i) {
+        int current_partition_id = static_cast<int>(i);
+        int affinity_class = part[i];
+        if(partition_node_map.count(current_partition_id) == 0){ // if the partition id is not in the map
+            partition_node_map[current_partition_id] = primary_id;
+            for(idx_t j = i+1; j < nvtx_metis; ++j){
+                if(part[j] == affinity_class){
+                    partition_node_map[j] = primary_id;
+                }
+            }
+            primary_id++;
+        }
+    }
+    for (size_t i = 0; i < partition_node_map.size(); i++) {
+        outpartition2 << i << "," << partition_node_map[i] << "\n";
+    }
+    
 }
 
 #endif // NEWMETIS_PARTITIONER_H

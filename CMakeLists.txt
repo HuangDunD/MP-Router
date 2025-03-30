@@ -6,6 +6,8 @@ option(LINK_SO "Whether are linked dynamically" ON)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -fPIC")
 
+set(CMAKE_BUILD_TYPE Debug)
+
 set(CMAKE_CXX_STANDARD 17)
 
 include(FindThreads)
