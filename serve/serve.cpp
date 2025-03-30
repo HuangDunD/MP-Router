@@ -16,6 +16,7 @@
 
 NewMetis metis;
 
+std::atomic<int> send_times = 0;
 
 // Function to handle processing in a separate thread
 void process_client_data(const std::string &data, int socket_fd) {
@@ -44,10 +45,15 @@ void process_client_data(const std::string &data, int socket_fd) {
 
 
     ssize_t bytes_sent = send(socket_fd, ids_.c_str(), ids_.length(), 0);
+    send_times++;
+    if (send_times % 5000 == 0) {
+        std::cout << "[Thread " << this_id << "] Sent response to socket " << socket_fd
+                << " (" << send_times << " times)." << std::endl;
+    }
     if (bytes_sent < 0) {
         std::cerr << "[Thread " << this_id << "] Failed to send response to socket " << socket_fd << std::endl;
     } else {
-        std::cout << "[Thread " << this_id << "] Response sent (" << bytes_sent << " bytes)." << std::endl;
+        //std::cout << "[Thread " << this_id << "] Response sent (" << bytes_sent << " bytes)." << std::endl;
     }
 }
 

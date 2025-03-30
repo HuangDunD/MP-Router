@@ -50,7 +50,7 @@ inline void log_message(const std::string &message, std::ostream &log_stream) {
     std::string log_entry = "[" + ss.str() + "] " + message;
 
     // Output to console (optional, but often useful for debugging)
-    std::cout << log_entry << std::endl;
+    //std::cout << log_entry << std::endl;
 
     // Output to log file stream
     if (log_stream.good()) {
@@ -314,11 +314,11 @@ inline void NewMetis::build_internal_graph(const std::vector<int> &unique_mapped
 
             } else if (partition_counts.size() == 1 && unmapped_count == 0) {
                  // Optional: Log if all nodes map to the same partition (no cross-access)
-                 // std::ofstream log_stream(partition_log_file_, std::ios::app);
-                 // if (log_stream.is_open()) {
-                 //     log_message("Group maps entirely to partition (PrimaryID): " + std::to_string(partition_counts.begin()->first), log_stream);
-                 //     log_stream.close();
-                 // }
+                 std::ofstream log_stream(partition_log_file_, std::ios::app);
+                 if (log_stream.is_open()) {
+                     log_message("Group maps entirely to partition (PrimaryID): " + std::to_string(partition_counts.begin()->first), log_stream);
+                     log_stream.close();
+                 }
             } else if (partition_counts.empty() && unmapped_count > 0) {
                 // Optional: Log if none of the nodes were found in the map
                  std::ofstream log_stream(partition_log_file_, std::ios::app);
