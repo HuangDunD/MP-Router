@@ -8,7 +8,7 @@
 #include "util/json_config.h"
 #include "threadpool.h" // Include your thread pool header
 
-#include "./parse.cpp"   // Include parsing functionality
+#include "parse.h"
 #include "metis_partitioner.h"
 
 #define PORT 8500       // Port number to listen on
@@ -19,9 +19,8 @@ NewMetis metis;
 
 // Function to handle processing in a separate thread
 void process_client_data(const std::string &data, int socket_fd) {
-    std::vector<int> region_ids;
+    std::vector<int> region_ids(11);
 
-    // Get thread ID for logging (optional)
 
     std::thread::id this_id = std::this_thread::get_id();
 
@@ -29,7 +28,7 @@ void process_client_data(const std::string &data, int socket_fd) {
     ParseYcsbKey(data, region_ids); // Assuming ParseYcsbKey is thread-safe or only uses local/stack variables
 
     // Print Region IDs (Consider adding a mutex for std::cout if output gets interleaved)
-    std::cout << "[Thread " << this_id << "] Recived Region IDs:" << std::endl;
+    //std::cout << "[Thread " << this_id << "] Recived Region IDs:" << std::endl;
     std::string ids_;
     for (const auto &id: region_ids) {
         if (id < 0) {
@@ -38,12 +37,10 @@ void process_client_data(const std::string &data, int socket_fd) {
         }
         ids_ += std::to_string(id) + " ";
     }
-    std::cout << ids_ << std::endl;
+    //std::cout << ids_ << std::endl;
 
 
     metis.build_internal_graph(region_ids); // Call the graph building function
-
-    std::cout << "[Thread " << this_id << "] Graph built for data." << std::endl;
 
 
     ssize_t bytes_sent = send(socket_fd, ids_.c_str(), ids_.length(), 0);
