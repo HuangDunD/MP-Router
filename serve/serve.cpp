@@ -19,7 +19,7 @@ NewMetis metis;
 
 // Function to handle processing in a separate thread
 void process_client_data(const std::string &data, int socket_fd) {
-    std::vector<int> region_ids(11);
+    std::vector<int> region_ids;
 
 
     std::thread::id this_id = std::this_thread::get_id();
