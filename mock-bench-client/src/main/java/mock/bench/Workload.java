@@ -8,6 +8,7 @@ public class Workload {
     private final List<Integer> ycsb_key;
     private final List<Affinity_Class> affinity_class;
     private final int affinity_class_num;
+    public int cross_num = 0;
 
     public Workload(int affinity_class_num, int affinity_class_partition_num, int key_cnt_per_partition) {
         this.affinity_class_num = affinity_class_num;
@@ -20,43 +21,45 @@ public class Workload {
             ac.key_num = key_cnt_per_partition;
             ac.key_start_list = new ArrayList<>();
             for (int j = 0; j < affinity_class_partition_num; j++) { // init key_start_list
-                ac.key_start_list.add(( ((long) i * affinity_class_partition_num + j) * (long) key_cnt_per_partition));
+                ac.key_start_list.add(( (i * affinity_class_partition_num + j) * key_cnt_per_partition));
             }
             affinity_class.add(ac);
         }
     }
 
-    private void generate_ycsb_key(int num, double cross_ratio, int execution_count) {
+    private void generate_ycsb_key(int num, double cross_ratio, int execution_count, Random random_double) {
         ycsb_key.clear(); // clean the list
         Random random = new Random();
-        random.setSeed(System.currentTimeMillis() + execution_count ); // 设置随机数种子，避免重复
+        random.setSeed(System.currentTimeMillis() + execution_count); // 设置随机数种子，避免重复
         // 判断当次是否生成跨分区的key
-        if (random.nextDouble() < cross_ratio) { // 产生跨亲和类的分区key
+        if (random_double.nextDouble() % 1 < cross_ratio) { // 产生跨亲和类的分区key
+            cross_num++;
             // 跨亲和类的数量
-            int cross_num = random.nextInt(affinity_class_num);
+            int cross_num = random.nextInt(affinity_class_num - 2) + 2;
             List<Affinity_Class> cross_ac = new ArrayList<>();
 
             for (int i = 0; i < cross_num; i++) { // 添加跨亲和类
-                int ac = random.nextInt(affinity_class_num);
-                while(cross_ac.contains(affinity_class.get(ac))) {
-                    ac = random.nextInt(affinity_class_num);
+                int ac_id = random.nextInt(affinity_class_num);
+                while(cross_ac.contains(affinity_class.get(ac_id ))) {
+                    ac_id  = random.nextInt(affinity_class_num);
                 }
-                cross_ac.add(affinity_class.get(ac));
+                cross_ac.add(affinity_class.get(ac_id));
             }
 
             for (int i = 0; i < num; i++) { // 从跨亲和类中随机选取key
-                int ac = random.nextInt(cross_num);
+                int ac_id = random.nextInt(cross_num);
                 // 随机选择分区中的key
-                int ac_start = cross_ac.get(ac).key_start_list.get(random.nextInt(cross_ac.get(ac).partition_num)).intValue();
-                int ac_key_num = cross_ac.get(ac).key_num;
+                Affinity_Class ac = affinity_class.get(ac_id);
+                int ac_start = ac.key_start_list.get(random.nextInt(ac.partition_num)).intValue();
+                int ac_key_num = cross_ac.get(ac_id).key_num;
                 int key = random.nextInt(ac_key_num) + ac_start;
                 ycsb_key.add(key);
             }
-
         } else { // 产生同一亲和类的分区key
-            int ac = random.nextInt(affinity_class_num);
-            int ac_start = affinity_class.get(ac).key_start_list.get(random.nextInt(affinity_class.get(ac).partition_num)).intValue();
-            int ac_key_num = affinity_class.get(ac).key_num;
+            int ac_id = random.nextInt(affinity_class_num);
+            Affinity_Class ac = affinity_class.get(ac_id);
+            int ac_start = ac.key_start_list.get(random.nextInt(ac.partition_num)).intValue();
+            int ac_key_num = affinity_class.get(ac_id).key_num;
             for (int i = 0; i < num; i++) {
                 int key = random.nextInt(ac_key_num) + ac_start;
                 ycsb_key.add(key);
@@ -64,8 +67,8 @@ public class Workload {
         }
     }
 
-    public String generate_write(int num, double cross_ratio, int execution_count) {
-        generate_ycsb_key(num, cross_ratio, execution_count);
+    public String generate_write(int num, double cross_ratio, int execution_count, Random random_double) {
+        generate_ycsb_key(num, cross_ratio, execution_count, random_double);
         StringBuilder sb = new StringBuilder();
         sb.append("UPDATE ");
         sb.append("benchbase.usertable\n");
@@ -94,5 +97,5 @@ class Affinity_Class{
     int id;
     int partition_num;
     int key_num;
-    List<Long> key_start_list;
+    List<Integer> key_start_list;
 }

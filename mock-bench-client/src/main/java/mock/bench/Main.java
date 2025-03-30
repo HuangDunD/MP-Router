@@ -3,6 +3,7 @@ package mock.bench;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.Properties;
+import java.util.Random;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -10,6 +11,7 @@ import java.util.concurrent.TimeUnit;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.io.FileReader;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 
 import static mock.bench.Client.closeResources;
@@ -26,6 +28,8 @@ public class Main {
     private static int writeCount; // Write 操作的数量
     private static double crossRatio; // Cross Ratio 参数
     private static long startTime; // 任务开始时间
+    private static Random random_double; // 随机数生成器
+    private static double cross_num; // 统计跨亲和类和同一亲和类的数量
 
     public static void main(String[] args) {
         // 加载配置文件
@@ -37,7 +41,9 @@ public class Main {
         // 初始化调度器
         startTime = System.currentTimeMillis();
         scheduler = Executors.newScheduledThreadPool(threadPoolSize);
-        scheduler.scheduleAtFixedRate(Main::workload_simulate, 0, taskIntervalTime, TimeUnit.MILLISECONDS);
+        random_double = new Random(startTime);
+        cross_num = 0;
+
         // 提交多个任务到线程池
         for (int i = 0; i < threadPoolSize; i++) {
             scheduler.scheduleAtFixedRate(
@@ -48,18 +54,22 @@ public class Main {
             );
         }
 
-        // 关闭线程池（可选，通常在程序结束时调用）
+        // 添加关闭钩子
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-//            System.out.println("Shutting down scheduler...");
             scheduler.shutdown();
         }));
     }
+
+    private static AtomicBoolean isRunning = new AtomicBoolean(true); // 使用 AtomicBoolean
 
     public static void workload_simulate() {
         // 检查是否达到最大执行次数
         long endTime = System.currentTimeMillis();
         if ((endTime - startTime) / 1000 > maxExecutionsTime) {
-//            System.out.println(endTime - startTime);
+            if (isRunning.compareAndSet(true, false)) { // CAS 操作，确保只执行一次
+                System.out.println("Total executed " + executionCount + " times, Cross Ratio: "
+                        + String.format("%.3f", (double) cross_num / executionCount));
+            }
             stopScheduler(); // 停止调度器
             return;
         }
@@ -68,25 +78,19 @@ public class Main {
         String ws = "";
         try {
             Workload workload = new Workload(affinityClassNum, affinityClassPartitionNum, keyCntPerPartition);
-            ws = workload.generate_write(writeCount, crossRatio, executionCount);
+            ws = workload.generate_write(writeCount, crossRatio, executionCount, random_double);
+            cross_num += workload.cross_num;
             Client.sendMessage(ws);
             executionCount++;
-            System.out.println("Executed " + executionCount + " times.");
-        } catch (Exception e) {
-            // 处理异常
-//            System.err.println("Error during workload simulation: " + e.getMessage());
-            // 停止调度器
-//            System.err.println("Error during workload simulation: " + e.getMessage());
-//            stopScheduler();
-//            return;
-        }
+            if (executionCount % 10000 == 0)
+                System.out.println("Executed " + executionCount + " times, Cross Ratio: " + String.format("%.3f", (double) cross_num / executionCount));
+        } catch (Exception e) {}
     }
 
     // 停止调度器
     private static void stopScheduler() {
         if (scheduler != null && !scheduler.isShutdown()) {
             scheduler.shutdown();
-            System.out.println("Scheduler stopped.");
         }
         closeResources();
     }
