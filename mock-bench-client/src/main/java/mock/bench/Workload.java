@@ -9,14 +9,14 @@ public class Workload {
     private final List<Integer> ycsb_key;
     private final List<Affinity_Class> affinity_class;
     private final int affinity_class_num;
-    private final Random random;
+    private final SecureRandom random;
     public int cross_num = 0;
 
     public Workload(int affinity_class_num, int affinity_class_partition_num, int key_cnt_per_partition) {
         this.affinity_class_num = affinity_class_num;
         ycsb_key = new ArrayList<>();
         affinity_class = new ArrayList<>();
-        random = new Random();
+        random = new SecureRandom();
         for (int i = 0; i < affinity_class_num; i++) { // init affinity_classes
             Affinity_Class ac = new Affinity_Class();
             ac.id = i;
