@@ -1,5 +1,6 @@
 package mock.bench;
 
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
@@ -8,12 +9,14 @@ public class Workload {
     private final List<Integer> ycsb_key;
     private final List<Affinity_Class> affinity_class;
     private final int affinity_class_num;
+    private final Random random;
     public int cross_num = 0;
 
     public Workload(int affinity_class_num, int affinity_class_partition_num, int key_cnt_per_partition) {
         this.affinity_class_num = affinity_class_num;
         ycsb_key = new ArrayList<>();
         affinity_class = new ArrayList<>();
+        random = new Random();
         for (int i = 0; i < affinity_class_num; i++) { // init affinity_classes
             Affinity_Class ac = new Affinity_Class();
             ac.id = i;
@@ -29,7 +32,7 @@ public class Workload {
 
     private void generate_ycsb_key(int num, double cross_ratio, int execution_count, Random random_double) {
         ycsb_key.clear(); // clean the list
-        Random random = new Random();
+        // Random random = new Random();
         random.setSeed(System.currentTimeMillis() + execution_count); // 设置随机数种子，避免重复
         // 判断当次是否生成跨分区的key
         if (random_double.nextDouble() % 1 < cross_ratio) { // 产生跨亲和类的分区key
@@ -55,15 +58,40 @@ public class Workload {
                 int key = random.nextInt(ac_key_num) + ac_start;
                 ycsb_key.add(key);
             }
+
+            // // 打印跨亲和类的列表
+            // synchronized (System.out) {
+            //     System.out.print("[");
+            //     for (Affinity_Class ac : cross_ac) {
+            //         System.out.print(ac.id + ", ");   
+            //     }
+            //     System.out.print("] -> keys: ");
+            //     System.out.print("[");
+            //     for (Integer integer : ycsb_key) {
+            //         System.out.print(integer + ", ");
+            //     }
+            //     System.out.println("]");
+            // }
+
         } else { // 产生同一亲和类的分区key
             int ac_id = random.nextInt(affinity_class_num);
             Affinity_Class ac = affinity_class.get(ac_id);
-            int ac_start = ac.key_start_list.get(random.nextInt(ac.partition_num)).intValue();
-            int ac_key_num = affinity_class.get(ac_id).key_num;
             for (int i = 0; i < num; i++) {
+                int ac_start = ac.key_start_list.get(random.nextInt(ac.partition_num)).intValue();
+                int ac_key_num = affinity_class.get(ac_id).key_num;
                 int key = random.nextInt(ac_key_num) + ac_start;
                 ycsb_key.add(key);
             }
+
+            // // 打印亲和类的id和key
+            // synchronized (System.out) {
+            //     System.out.print("[" + ac_id + "] -> keys: ");
+            //     System.out.print("[");
+            //     for (Integer integer : ycsb_key) {
+            //         System.out.print(integer + ", ");
+            //     }
+            //     System.out.println("]");
+            // }
         }
     }
 
