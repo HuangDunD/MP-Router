@@ -96,14 +96,15 @@ class Table {
             sb.append("  ").append(column).append("\n");
         }
         // 输出亲和性类信息
-        sb.append("  Affinity Classes: ").append(affinity_class_num).append("\n");
+        sb.append("Affinity Classes: ").append(affinity_class_num);
         for (int i = 0; i < affinity_classes.size(); i++) {
             Affinity_Class ac = affinity_classes.get(i);
-            sb.append("Affinity Class ").append(i).append(": ");
-            sb.append("Partition Num: ").append(ac.partition_num).append(", ");
-            sb.append("Key Start List: ").append(ac.key_start_list).append("\n");
+            sb.append("\n   Affinity Class ").append(i).append(": ");
+            sb.append("Partition Num: ").append(ac.partition_num);
+//            sb.append("Key Start List: ").append(ac.key_start_list).append("\n");
 //            sb.append("Key Num List: ").append(ac.key_num_list).append("\n");
         }
+        sb.append("\n");
         return sb.toString();
     }
 }
@@ -117,17 +118,17 @@ class Column {
         this.columnType = columnType.toUpperCase();
     }
 
-    public boolean IsChar(){
-        return columnType.contains("CHAR") || columnType.contains("VARCHAR");
-    }
+//    public boolean IsChar(){
+//        return columnType.contains("CHAR") || columnType.contains("VARCHAR");
+//    }
 
     public boolean IsInt(){
         return columnType.contains("INT") || columnType.contains("INTEGER") || columnType.contains("SMALLINT") || columnType.contains("BIGINT");
     }
 
-    public boolean IsDouble(){
-        return columnType.contains("DOUBLE") || columnType.contains("FLOAT") || columnType.contains("REAL") || columnType.contains("DECIMAL");
-    }
+//    public boolean IsDouble(){
+//        return columnType.contains("DOUBLE") || columnType.contains("FLOAT") || columnType.contains("REAL") || columnType.contains("DECIMAL");
+//    }
 
     @Override
     public String toString() {
@@ -136,7 +137,7 @@ class Column {
 }
 
 
-public class Workload_DDL {
+public class Workload_ddl {
     static String sql = "";
     static String workload_type = "";
     static List<Table> tables = new ArrayList<>();

@@ -15,16 +15,16 @@ public class Workload {
     private Meta_Data generate_write_key(int num, double cross_ratio, int execution_count, Random random_global) {
         // 从Workload_DDL中随机获取Table
         List<Integer> table_idx = new ArrayList<>();
-        for (int i = 0; i < Workload_DDL.tables.size(); i++)
+        for (int i = 0; i < Workload_ddl.tables.size(); i++)
             table_idx.add(i);
         Collections.shuffle(table_idx);
         int shuffle_list_idx = 0;
-        Table table = Workload_DDL.tables.get(table_idx.get(shuffle_list_idx));
+        Table table = Workload_ddl.tables.get(table_idx.get(shuffle_list_idx));
         while (table.rowCount < 8000) { // 表的行数小于8000的不要点写
             shuffle_list_idx++;
-            table = Workload_DDL.tables.get(table_idx.get(shuffle_list_idx));
+            table = Workload_ddl.tables.get(table_idx.get(shuffle_list_idx));
         }
-        Meta_Data meta_data = new Meta_Data(Workload_DDL.workload_type, table.tableName, table.write_column, table.partition_column);
+        Meta_Data meta_data = new Meta_Data(Workload_ddl.workload_type, table.tableName, table.write_column, table.partition_column);
         random.setSeed(System.currentTimeMillis() + execution_count); // 设置随机数种子，避免重复
         // 判断当次是否生成跨分区的key
         if (random_global.nextDouble() % 1 < cross_ratio) { // 产生跨亲和类的分区key
@@ -97,7 +97,6 @@ public class Workload {
     }
 
     private boolean type_equal(Column c1, Column c2) {
-//        if (c1.IsDouble() && c2.IsDouble()) return true;
         if (c1.IsInt() && c2.IsInt()) return true;
         return false;
     }
@@ -105,19 +104,19 @@ public class Workload {
     private Meta_Data generate_read_key(int num, double cross_ratio, int execution_count, Random random_global, boolean is_join) {
         // 从Workload_DDL中随机获取Table
         List<Integer> table_idx = new ArrayList<>();
-        for (int i = 0; i < Workload_DDL.tables.size(); i++)  table_idx.add(i);
+        for (int i = 0; i < Workload_ddl.tables.size(); i++)  table_idx.add(i);
         Collections.shuffle(table_idx);
         int shuffle_list_idx = 0;
-        Table table = Workload_DDL.tables.get(table_idx.get(shuffle_list_idx));
-        while (table.rowCount < 8000 && shuffle_list_idx < Workload_DDL.tables.size()) { // 表的行数小于8000的不要点读
+        Table table = Workload_ddl.tables.get(table_idx.get(shuffle_list_idx));
+        while (table.rowCount < 8000 && shuffle_list_idx < Workload_ddl.tables.size()) { // 表的行数小于8000的不要点读
             shuffle_list_idx++;
-            table = Workload_DDL.tables.get(table_idx.get(shuffle_list_idx));
+            table = Workload_ddl.tables.get(table_idx.get(shuffle_list_idx));
         }
-        Meta_Data meta_data = new Meta_Data(Workload_DDL.workload_type, table.tableName, table.partition_column);
+        Meta_Data meta_data = new Meta_Data(Workload_ddl.workload_type, table.tableName, table.partition_column);
         random.setSeed(System.currentTimeMillis() + execution_count); // 设置随机数种子，避免重复
         if (!is_join){
             // 判断当次是否生成跨分区的key
-            if (random_global.nextDouble() % 1 < cross_ratio) { // 产生跨亲和类的分区key
+            if (random_global.nextDouble() % 1.0 < cross_ratio) { // 产生跨亲和类的分区key
                 cross_num++;
                 // 跨亲和类的数量
                 int cross_num = random.nextInt(table.affinity_class_num - 2) + 2;
@@ -150,24 +149,16 @@ public class Workload {
                     meta_data.partition_key.add(key);
                 }
             }
-            // 添加读列 只要1列
-//            int column_idx = random.nextInt(table.columns.size());
-//            String column = table.tableName + "." + table.columns.get(column_idx).columnName;
-//            while (meta_data.read_columns.contains(column) || column.equals(meta_data.partition_column)) { // 过滤相同列和分区列
-//                column_idx = random.nextInt(table.columns.size());
-//                column = table.tableName + "." + table.columns.get(column_idx).columnName;
-//            }
-//            meta_data.read_columns.add(column);
         } else  {
-            Join_Table join_table = new Join_Table(Workload_DDL.workload_type, table.tableName);
+            Join_Table join_table = new Join_Table(Workload_ddl.workload_type, table.tableName);
             // 遍历左表所有列，查看是否有其他表的列的属性与左表的列相同
             List<Integer> table_idx1 = new ArrayList<>();             // 生成表遍历序列并打乱
-            for (int i = 0; i < Workload_DDL.tables.size(); i++)
+            for (int i = 0; i < Workload_ddl.tables.size(); i++)
                 table_idx1.add(i);
             Collections.shuffle(table_idx1);
             // 遍历所有表
-            for (int i = 0; i < Workload_DDL.tables.size(); i++) {
-                Table table1 = Workload_DDL.tables.get(table_idx1.get(i)); // 每次随机选择一张表
+            for (int i = 0; i < Workload_ddl.tables.size(); i++) {
+                Table table1 = Workload_ddl.tables.get(table_idx1.get(i)); // 每次随机选择一张表
                 if (table1.tableName.equals(table.tableName)) continue; // 跳过自身JOIN
 
                 for (int j = 0; j < table.columns.size(); j++) { // 遍历左表的列
@@ -182,28 +173,6 @@ public class Workload {
                             join_table.right_table_name = table1.tableName;
                             join_table.left_table_column = table.tableName + "." + column.columnName;
                             join_table.right_table_column = table1.tableName + "." + column1.columnName;
-                            // 从两张表中随机选择查询列，只选择1列
-//                            for (int l = 0; l < table.columns.size() / 2; l++) {
-
-//                            int column_idx = random.nextInt(table.columns.size());
-//                            String column_str = table.tableName + "." + table.columns.get(column_idx).columnName;
-//                            while (meta_data.read_columns.contains(column_str) || column_str.equals(meta_data.partition_column)) { // 过滤相同列和分区列
-//                                column_idx = random.nextInt(table.columns.size());
-//                                column_str = table.tableName + "." + table.columns.get(column_idx).columnName;
-//                            }
-//                            meta_data.read_columns.add(column_str);
-//                            break;
-
-//                            }
-//                            for (int l = 0; l < table1.columns.size() / 2; l++) {
-//                                int column_idx = random.nextInt(table1.columns.size());
-//                                String column1_str = table1.tableName + "." + table1.columns.get(column_idx).columnName;
-//                                while (meta_data.read_columns.contains(column1_str) || column1_str.equals(meta_data.partition_column)) { // 过滤相同列和分区列
-//                                    column_idx = random.nextInt(table1.columns.size());
-//                                    column1_str = table1.tableName + "." + table1.columns.get(column_idx).columnName;
-//                                }
-//                                meta_data.read_columns.add(column1_str);
-//                            }
                         }
                     }
                 }
@@ -218,15 +187,6 @@ public class Workload {
         Meta_Data meta_data = generate_read_key(num, cross_ratio, execution_count, random_global, is_join);
         StringBuilder sb = new StringBuilder();
         sb.append("SELECT COUNT(*)");
-//        for (int i = 0; i < meta_data.read_columns.size(); i++) {
-//            sb.append(" COUNT(");
-//            sb.append(meta_data.read_columns.get(i));
-//            sb.append(")");
-//            if (i != meta_data.read_columns.size() - 1) {
-//                sb.append(", ");
-//            }
-//        }
-//        sb.append("\n");
         sb.append(" FROM ");
         if (!is_join) { // 只读一张表
             sb.append(meta_data.db_table_name());
@@ -283,7 +243,7 @@ class Meta_Data {
     }
 
     public String db_table_name(){
-        return database_name + "." + table_name;
+        return table_name;
     }
 }
 
@@ -300,15 +260,15 @@ class Join_Table{
     }
 
     public String left_table_name(){
-        return database_name + "." + left_table_name;
+        return left_table_name;
     }
     public String right_table_name(){
-        return database_name + "." + right_table_name;
+        return right_table_name;
     }
     public String left_table_column_name(){
-        return database_name + "." + left_table_column;
+        return left_table_column;
     }
     public String right_table_column_name(){
-        return database_name + "." + right_table_column;
+        return right_table_column;
     }
 }

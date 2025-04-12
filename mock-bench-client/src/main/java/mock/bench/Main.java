@@ -36,8 +36,8 @@ public class Main {
          loadConfig();
 
         // 获取Tpch DDL
-        Workload_DDL.loadTables(dbInformation, ptInformation);
-        System.out.println("Tables: " + Workload_DDL.tables);
+        Workload_ddl.loadTables(dbInformation, ptInformation);
+        System.out.println("Tables: " + Workload_ddl.tables);
 
 
          // 初始化客户端
@@ -52,12 +52,18 @@ public class Main {
          // 提交多个任务到线程池
          for (int i = 0; i < threadPoolSize; i++) {
              scheduler.scheduleAtFixedRate(
-                     Main::workload_simulate,     // 任务
+                     Main::workloadSimulate,     // 任务
                      0,                                                  // 初始延迟
                      taskIntervalTime,                   // 任务间隔
                      TimeUnit.MILLISECONDS     // 时间单位
              );
          }
+         scheduler.scheduleAtFixedRate(
+                    Main::throughputSatistic,     // 任务
+                    0,                                                  // 初始延迟
+                    10,                   // 任务间隔
+                    TimeUnit.SECONDS     // 时间单位
+         );
 
          // 添加关闭钩子
          Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -67,14 +73,12 @@ public class Main {
 
     private static AtomicBoolean isRunning = new AtomicBoolean(true); // 使用 AtomicBoolean
 
-    public static void workload_simulate() {
-        // 检查是否达到最大执行次数
+    public static void workloadSimulate() {
+        // 检查是否达到最大执行时间
         long endTime = System.currentTimeMillis();
         if ((endTime - startTime) / 1000 > maxExecutionsTime) {
-            if (isRunning.compareAndSet(true, false)) { // CAS 操作，确保只执行一次
-                System.out.println("Total executed " + executionCount + " times, Cross Ratio: "
-                        + String.format("%.3f", (double) cross_num / executionCount));
-            }
+            if (isRunning.compareAndSet(true, false)) // CAS 操作，确保只执行一次
+                System.out.println("Total executed " + executionCount + " times, Cross Ratio: " + String.format("%.3f", cross_num / executionCount));
             stopScheduler(); // 停止调度器
             return;
         }
@@ -93,6 +97,17 @@ public class Main {
             if (executionCount % 10000 == 0)
                 System.out.println("Executed " + executionCount + " times, Cross Ratio: " + String.format("%.3f", (double) cross_num / executionCount));
         } catch (Exception e) {}
+    }
+
+    public static void throughputSatistic() {
+        long endTime = System.currentTimeMillis();
+        if ((endTime - startTime) / 1000 > maxExecutionsTime) {
+            stopScheduler(); // 停止调度器
+            return;
+        }
+        // 执行任务逻辑
+        Throughput throughput = new Throughput();
+        throughput.throughputCalculate(dbInformation);
     }
 
     // 停止调度器
