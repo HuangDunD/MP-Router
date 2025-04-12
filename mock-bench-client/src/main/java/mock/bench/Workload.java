@@ -182,8 +182,8 @@ public class Workload {
         return meta_data;
     }
 
-    public String generate_read(int num, double cross_ratio, int execution_count, Random random_global) {
-        boolean is_join = random_global.nextDouble() % 1.0 < 0.3; // 50%概率选择JOIN
+    public String generate_read(int num, double cross_ratio, int execution_count, Random random_global, double join_ratio) {
+        boolean is_join = random_global.nextDouble() % 1.0 < join_ratio; // 50%概率选择JOIN
         Meta_Data meta_data = generate_read_key(num, cross_ratio, execution_count, random_global, is_join);
         StringBuilder sb = new StringBuilder();
         sb.append("SELECT COUNT(*)");

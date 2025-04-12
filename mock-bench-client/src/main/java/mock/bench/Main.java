@@ -30,6 +30,7 @@ public class Main {
     private static double cross_num; // 统计跨亲和类和同一亲和类的数量
     private static HashMap<String, String> dbInformation = new HashMap<>(); // 数据库连接信息
     private static HashMap<String, Integer> ptInformation = new HashMap<>(); // 亲和性类和分区构建信息
+    private static double joinRatio;
 
     public static void main(String[] args) {
         // // 加载配置文件 TODO
@@ -90,7 +91,7 @@ public class Main {
             message = workload.generate_write(writeCount, crossRatio, executionCount, random_global);
             Client.sendMessage(message);
             executionCount++;
-            message = workload.generate_read(writeCount, crossRatio, executionCount, random_global);
+            message = workload.generate_read(writeCount, crossRatio, executionCount, random_global, joinRatio);
             Client.sendMessage(message);
             cross_num += workload.cross_num;
             executionCount++;
@@ -130,6 +131,7 @@ public class Main {
             taskIntervalTime = Integer.parseInt(properties.getProperty("task_interval_time", "5"));
             writeCount = Integer.parseInt(properties.getProperty("write_count", "5"));
             crossRatio = Double.parseDouble(properties.getProperty("cross_ratio", "0.2"));
+            joinRatio = Double.parseDouble(properties.getProperty("join_ratio", "0.2"));
             // 亲和性类和分区构建信息
             ptInformation.put("affinity_class_num", Integer.parseInt(properties.getProperty("affinity_class_num", "8")));
             ptInformation.put("affinity_class_partition_num", Integer.parseInt(properties.getProperty("affinity_class_partition_num", "1000")));
