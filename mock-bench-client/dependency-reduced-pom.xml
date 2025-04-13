@@ -16,9 +16,25 @@
               <goal>shade</goal>
             </goals>
             <configuration>
+              <finalName>mock-bench-online</finalName>
               <transformers>
                 <transformer>
-                  <mainClass>mock.bench.Main</mainClass>
+                  <mainClass>mock.bench.Online_load</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+          <execution>
+            <id>shade-offline</id>
+            <phase>package</phase>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <finalName>mock-bench-offline</finalName>
+              <transformers>
+                <transformer>
+                  <mainClass>mock.bench.Offline_load</mainClass>
                 </transformer>
               </transformers>
             </configuration>

@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static mock.bench.Client.closeResources;
 
-public class Main {
+public class Online_load {
     private static ScheduledExecutorService scheduler;
     private static int executionCount = 0; // 记录当前执行次数
     private static int maxExecutionsTime; // 最大执行次数
@@ -38,7 +38,7 @@ public class Main {
 
         // 获取Tpch DDL
         Workload_ddl.loadTables(dbInformation, ptInformation);
-        System.out.println("Tables: " + Workload_ddl.tables);
+//        System.out.println("Tables: " + Workload_ddl.tables);
 
 
          // 初始化客户端
@@ -53,14 +53,14 @@ public class Main {
          // 提交多个任务到线程池
          for (int i = 0; i < threadPoolSize; i++) {
              scheduler.scheduleAtFixedRate(
-                     Main::workloadSimulate,     // 任务
+                     Online_load::workloadSimulate,     // 任务
                      0,                                                  // 初始延迟
                      taskIntervalTime,                   // 任务间隔
                      TimeUnit.MILLISECONDS     // 时间单位
              );
          }
          scheduler.scheduleAtFixedRate(
-                    Main::throughputSatistic,     // 任务
+                    Online_load::throughputSatistic,     // 任务
                     0,                                                  // 初始延迟
                     10,                   // 任务间隔
                     TimeUnit.SECONDS     // 时间单位
@@ -153,8 +153,6 @@ public class Main {
             JsonObject jsonObject = JsonParser.parseReader(fileReader).getAsJsonObject();
             JsonObject ycsbObject = jsonObject.getAsJsonObject("ycsb");
             ptInformation.put("key_cnt_per_partition", ycsbObject.get("key_cnt_per_partition").getAsInt());
-//            keyCntPerPartition = ycsbObject.get("key_cnt_per_partition").getAsInt();
-//            System.out.println("key_cnt_per_partition: " + keyCntPerPartition);
         } catch (IOException e) {
             e.printStackTrace();
         }

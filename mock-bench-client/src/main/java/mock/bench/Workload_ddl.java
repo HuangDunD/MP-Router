@@ -82,7 +82,6 @@ class Table {
             affinity_class_max_key_num = 1000;
         }
         this.affinity_class_num = affinity_class_num;
-        System.out.println(rowCount + " " + affinity_class_max_key_num);
         for (int i = 0; i < rowCount; i += affinity_class_max_key_num) { // init affinity_classes
             affinity_classes.add(new Affinity_Class(i, min(i + affinity_class_max_key_num, rowCount), key_cnt_per_partition));
         }
@@ -118,17 +117,9 @@ class Column {
         this.columnType = columnType.toUpperCase();
     }
 
-//    public boolean IsChar(){
-//        return columnType.contains("CHAR") || columnType.contains("VARCHAR");
-//    }
-
     public boolean IsInt(){
         return columnType.contains("INT") || columnType.contains("INTEGER") || columnType.contains("SMALLINT") || columnType.contains("BIGINT");
     }
-
-//    public boolean IsDouble(){
-//        return columnType.contains("DOUBLE") || columnType.contains("FLOAT") || columnType.contains("REAL") || columnType.contains("DECIMAL");
-//    }
 
     @Override
     public String toString() {
