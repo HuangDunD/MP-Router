@@ -31,6 +31,7 @@ public class Offline_load {
         // 加载配置文件
         loadConfig();
         Workload_ddl.loadTables(dbInformation, ptInformation);
+        System.out.println("Tables: " + Workload_ddl.tables);
 
         // 初始化调度器
         scheduler = Executors.newScheduledThreadPool(threadPoolSize);

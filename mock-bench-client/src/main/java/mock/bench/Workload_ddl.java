@@ -99,7 +99,7 @@ class Table {
         for (int i = 0; i < affinity_classes.size(); i++) {
             Affinity_Class ac = affinity_classes.get(i);
             sb.append("\n   Affinity Class ").append(i).append(": ");
-            sb.append("Partition Num: ").append(ac.partition_num);
+//            sb.append("Partition Num: ").append(ac.partition_num);
 //            sb.append("Key Start List: ").append(ac.key_start_list).append("\n");
 //            sb.append("Key Num List: ").append(ac.key_num_list).append("\n");
         }
@@ -183,7 +183,7 @@ public class Workload_ddl {
         if (dbInformation.get("workload_type").equals("tpch")){
             workload_type = "tpch";
             loadDDL();
-            Pattern tablePattern = Pattern.compile("CREATE TABLE (\\w+)\\s*\\((.*?)\\)\\s*DISTRIBUTED RANDOMLY;", Pattern.DOTALL);
+            Pattern tablePattern = Pattern.compile("CREATE TABLE (\\w+)\\s*\\((.*?)\\)\\s*DISTRIBUTED (.*?);", Pattern.DOTALL);
             Matcher tableMatcher = tablePattern.matcher(sql);
             while (tableMatcher.find()) {
                 String tableName = tableMatcher.group(1);

@@ -186,9 +186,9 @@ public class Workload {
         boolean is_join = random_global.nextDouble() % 1.0 < join_ratio; // 50%概率选择JOIN
         Meta_Data meta_data = generate_read_key(num, cross_ratio, execution_count, random_global, is_join);
         StringBuilder sb = new StringBuilder();
-        sb.append("SELECT COUNT(*)");
-        sb.append(" FROM ");
         if (!is_join) { // 只读一张表
+            sb.append("SELECT COUNT(*)");
+            sb.append(" FROM ");
             sb.append(meta_data.db_table_name());
             sb.append("\n");
             sb.append("WHERE ");
@@ -202,6 +202,8 @@ public class Workload {
             }
             sb.append(");");
         } else {
+            sb.append("SELECT *");
+            sb.append(" FROM ");
             sb.append(meta_data.join_table.left_table_name());
             sb.append(" JOIN ");
             sb.append(meta_data.join_table.right_table_name());
