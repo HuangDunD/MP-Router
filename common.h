@@ -13,6 +13,7 @@ extern double CrossNodeAccessRatio;
 using page_id_t = int32_t;    // page id type
 using frame_id_t = int32_t;  // frame id type
 using table_id_t = int32_t;         // table id type
+using column_id_t = int32_t;       // column id type
 using itemkey_t = uint64_t;         // Data item key type, used in DB tables
 using partition_id_t = int32_t;     // partition id type
 using lock_t = uint64_t;      // Lock type

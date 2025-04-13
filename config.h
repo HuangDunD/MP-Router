@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 /*********************** For common **********************/
 
 // ! pay attention: need modify this when use different workload
@@ -17,8 +18,9 @@
 #define MaxComputeNodeCount 128
 
 // 定义所跑的workload 0:smallbank 1:tpcc
-extern int WORKLOAD_MODE;
+#define WORKLOAD_MODE 1 // 0: ycsb 1: tpch
 
+extern std::string conninfo;
 extern int ComputeNodeCount;
 extern uint64_t ATTEMPTED_NUM;
 extern double CrossNodeAccessRatio;
