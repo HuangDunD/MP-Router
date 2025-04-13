@@ -22,7 +22,7 @@ public class Offline_load {
     private static HashMap<String, String> dbInformation = new HashMap<>(); // 数据库连接信息
     private static HashMap<String, Integer> ptInformation = new HashMap<>(); // 亲和性类和分区构建信息
     private static double joinRatio;
-    private static String filePath = "../offline_workload.txt";
+    private static String filePath;
 
     // 线程安全的消息队列
     private static final BlockingQueue<String> messageQueue = new LinkedBlockingQueue<>();
@@ -157,6 +157,7 @@ public class Offline_load {
             properties.load(input);
             // 读取参数
             maxExecutionsTimes = Integer.parseInt(properties.getProperty("max_executions_times", "1000000"));
+            filePath = properties.getProperty("offline_file_path", "../offline_workload.txt");
             threadPoolSize = Integer.parseInt(properties.getProperty("thread_pool_size", "1"));
             writeCount = Integer.parseInt(properties.getProperty("write_count", "5"));
             crossRatio = Double.parseDouble(properties.getProperty("cross_ratio", "0.2"));
