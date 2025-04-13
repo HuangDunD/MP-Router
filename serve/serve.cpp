@@ -10,22 +10,24 @@
 
 #include "parse.h"
 #include "metis_partitioner.h"
+#include "queryplan_cardinality.h"
+#include "db_meta.h"
 
 #define PORT 8500       // Port number to listen on
 #define BUFFER_SIZE 1024 // Buffer size for receiving data
 
 NewMetis metis;
-
+TPCHMeta* TPCH_META;
 std::atomic<int> send_times = 0;
 
 // Function to handle processing in a separate thread
 void process_client_data(const std::string &data, int socket_fd) {
-    std::vector<int> region_ids;
-
-
+    
     std::thread::id this_id = std::this_thread::get_id();
 
-
+#if WORKLOAD_MODE == 0
+    // YCSB workload
+    std::vector<int> region_ids;
     ParseYcsbKey(data, region_ids); // Assuming ParseYcsbKey is thread-safe or only uses local/stack variables
 
     // Print Region IDs (Consider adding a mutex for std::cout if output gets interleaved)
@@ -40,11 +42,78 @@ void process_client_data(const std::string &data, int socket_fd) {
     }
     //std::cout << ids_ << std::endl;
 
-
     metis.build_internal_graph(region_ids); // Call the graph building function
+#elif WORKLOAD_MODE == 1
+    // TPCH workload
+    SQLInfo sql_info = parseTPCHSQL(data);
+    if(sql_info.type == SQLType::SELECT) {
+        std::cout << "[Thread " << this_id << "] Received SELECT statement." << std::endl;
+        assert(sql_info.tableNames.size() == 1);
+        assert(sql_info.columnNames.size() == 1);
+        std::string table_name = sql_info.tableNames[0];
+        std::string column_name = sql_info.columnNames[0];
+        table_id_t table_id = TPCH_META->tablenameToID.at(table_name);
+        column_id_t column_id = TPCH_META->columnNameToID[table_id].at(column_name);
+        if(TPCH_META->partition_column_ids[table_id] != column_id){ 
+            // query key is not the partition key
+            std::cout << "[Thread " << this_id << "] Query key is not the partition key." << std::endl;
+        }
+        else{
+            std::vector<int> region_ids;
+            for(const auto &key: sql_info.keyVector) {
+                assert(key >= 0);
+                int region_id = key / REGION_SIZE; // Calculate region_id
+                region_ids.push_back(region_id);
+            }
+            metis.build_internal_graph(region_ids); // Call the graph building function
+        }
+        
+    } else if(sql_info.type == SQLType::UPDATE) {
+        std::cout << "[Thread " << this_id << "] Received UPDATE statement." << std::endl;
+        assert(sql_info.tableNames.size() == 1);
+        assert(sql_info.columnNames.size() == 1);
+        std::string table_name = sql_info.tableNames[0];
+        std::string column_name = sql_info.columnNames[0];
+        table_id_t table_id = TPCH_META->tablenameToID.at(table_name);
+        column_id_t column_id = TPCH_META->columnNameToID[table_id].at(column_name);
+        if(TPCH_META->partition_column_ids[table_id] != column_id){ 
+            // query key is not the partition key
+            std::cout << "[Thread " << this_id << "] Query key is not the partition key." << std::endl;
+        }
+        else{
+            std::vector<int> region_ids;
+            for(const auto &key: sql_info.keyVector) {
+                assert(key >= 0);
+                int region_id = key / REGION_SIZE; // Calculate region_id
+            }
+            metis.build_internal_graph(region_ids); // Call the graph building function
+        }
+    } else if(sql_info.type == SQLType::JOIN) {
+        std::cout << "[Thread " << this_id << "] Received JOIN statement." << std::endl;
+        assert(sql_info.tableNames.size() == 2);
+        assert(sql_info.columnNames.size() == 2);
+        std::string table1_name = sql_info.tableNames[0];
+        std::string table2_name = sql_info.tableNames[1];
+        std::string column1_name = sql_info.columnNames[0];
+        std::string column2_name = sql_info.columnNames[1];
+        table_id_t table1_id = TPCH_META->tablenameToID.at(table1_name);
+            table_id_t table2_id = TPCH_META->tablenameToID.at(table2_name);
+        int cardinality = get_query_plan_cardinality(data, conninfo);
+        if (cardinality != -1) {
+            std::cout << "[Thread " << this_id << "] Estimated cardinality: " << cardinality << std::endl;
+            TPCH_META->mutex_partition_column_ids.lock();
+            // Update partition_column_cardinality based on the cardinality
+            TPCH_META->table_column_cardinality[table1_id][TPCH_META->columnNameToID[table1_id].at(column1_name)] += cardinality;
+            TPCH_META->table_column_cardinality[table2_id][TPCH_META->columnNameToID[table2_id].at(column2_name)] += cardinality; 
+        }
+    } else {
+        std::cerr << "[Thread " << this_id << "] Unknown SQL type." << std::endl;
+    }
 
+#endif
 
-    ssize_t bytes_sent = send(socket_fd, ids_.c_str(), ids_.length(), 0);
+    // Send response back to the client
+    ssize_t bytes_sent = send(socket_fd, "OK", 2, 0);
     send_times++;
     if (send_times % 5000 == 0) {
         std::cout << "[Thread " << this_id << "] Sent response to socket " << socket_fd
@@ -66,6 +135,12 @@ int main() {
     auto conf = json_config.get("ycsb");
     REGION_SIZE = conf.get("key_cnt_per_partition").get_int64();
 
+    // load db meta
+#if WORKLOAD_MODE == 1 
+    // TPCH workload
+    TPCH_META = new TPCHMeta();
+#endif
+    
     // Determine number of threads (e.g., based on hardware)
     unsigned int num_threads = std::thread::hardware_concurrency() - 1; // Leave one thread for the main thread
     if (num_threads <= 0) {

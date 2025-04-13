@@ -75,6 +75,9 @@
         "thread": "cpp",
         "typeinfo": "cpp",
         "valarray": "cpp",
-        "variant": "cpp"
-    }
+        "variant": "cpp",
+        "pqxx": "cpp",
+        "complex": "cpp"
+    },
+    "java.configuration.updateBuildConfiguration": "interactive"
 }

@@ -51,6 +51,31 @@ else()
     message(FATAL_ERROR "GKlib library not found in user directory!")
 endif()
 
+# 查找 PQXX 库
+find_library(PQXX_LIBRARY
+    NAMES pqxx libpqxx
+    PATHS
+    /usr/local/lib
+    PATH_SUFFIXES lib
+)
+if (PQXX_LIBRARY) 
+    message(STATUS "Found PQXX library: ${PQXX_LIBRARY}")
+else()
+    message(FATAL_ERROR "PQXX library not found in /usr/local/lib directory!")
+endif()
+
+# 查找 libpq
+find_library(PQ_LIBRARY 
+    pq PATHS 
+    /usr/lib /usr/lib64 /usr/local/lib 
+    PATH_SUFFIXES lib
+)
+if (NOT PQ_LIBRARY)
+    message(FATAL_ERROR "libpq (PostgreSQL client) not found!")
+else()
+    message(STATUS "Found libpq: ${PQ_LIBRARY}")
+endif()
+
 include_directories(./
         core
         thirdparty
