@@ -96,13 +96,13 @@ class Table {
         }
         // 输出亲和性类信息
         sb.append("Affinity Classes: ").append(affinity_class_num);
-        for (int i = 0; i < affinity_classes.size(); i++) {
-            Affinity_Class ac = affinity_classes.get(i);
-            sb.append("\n   Affinity Class ").append(i).append(": ");
+//        for (int i = 0; i < affinity_classes.size(); i++) {
+//            Affinity_Class ac = affinity_classes.get(i);
+//            sb.append("\n   Affinity Class ").append(i).append(": ");
 //            sb.append("Partition Num: ").append(ac.partition_num);
 //            sb.append("Key Start List: ").append(ac.key_start_list).append("\n");
 //            sb.append("Key Num List: ").append(ac.key_num_list).append("\n");
-        }
+//        }
         sb.append("\n");
         return sb.toString();
     }

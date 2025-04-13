@@ -160,22 +160,25 @@ public class Workload {
             for (int i = 0; i < Workload_ddl.tables.size(); i++) {
                 Table table1 = Workload_ddl.tables.get(table_idx1.get(i)); // 每次随机选择一张表
                 if (table1.tableName.equals(table.tableName)) continue; // 跳过自身JOIN
+                join_table.right_table_name = table1.tableName;
+                join_table.left_table_column = table.tableName + "." + table.partition_column;
+                join_table.right_table_column = table1.tableName + "." + table1.partition_column;
 
-                for (int j = 0; j < table.columns.size(); j++) { // 遍历左表的列
-                    Column column = table.columns.get(j);
-                    if (column.columnName.equals(meta_data.partition_column)) continue; // 跳过分区列
-
-                    for (int k = 0; k < table1.columns.size(); k++) {
-                        Column column1 = table1.columns.get(k);
-                        if (column1.columnName.equals(table1.partition_column)) continue; // 跳过分区列
-
-                        if (type_equal(column, column1)) {
-                            join_table.right_table_name = table1.tableName;
-                            join_table.left_table_column = table.tableName + "." + column.columnName;
-                            join_table.right_table_column = table1.tableName + "." + column1.columnName;
-                        }
-                    }
-                }
+//                for (int j = 0; j < table.columns.size(); j++) { // 遍历左表的列
+//                    Column column = table.columns.get(j);
+//                    if (column.columnName.equals(meta_data.partition_column)) continue; // 跳过分区列
+//
+//                    for (int k = 0; k < table1.columns.size(); k++) {
+//                        Column column1 = table1.columns.get(k);
+//                        if (column1.columnName.equals(table1.partition_column)) continue; // 跳过分区列
+//
+//                        if (type_equal(column, column1)) {
+//                            join_table.right_table_name = table1.tableName;
+//                            join_table.left_table_column = table.tableName + "." + column.columnName;
+//                            join_table.right_table_column = table1.tableName + "." + column1.columnName;
+//                        }
+//                    }
+//                }
             }
             meta_data.join_table = join_table;
         }
