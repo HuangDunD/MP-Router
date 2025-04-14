@@ -5,7 +5,7 @@
 #include <string>
 #include <regex>
 
-int get_query_plan_cardinality(const std::string& query, const std::string& conninfo) {
+long long get_query_plan_cardinality(const std::string& query, const std::string& conninfo) {
     try {
         pqxx::connection conn(conninfo);
         if (!conn.is_open()) {
@@ -20,14 +20,14 @@ int get_query_plan_cardinality(const std::string& query, const std::string& conn
         std::string explain_query = "EXPLAIN " + query;
         pqxx::result result = txn.exec(explain_query);
 
-        int cardinality = -1;
+        long long cardinality = -1;
         std::regex rows_regex(R"(rows=(\d+))");
         std::smatch match;
 
         for (const auto& row : result) {
             std::string line = row[0].as<std::string>();
             if (std::regex_search(line, match, rows_regex)) {
-                cardinality = std::stoi(match[1].str());
+                cardinality = std::stoll(match[1].str());
                 break;
             }
         }

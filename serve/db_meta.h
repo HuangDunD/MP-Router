@@ -11,7 +11,7 @@ public:
     static const std::unordered_map<std::string, int> tablenameToID;
     static const std::vector<std::unordered_map<int, std::string>> columnIDToName;
     static const std::vector<std::unordered_map<std::string, int>> columnNameToID;
-    std::vector<std::vector<int>> table_column_cardinality;
+    std::vector<std::vector<long long>> table_column_cardinality;
     std::vector<int> partition_column_ids = std::vector<int>(8, 0); // 8 tables, initialized to 0
     std::mutex mutex_partition_column_ids; // Mutex for thread-safe access
     TPCHMeta() {
@@ -20,6 +20,24 @@ public:
             table_column_cardinality[i].resize(columnIDToName[i].size(), 0);
         }
     };
+
+    void ReadColumnIDFromFile(std::string fname) {
+        std::ifstream infile(fname);
+        if (!infile.is_open()) {
+            std::cerr << "Error opening file: " << fname << std::endl;
+            return;
+        }
+        std::string line;
+        for(int i = 0; i < 8; ++i) {
+            std::getline(infile, line);
+            std::istringstream iss(line);
+            int column_id;
+            if (!(iss >> column_id)) { break; } // Error
+            partition_column_ids[i] = column_id;
+            std::cout << "Table " << i << " partition column id: " << column_id << std::endl;
+        }
+        infile.close();
+    }
 };
 
 const std::unordered_map<int, std::string> TPCHMeta::tableIDToName = {

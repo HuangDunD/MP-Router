@@ -23,6 +23,43 @@
                 }
             ]
         },
-
+        {
+            "name": "(gdb)parse_test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/serve/test/parse_test",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build/serve/test",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "(gdb)offline_analyze",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/serve/offline_analyzer",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build/serve/",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        }
     ]
 }

@@ -43,26 +43,30 @@ void ParseYcsbKey(const std::string& sql, std::vector<int>& region_ids) {
 
 SQLInfo parseTPCHSQL(const std::string& sql) {
     SQLInfo info;
-    std::regex selectPattern(R"(.*SELECT\s+.*\s+FROM\s+(\w+)\.(\w+)\s*(?:WHERE\s+(?:\w+\.)?(\w+)\s+IN\s+\(([^)]+)\))?)");
-    std::regex joinPattern(R"(.*JOIN\s+((?:\w+\.)?\w+)\s+ON\s+(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+))");
-    std::regex updatePattern(R"(.*UPDATE\s+(\w+)\.(\w+)(?:\s*\*+\s*)*\s+WHERE\s+(?:\w+\.)?(\w+)\s+IN\s+\(([^)]+)\))");
-
+    std::regex selectPattern(R"(SELECT\s+.*?FROM\s+(\w+)(?:\s+WHERE\s+(?:\w+\.)?(\w+)\s+IN\s*\(([^)]+)\))?)", std::regex::icase);
+    std::regex joinPattern(R"(.*JOIN\s+((?:\w+\.)?\w+)\s+ON\s+(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+))", std::regex::icase);
+    std::regex updatePattern(R"(.*UPDATE\s+(\w+)\s+[\s\S]*?WHERE\s+(\w+)\s+IN\s*\(([^)]+)\))", std::regex::icase);
     std::smatch match;
 
     if (std::regex_search(sql, match, joinPattern)) {
         // 处理 JOIN 子句的表名和列名
         info.tableNames.push_back(match[2]);  // 第一个表名
         info.tableNames.push_back(match[4]);  // 第二个表名
-        info.columnNames.push_back(match[3]);  // 第一个表的列名
-        info.columnNames.push_back(match[5]);  // 第二个表的列名
+        // 把列名转为小写
+        std::string column1 = match[3];
+        std::string column2 = match[5];
+        std::transform(column1.begin(), column1.end(), column1.begin(), ::tolower);
+        std::transform(column2.begin(), column2.end(), column2.begin(), ::tolower);
+        info.columnNames.push_back(column1);  // 第一个表的列名
+        info.columnNames.push_back(column2);  // 第二个表的列名
         info.type = SQLType::JOIN;
     } else if (std::regex_search(sql, match, selectPattern)) {
         // 处理 FROM 子句的表名
-        info.tableNames.push_back(match[2]);
+        info.tableNames.push_back(match[1]);
         if (match.length(3) > 0) {
             // 处理 WHERE 子句的列名
-            info.columnNames.push_back(match[3]);
-            std::string keys = match[4];
+            info.columnNames.push_back(match[2]);
+            std::string keys = match[3];
             std::stringstream ss(keys);
             std::string key;
             while (std::getline(ss, key, ',')) {
@@ -71,10 +75,10 @@ SQLInfo parseTPCHSQL(const std::string& sql) {
         }
         info.type = SQLType::SELECT;
     } else if (std::regex_search(sql, match, updatePattern)) {
-        info.tableNames.push_back(match[2]);
+        info.tableNames.push_back(match[1]);
         if (match.length(3) > 0) {
-            info.columnNames.push_back(match[3]);
-            std::string keys = match[4];
+            info.columnNames.push_back(match[2]);
+            std::string keys = match[3];
             std::stringstream ss(keys);
             std::string key;
             while (std::getline(ss, key, ',')) {
