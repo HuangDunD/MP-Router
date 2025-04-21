@@ -59,12 +59,14 @@ public class Online_load {
                      TimeUnit.MILLISECONDS     // 时间单位
              );
          }
-         scheduler.scheduleAtFixedRate(
-                    Online_load::throughputSatistic,     // 任务
-                    0,                                                  // 初始延迟
-                    10,                   // 任务间隔
-                    TimeUnit.SECONDS     // 时间单位
-         );
+
+         if (dbInformation.get("connect_to_database").equals("true"))
+             scheduler.scheduleAtFixedRate(
+                        Online_load::throughputSatistic,     // 任务
+                        0,                                                  // 初始延迟
+                        10,                   // 任务间隔
+                        TimeUnit.SECONDS     // 时间单位
+             );
 
          // 添加关闭钩子
          Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -136,6 +138,7 @@ public class Online_load {
             ptInformation.put("affinity_class_num", Integer.parseInt(properties.getProperty("affinity_class_num", "8")));
             ptInformation.put("affinity_class_partition_num", Integer.parseInt(properties.getProperty("affinity_class_partition_num", "1000")));
             // 数据库连接信息
+            dbInformation.put("connect_to_database", properties.getProperty("connect_to_database", "false"));
             dbInformation.put("workload_type", properties.getProperty("workload_type"));
             dbInformation.put("database_host", properties.getProperty("database_host"));
             dbInformation.put("database_port", properties.getProperty("database_port"));

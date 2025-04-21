@@ -172,6 +172,29 @@ public class Workload_ddl {
         }
     }
 
+    private static void fetchTableRowSizeOffline() {
+        for (Table table : tables) {
+            String table_name = table.tableName.toLowerCase();
+            if (table_name.equals("lineitem")) {
+                table.rowCount = 6001215;
+            } else if (table_name.equals("orders")) {
+                table.rowCount = 1500000;
+            } else if (table_name.equals("customer")) {
+                table.rowCount = 150000;
+            } else if (table_name.equals("nation")) {
+                table.rowCount = 25;
+            } else if (table_name.equals("region")) {
+                table.rowCount = 5;
+            } else if (table_name.equals("part")) {
+                table.rowCount = 200000;
+            } else if (table_name.equals("partsupp")) {
+                table.rowCount = 800000;
+            } else if (table_name.equals("supplier")) {
+                table.rowCount = 10000;
+            }
+        }
+    }
+
     private static void initTables(HashMap<String, Integer> ptInformation) {
         for (Table table : tables) {
             table.initWriteAndPartitionColumns();
@@ -198,7 +221,10 @@ public class Workload_ddl {
                 }
                 tables.add(table);
             }
-            fetchTableRowSize(dbInformation);             // 获取每个表的行数
+            if (dbInformation.get("connect_to_database").equals("true"))
+                fetchTableRowSize(dbInformation);             // 获取每个表的行数
+            else
+                fetchTableRowSizeOffline();
             initTables(ptInformation);       // 初始化每个表的亲和性类
         } else if (dbInformation.get("workload_type").equals("ycsb")) { // TODO: 完善ycsb
             workload_type = "ycsb";

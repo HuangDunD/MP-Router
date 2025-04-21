@@ -22,6 +22,7 @@ public class Workload {
         Table table = Workload_ddl.tables.get(table_idx.get(shuffle_list_idx));
         while (table.rowCount < 8000) { // 表的行数小于8000的不要点写
             shuffle_list_idx++;
+//            System.out.println(shuffle_list_idx);
             table = Workload_ddl.tables.get(table_idx.get(shuffle_list_idx));
         }
         Meta_Data meta_data = new Meta_Data(Workload_ddl.workload_type, table.tableName, table.write_column, table.partition_column);
