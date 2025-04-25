@@ -9,120 +9,214 @@
 #include "threadpool.h" // Include your thread pool header
 
 #include "parse.h"
-#include "metis_partitioner.h"
 #include "queryplan_cardinality.h"
 #include "db_meta.h"
+#include "region.h"
+#include "metis_partitioner.h"
 
 #define PORT 8500       // Port number to listen on
-#define BUFFER_SIZE 1024 // Buffer size for receiving data
+#define BUFFER_SIZE 4096000 // Buffer size for receiving data
 
 NewMetis metis;
-TPCHMeta* TPCH_META;
+TPCHMeta *TPCH_META;
 std::atomic<int> send_times = 0;
 
 // Function to handle processing in a separate thread
 std::ofstream log_stream("server_log.txt", std::ios::app);
+
 void process_client_data(const std::string &data, int socket_fd) {
-    
     std::thread::id this_id = std::this_thread::get_id();
-    log_message("Socket_fd " + std::to_string(socket_fd) + " processing data: " + data, log_stream);
-    
+    // Use a shorter representation for potentially long SQL in logs
+    std::string truncated_data = data.substr(0, 150) + (data.length() > 150 ? "..." : "");
+    log_message("Socket " + std::to_string(socket_fd) + " processing: " + truncated_data, log_stream);
+
+    // Vector to hold the final combined IDs to pass to metis
+    std::vector<uint64_t> combined_region_ids;
+
 #if WORKLOAD_MODE == 0
     // YCSB workload
-    std::vector<int> region_ids;
-    ParseYcsbKey(data, region_ids); // Assuming ParseYcsbKey is thread-safe or only uses local/stack variables
-
-    // Print Region IDs (Consider adding a mutex for std::cout if output gets interleaved)
-    //std::cout << "[Thread " << this_id << "] Recived Region IDs:" << std::endl;
-    std::string ids_;
-    for (const auto &id: region_ids) {
-        if (id < 0) {
-            // Include the invalid ID in the error message
-            throw std::invalid_argument("invalid ID " + std::to_string(id));
+    // We need the raw keys first to calculate inner_region_id.
+    // Extract YCSB keys directly here instead of relying on ParseYcsbKey which calculated region_id.
+    std::vector<int> ycsb_keys;
+    try {
+        std::regex key_pattern(R"(YCSB_KEY\s*=\s*(\d+))"); // Matches YCSB_KEY = <number>
+        std::smatch matches;
+        std::string::const_iterator search_start(data.cbegin());
+        while (std::regex_search(search_start, data.cend(), matches, key_pattern)) {
+            ycsb_keys.push_back(std::stoi(matches[1].str()));
+            search_start = matches.suffix().first;
         }
-        ids_ += std::to_string(id) + " ";
-    }
-    //std::cout << ids_ << std::endl;
+        // Optional: Remove duplicates if needed
+        std::sort(ycsb_keys.begin(), ycsb_keys.end());
+        ycsb_keys.erase(std::unique(ycsb_keys.begin(), ycsb_keys.end()), ycsb_keys.end());
 
-    metis.build_internal_graph(region_ids); // Call the graph building function
+    } catch (const std::exception& e) {
+        log_message("[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] Error parsing YCSB keys: " + e.what(), log_stream);
+        goto send_response; // Skip graph build on parsing error
+    }
+
+    // Assume a default table ID for YCSB keys if not specified otherwise
+    const unsigned int ycsb_table_id = 0; // Example: table 0 for YCSB
+
+    for (const auto &key: ycsb_keys) {
+         if (key < 0) {
+              log_message("Warning: Skipping negative YCSB key " + std::to_string(key), log_stream);
+              continue;
+         }
+         if (REGION_SIZE <= 0) {
+              log_message("Error: REGION_SIZE (" + std::to_string(REGION_SIZE) + ") is not positive. Cannot calculate region ID.", log_stream);
+              // Skip further processing for this workload if REGION_SIZE is invalid
+              combined_region_ids.clear(); // Ensure we don't pass partial data
+              break;
+         }
+         // Calculate inner region ID (ensure unsigned)
+         unsigned int _inner_region_id = static_cast<unsigned int>(key / REGION_SIZE);
+
+         // Create Region object
+         Region current_region(ycsb_table_id, _inner_region_id);
+
+         // Serialize to uint64_t
+         uint64_t combined_id = current_region.serializeToUint64();
+         combined_region_ids.push_back(combined_id);
+    }
+
+    if (!combined_region_ids.empty()) {
+        // Log the combined IDs being sent
+        std::stringstream ss_ids;
+        ss_ids << "[Thread " << std::to_string(std::hash<std::thread::id>{}(this_id)) << "] YCSB Combined Region IDs (" << combined_region_ids.size() << "): ";
+        for(size_t i=0; i< std::min(combined_region_ids.size(), (size_t)5); ++i) ss_ids << combined_region_ids[i] << " "; // Log first few
+        if(combined_region_ids.size() > 5) ss_ids << "...";
+        log_message(ss_ids.str(), log_stream);
+
+        // Call graph building function
+        metis.build_internal_graph(combined_region_ids);
+    } else {
+         log_message("[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] No valid YCSB keys found or REGION_SIZE invalid.", log_stream);
+    }
+
+
 #elif WORKLOAD_MODE == 1
     // TPCH workload
-    try{
-        SQLInfo sql_info = parseTPCHSQL(data);
-        if(sql_info.type == SQLType::SELECT) {
-            // std::cout << "[Thread " << this_id << "] Received SELECT statement." << std::endl;
-            // assert(sql_info.tableNames.size() == 1);
-            // assert(sql_info.columnNames.size() == 1);
-            std::string table_name = sql_info.tableNames[0];
-            std::string column_name = sql_info.columnNames[0];
-            table_id_t table_id = TPCH_META->tablenameToID.at(table_name);
-            column_id_t column_id = TPCH_META->columnNameToID[table_id].at(column_name);
-            if(TPCH_META->partition_column_ids[table_id] != column_id){ 
-                // query key is not the partition key
-                std::cout << "[Thread " << this_id << "] Query key is not the partition key." << std::endl;
-            }
-            else{
-                std::vector<int> region_ids;
-                for(const auto &key: sql_info.keyVector) {
-                    assert(key >= 0);
-                    int region_id = key / REGION_SIZE; // Calculate region_id
-                    region_ids.push_back(region_id);
+    try {
+        SQLInfo sql_info = parseTPCHSQL(data); // Assume parseTPCHSQL is available
+
+        if (sql_info.type == SQLType::SELECT || sql_info.type == SQLType::UPDATE) {
+            std::string type_str = (sql_info.type == SQLType::SELECT) ? "SELECT" : "UPDATE";
+            // log_message("[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] Received " + type_str + " statement.", log_stream);
+
+            if (sql_info.tableNames.empty() || sql_info.columnNames.empty()) {
+                log_message("Warning: Missing table or column name in " + type_str + ". Skipping graph build.",
+                            log_stream);
+            } else if (sql_info.keyVector.empty()) {
+                // No keys provided in the WHERE clause (e.g., SELECT * FROM table;)
+                // log_message("[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] No keys found in " + type_str + " WHERE clause. Skipping graph build.", log_stream);
+            } else {
+                std::string table_name = sql_info.tableNames[0];
+                std::string column_name = sql_info.columnNames[0];
+
+                unsigned int table_id;
+                unsigned int column_id;
+                // Safely get table and column IDs
+                try {
+                    table_id = TPCHMeta::tablenameToID.at(table_name); // Use .at() for bounds checking
+                    // Ensure table_id is valid index before accessing nested maps/vectors
+                    if (table_id >= TPCHMeta::columnNameToID.size() || table_id >= TPCH_META->partition_column_ids.
+                        size()) {
+                        throw std::out_of_range(
+                            "Table ID (" + std::to_string(table_id) + ") out of range for metadata access.");
+                    }
+                    column_id = TPCHMeta::columnNameToID[table_id].at(column_name); // Use .at()
+                } catch (const std::out_of_range &oor) {
+                    log_message(
+                        "Error: Invalid table/column name ('" + table_name + "'/'" + column_name +
+                        "') or ID lookup failed. " + oor.what(), log_stream);
+                    goto send_response; // Skip processing if names/IDs are invalid
                 }
-                metis.build_internal_graph(region_ids); // Call the graph building function
-            }
-            
-        } else if(sql_info.type == SQLType::UPDATE) {
-            // std::cout << "[Thread " << this_id << "] Received UPDATE statement." << std::endl;
-            // assert(sql_info.tableNames.size() == 1);
-            // assert(sql_info.columnNames.size() == 1);
-            std::string table_name = sql_info.tableNames[0];
-            std::string column_name = sql_info.columnNames[0];
-            table_id_t table_id = TPCH_META->tablenameToID.at(table_name);
-            column_id_t column_id = TPCH_META->columnNameToID[table_id].at(column_name);
-            if(TPCH_META->partition_column_ids[table_id] != column_id){ 
-                // query key is not the partition key
-                std::cout << "[Thread " << this_id << "] Query key is not the partition key." << std::endl;
-            }
-            else{
-                std::vector<int> region_ids;
-                for(const auto &key: sql_info.keyVector) {
-                    assert(key >= 0);
-                    int region_id = key / REGION_SIZE; // Calculate region_id
-                }
-                metis.build_internal_graph(region_ids); // Call the graph building function
-            }
-        } else if(sql_info.type == SQLType::JOIN) {
-            // std::cout << "[Thread " << this_id << "] Received JOIN statement." << std::endl;
-            // assert(sql_info.tableNames.size() == 2);
-            // assert(sql_info.columnNames.size() == 2);
-            std::string table1_name = sql_info.tableNames[0];
-            std::string table2_name = sql_info.tableNames[1];
-            std::string column1_name = sql_info.columnNames[0];
-            std::string column2_name = sql_info.columnNames[1];
-            table_id_t table1_id = TPCH_META->tablenameToID.at(table1_name);
-            table_id_t table2_id = TPCH_META->tablenameToID.at(table2_name);
-            // int cardinality = get_query_plan_cardinality(data, conninfo);
-            // if (cardinality != -1) {
-            //     std::cout << "[Thread " << this_id << "] Estimated cardinality: " << cardinality << std::endl;
-            //     TPCH_META->mutex_partition_column_ids.lock();
-            //     // Update partition_column_cardinality based on the cardinality
-            //     TPCH_META->table_column_cardinality[table1_id][TPCH_META->columnNameToID[table1_id].at(column1_name)] += cardinality;
-            //     TPCH_META->table_column_cardinality[table2_id][TPCH_META->columnNameToID[table2_id].at(column2_name)] += cardinality; 
-            //     TPCH_META->mutex_partition_column_ids.unlock();
-            // }
+
+                // Check if the queried column is the partition key for that table
+                if (TPCH_META->partition_column_ids[table_id] != column_id) {
+                    log_message(
+                        "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] Query key (" +
+                        table_name + "." + column_name + ") is not the partition key for table " +
+                        std::to_string(table_id) + ". Skipping graph build.", log_stream);
+                } else {
+                    // Partition key matches, proceed to calculate combined IDs
+                    log_message(
+                        "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) +
+                        "] Query key matches partition key (" + table_name + "." + column_name +
+                        "). Processing keys...", log_stream);
+
+                    for (const auto &key: sql_info.keyVector) {
+                        if (key < 0) {
+                            log_message(
+                                "Warning: Skipping negative key " + std::to_string(key) + " for table " + table_name,
+                                log_stream);
+                            continue; // Skip negative keys
+                        }
+                        if (REGION_SIZE <= 0) {
+                            log_message(
+                                "Error: REGION_SIZE (" + std::to_string(REGION_SIZE) +
+                                ") is not positive. Cannot calculate region ID.", log_stream);
+                            combined_region_ids.clear(); // Invalidate calculation for this query
+                            break; // Stop processing keys for this query
+                        }
+
+                        // Calculate inner region ID (ensure unsigned)
+                        auto _inner_region_id = static_cast<unsigned int>(key / REGION_SIZE);
+
+                        // Create Region object using the looked-up table_id
+                        Region current_region(table_id, _inner_region_id);
+
+                        // Serialize to uint64_t
+                        uint64_t combined_id = current_region.serializeToUint64();
+                        combined_region_ids.push_back(combined_id);
+                    } // End key loop
+
+
+                    if (!combined_region_ids.empty()) {
+                        // Log the combined IDs being sent
+                        std::stringstream ss_ids;
+                        ss_ids << "[Thread " << std::to_string(std::hash<std::thread::id>{}(this_id)) <<
+                                "] TPCH Combined Region IDs (" << combined_region_ids.size() << "): ";
+                        for (size_t i = 0; i < std::min(combined_region_ids.size(), (size_t) 5); ++i)
+                            ss_ids << combined_region_ids[i] << " "; // Log first few
+                        if (combined_region_ids.size() > 5) ss_ids << "...";
+                        log_message(ss_ids.str(), log_stream);
+
+                        // Call graph building function with the vector of combined IDs
+                        metis.build_internal_graph(combined_region_ids);
+                    } else {
+                        log_message(
+                            "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) +
+                            "] No valid keys found matching partition key or REGION_SIZE invalid.", log_stream);
+                    }
+                } // End partition key match check
+            } // End check for table/column names and keys present
+        } else if (sql_info.type == SQLType::JOIN) {
+            log_message(
+                "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) +
+                "] Received JOIN statement. Graph building not implemented for JOINs.", log_stream);
+            // Existing JOIN logic (e.g., cardinality update) can remain here if needed
         } else {
-            // std::cerr << "[Thread " << this_id << "] Unknown SQL type: " << data << std::endl;
+            log_message(
+                "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) +
+                "] Unknown or unhandled SQL type received. SQL: " + truncated_data, log_stream);
         }
-    }
-    catch (const std::exception &e) {
-        std::cerr << "[Thread " << this_id << "] Error processing SQL: " << e.what() << std::endl;
+    } catch (const std::exception &e) {
+        // Catch errors during parsing or metadata lookup
+        log_message(
+            "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] Error processing SQL: " + e.what(),
+            log_stream);
+        // Depending on severity, you might want to stop or just log and continue
     }
 
-#endif
+#endif // End WORKLOAD_MODE check
 
+send_response: // Label to jump to for sending response, especially after errors
     // Send response back to the client
     ssize_t bytes_sent = send(socket_fd, "OK", 2, 0);
-    send_times++;
+    int current_send_count = send_times.fetch_add(1) + 1; // Get updated count before logging
+
     if (send_times % 5000 == 0) {
         std::cout << "[Thread " << this_id << "] Sent response to socket " << socket_fd
                 << " (" << send_times << " times)." << std::endl;
@@ -144,16 +238,16 @@ int main() {
     REGION_SIZE = conf.get("key_cnt_per_partition").get_int64();
 
     // load db meta
-#if WORKLOAD_MODE == 1 
+#if WORKLOAD_MODE == 1
     // TPCH workload
     TPCH_META = new TPCHMeta();
     // 从文件中初始化partition column_ids
     std::string fname = "./partition_column_ids.txt";
     TPCH_META->ReadColumnIDFromFile(fname);
 #endif
-    
+
     // Determine number of threads (e.g., based on hardware)
-    unsigned int num_threads = 1; // Leave one thread for the main thread
+    unsigned int num_threads = 12; // Leave one thread for the main thread
     if (num_threads <= 0) {
         num_threads = 4; // Default to 4 if hardware_concurrency is not available
     }
