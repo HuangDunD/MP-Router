@@ -19,7 +19,7 @@
               <finalName>mock-bench-online</finalName>
               <transformers>
                 <transformer>
-                  <mainClass>mock.bench.Online_load</mainClass>
+                  <mainClass>mock.bench.TpchYcsb.Online_load</mainClass>
                 </transformer>
               </transformers>
             </configuration>
@@ -34,12 +34,34 @@
               <finalName>mock-bench-offline</finalName>
               <transformers>
                 <transformer>
-                  <mainClass>mock.bench.Offline_load</mainClass>
+                  <mainClass>mock.bench.TpchYcsb.Offline_load</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+          <execution>
+            <id>shade-ExecJDBC</id>
+            <phase>package</phase>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <finalName>mock-bench-ExecJDBC</finalName>
+              <transformers>
+                <transformer>
+                  <mainClass>mock.bench.Tpcc.Tool.ExecJDBC</mainClass>
                 </transformer>
               </transformers>
             </configuration>
           </execution>
         </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-resources-plugin</artifactId>
+        <version>3.2.0</version>
+        <configuration>
+          <outputDirectory>${basedir}/target</outputDirectory>
+        </configuration>
       </plugin>
     </plugins>
   </build>

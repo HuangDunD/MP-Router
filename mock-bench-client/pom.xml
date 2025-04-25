@@ -6,7 +6,7 @@
 
     <groupId>mock.bench</groupId>
     <artifactId>mock-bench-client</artifactId>
-    <version>1.0</version>
+    <version>2.0</version>
 
     <dependencies>
         <!-- Jackson 依赖 -->
@@ -27,7 +27,21 @@
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <version>42.2.18</version>
+            <version>42.7.2</version>
+        </dependency>
+
+        <!-- Log4j 依赖 -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+            <version>2.20.0</version>
+        </dependency>
+
+        <!-- ant 依赖 -->
+        <dependency>
+            <groupId>org.apache.ant</groupId>
+            <artifactId>ant</artifactId>
+            <version>1.10.14</version> <!-- 请根据需要选择版本 -->
         </dependency>
 
     </dependencies>
@@ -37,46 +51,110 @@
     <build>
         <plugins>
             <!-- Maven Shade 插件 -->
+<!--            <plugin>-->
+<!--                <groupId>org.apache.maven.plugins</groupId>-->
+<!--                <artifactId>maven-shade-plugin</artifactId>-->
+<!--                <version>3.4.1</version>-->
+
+<!--                &lt;!&ndash; 配置 Online 主类 &ndash;&gt;-->
+<!--                <executions>-->
+<!--                    <execution>-->
+<!--                        <phase>package</phase>-->
+<!--                        <goals>-->
+<!--                            <goal>shade</goal>-->
+<!--                        </goals>-->
+<!--                        <configuration>-->
+<!--                            <finalName>mock-bench-online</finalName>-->
+<!--                            <transformers>-->
+<!--                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">-->
+<!--                                    <mainClass>mock.bench.TpchYcsb.Online_load</mainClass>-->
+<!--                                </transformer>-->
+<!--                            </transformers>-->
+<!--                        </configuration>-->
+<!--                    </execution>-->
+
+<!--                    &lt;!&ndash; 配置 Offline 主类 &ndash;&gt;-->
+<!--                    <execution>-->
+<!--                        <id>shade-offline</id>-->
+<!--                        <phase>package</phase>-->
+<!--                        <goals>-->
+<!--                            <goal>shade</goal>-->
+<!--                        </goals>-->
+<!--                        <configuration>-->
+<!--                            <finalName>mock-bench-offline</finalName>-->
+<!--                            <transformers>-->
+<!--                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">-->
+<!--                                    <mainClass>mock.bench.TpchYcsb.Offline_load</mainClass>-->
+<!--                                </transformer>-->
+<!--                            </transformers>-->
+<!--                        </configuration>-->
+<!--                    </execution>-->
+
+<!--                &lt;!&ndash; 配置 ExecJDBC 主类 &ndash;&gt;-->
+<!--                    <execution>-->
+<!--                        <id>shade-ExecJDBC</id>-->
+<!--                        <phase>package</phase>-->
+<!--                        <goals>-->
+<!--                            <goal>shade</goal>-->
+<!--                        </goals>-->
+<!--                        <configuration>-->
+<!--                            <finalName>mock-bench-ExecJDBC</finalName>-->
+<!--                            <transformers>-->
+<!--                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">-->
+<!--                                    <mainClass>mock.bench.Tpcc.DataLoad.ExecJDBC</mainClass>-->
+<!--                                </transformer>-->
+<!--                            </transformers>-->
+<!--                        </configuration>-->
+<!--                    </execution>-->
+
+<!--                </executions>-->
+<!--            </plugin>-->
+
+        <!-- Name of the target jar (no version in the name). -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.4.1</version>
-                <!-- 配置 Online 主类 -->
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.8.0</version>
+            </plugin>
+
+            <plugin>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>2.4</version>
+                <configuration>
+                    <finalName>MockBenchSQL</finalName>
+                </configuration>
+            </plugin>
+
+            <!-- Copies the resource files, the bash, cmd and sql scripts. -->
+            <plugin>
+                <artifactId>maven-resources-plugin</artifactId>
+                <version>3.2.0</version>
+                <configuration>
+                    <outputDirectory>${basedir}/target/run</outputDirectory>
+                </configuration>
+            </plugin>
+
+            <!-- Copies the necessary jars in the target directory. This builds a jar without JDBC drivers. -->
+            <plugin>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.0.0</version>
                 <executions>
                     <execution>
+                        <id>copy-dependencies</id>
                         <phase>package</phase>
                         <goals>
-                            <goal>shade</goal>
+                            <goal>copy-dependencies</goal>
                         </goals>
                         <configuration>
-                            <finalName>mock-bench-online</finalName>
-                            <transformers>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>mock.bench.Online_load</mainClass>
-                                </transformer>
-                            </transformers>
+                            <outputDirectory>${project.build.directory}/lib</outputDirectory>
+                            <overWriteReleases>false</overWriteReleases>
+                            <overWriteSnapshots>false</overWriteSnapshots>
+                            <overWriteIfNewer>true</overWriteIfNewer>
                         </configuration>
                     </execution>
-
-                    <!-- 配置 Offline 主类 -->
-                    <execution>
-                        <id>shade-offline</id>
-                        <phase>package</phase>
-                        <goals>
-                            <goal>shade</goal>
-                        </goals>
-                        <configuration>
-                            <finalName>mock-bench-offline</finalName>
-                            <transformers>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>mock.bench.Offline_load</mainClass>
-                                </transformer>
-                            </transformers>
-                        </configuration>
-                    </execution>
-
                 </executions>
             </plugin>
+
         </plugins>
     </build>
 
