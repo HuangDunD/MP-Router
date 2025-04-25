@@ -4,11 +4,11 @@
 
 # Usage
 ```
-mvn clean package
-java -jar target/mock-bench-online.jar
-java -jar target/mock-bench-offline.jar
+sudo mvn clean package
+sh loaddata.sh
+sh runtest.sh
 
 ```
 
 # Configuration
-The configuration file is located at `{project_dir}/config.properties}`. You can change the configuration as needed.
+The configuration file is located at `{project_dir}/src/main/resources/my.properties`. You can change the configuration as needed.
