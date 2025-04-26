@@ -1,7 +1,7 @@
-#ifndef DB_META_H // Added header guard example
+#ifndef DB_META_H
 #define DB_META_H
 
-#include "config.h"
+#include "config.h" // Assuming this exists and might be needed
 #include <unordered_map>
 #include <vector>
 #include <string>
@@ -9,10 +9,21 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <algorithm> // Needed for std::transform in columnNameToID lambda
+#include <algorithm> // Needed for std::transform in TPCHMeta columnNameToID lambda
+#include <stdexcept> // For exception handling during JSON parsing
+#include <map>       // Keep for existing TPCHMeta usage
 
 
-// 定义TPCH的表的元信息
+#include "nlohmann/json.hpp"
+
+// Use the nlohmann::json namespace for convenience
+using json = nlohmann::json;
+
+
+// =========================================================================
+// ==                       TPC-H Metadata Class                          ==
+// =========================================================================
+// (Existing TPCHMeta class - kept mostly as is)
 class TPCHMeta {
 public:
     // --- MODIFICATION: Added 'inline' before 'static const' ---
@@ -68,8 +79,8 @@ public:
         }
     };
 
-
-    std::map<int, std::string> ID2NAME = {
+    // Original ID2NAME map - Seems like a leftover or for a different purpose? Kept as is.
+    inline static const std::map<int, std::string> ID2NAME = {
         {0, "bmsql_customer"}, {1, "bmsql_district"}, {2, "bmsql_history"},
         {3, "bmsql_item"}, {4, "bmsql_new_order"}, {5, "bmsql_oorder"},
         {6, "bmsql_order_line"}, {7, "bmsql_stock"}, {8, "bmsql_warehouse"},
@@ -81,6 +92,7 @@ public:
         {24, "o_c_id"}, {25, "ol_w_id"}, {26, "ol_d_id"},
         {27, "ol_o_id"}
     };
+
 
     // --- MODIFICATION: Added 'inline' before 'static const' ---
     // Also included <algorithm> for std::transform
@@ -107,38 +119,43 @@ public:
             if (i < columnIDToName.size()) {
                 table_column_cardinality[i].resize(columnIDToName[i].size(), 0);
             } else {
-                std::cerr << "Error: Table index " << i <<
-                        " out of bounds for columnIDToName during TPCHMeta construction." << std::endl;
+                // This error suggests columnIDToName might not always have 8 entries
+                // Or the loop condition should be based on columnIDToName.size()
+                 std::cerr << "Warning: TPCHMeta constructor index " << i <<
+                      " out of bounds for columnIDToName (size=" << columnIDToName.size() << ")." << std::endl;
+                 // Handle appropriately, maybe resize table_column_cardinality differently?
+                 // For now, just skip resizing the inner vector if index is out of bounds.
             }
         }
     };
 
-    void ReadColumnIDFromFile(std::string fname) {
+    // Reads partition column IDs for TPC-H tables from a simple format file
+    void ReadColumnIDFromFile(const std::string& fname) {
         std::ifstream infile(fname);
         if (!infile.is_open()) {
-            std::cerr << "Error opening file: " << fname << std::endl;
+            std::cerr << "Error opening TPC-H partition file: " << fname << std::endl;
             return;
         }
         std::string line;
-        for (int i = 0; i < 8; ++i) {
-            if (!std::getline(infile, line)) {
-                std::cerr << "Error reading line for table " << i << " from file: " << fname << std::endl;
-                break;
-            }
-            std::istringstream iss(line);
-            int column_id;
-            if (!(iss >> column_id)) {
-                std::cerr << "Error parsing column ID for table " << i << " from line: " << line << std::endl;
-                continue;
-            }
-            if (i < partition_column_ids.size()) {
-                partition_column_ids[i] = column_id;
-                std::cout << "Table " << i << " partition column id: " << column_id << std::endl;
-            } else {
-                std::cerr << "Error: Table index " << i << " out of bounds for partition_column_ids assignment." <<
-                        std::endl;
-            }
+        int table_index = 0;
+        // Read up to partition_column_ids.size() lines
+        while (table_index < partition_column_ids.size() && std::getline(infile, line)) {
+             std::istringstream iss(line);
+             int column_id;
+             if (!(iss >> column_id)) {
+                 std::cerr << "Error parsing column ID for TPC-H table " << table_index << " from line: " << line << std::endl;
+                 // Decide how to handle parse errors: skip, set default, stop?
+                 // Continuing to next line for now.
+                 table_index++;
+                 continue;
+             }
+             partition_column_ids[table_index] = column_id;
+             std::cout << "TPC-H Table " << table_index << " partition column id set to: " << column_id << std::endl;
+             table_index++;
         }
+         if (table_index < partition_column_ids.size() && !infile.eof()) {
+              std::cerr << "Warning: TPC-H partition file " << fname << " did not contain enough lines for all tables." << std::endl;
+         }
         infile.close();
     }
 };

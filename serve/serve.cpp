@@ -8,7 +8,8 @@
 #include "util/json_config.h"
 #include "threadpool.h" // Include your thread pool header
 #include "queryplan_cardinality.h" // Assuming this is needed
-#include "db_meta.h"
+// #include "db_meta.h"
+#include "bmsql_meta.h" // Include the header file
 #include "metis_partitioner.h" // Assuming this is needed, replace NewMetis if necessary
 #include "region/region_generator.h"
 #include "log/Logger.h"     // Include the new Logger header
@@ -24,10 +25,25 @@ std::atomic<long long> send_times = 0; // Use long long for potentially large co
 
 // Instantiate RegionProcessor within the scope where needed
 RegionProcessor regionProcessor(logger); // Pass the logger
+BmSql::Meta bmsqlMetadata; // Create an instance
 
 // --- Client Data Processing Function ---
 // This function is intended to be run by the thread pool threads.
 void process_client_data(const std::string &data, int socket_fd, Logger &logger_ref) {
+    if (data == "HELLO\n") {
+        ssize_t bytes_sent1 = send(socket_fd, "FINISH\n", 7, 0);
+        if (bytes_sent1 < 0) {
+            std::cerr << "send failed" << std::endl;
+        }
+        return;
+    } else if (data == "BYE\n") {
+        ssize_t bytes_sent1 = send(socket_fd, "FINISH\n", 7, 0);
+        if (bytes_sent1 < 0) {
+            std::cerr << "send failed" << std::endl;
+        }
+        return;
+    }
+
     // Log processing start using the passed logger reference
     std::string truncated_data = data.substr(0, 150) + (data.length() > 150 ? "..." : "");
     logger_ref.log("Socket ", socket_fd, " processing: ", truncated_data);
@@ -42,9 +58,9 @@ void process_client_data(const std::string &data, int socket_fd, Logger &logger_
         // Call the generateRegionIDs method of the RegionProcessor instance
         processing_successful = regionProcessor.generateRegionIDs(
             data,
-            combined_region_ids
+            combined_region_ids,
+            bmsqlMetadata
         );
-
         // If region IDs were generated successfully and the vector is not empty,
         // update the Metis graph.
         if (processing_successful && !combined_region_ids.empty()) {
@@ -69,18 +85,18 @@ void process_client_data(const std::string &data, int socket_fd, Logger &logger_
     if (!processing_successful) {
         logger_ref.log("ERROR: Failed to process data for socket ", socket_fd, ". Sending ERR response.");
         // Consider logging more details about why processing failed if available
-        send(socket_fd, "ERR", 3, 0); // Send error response
+        send(socket_fd, "ERR\n", 4, 0); // Send error response
         return; // Exit if processing failed critically
     }
 
     // Processing was successful (or non-critically failed), send OK
-    ssize_t bytes_sent = send(socket_fd, "OK", 2, 0);
-    long long current_send_times = send_times.fetch_add(1) + 1; // Atomically increment and get new value
+    ssize_t bytes_sent = send(socket_fd, "OK\n", 3, 0);
+    send_times.fetch_add(1); // Atomically increment and get new value
 
     // Log send status periodically
-    if (current_send_times % 5000 == 0) {
+    if (send_times % 100 == 0) {
         logger_ref.set_log_to_console(true);
-        logger_ref.log("Sent response to socket ", socket_fd, " (", current_send_times, " times).");
+        logger_ref.log("Sent response to socket %d (%lld times).", socket_fd, send_times.load());
         logger_ref.set_log_to_console(false);
     }
 
@@ -120,16 +136,18 @@ int main() {
     // TPCH workload
     logger.log("WORKLOAD_MODE is TPCH (1). Initializing TPCH Metadata...");
     try {
-        TPCH_META = new TPCHMeta();
-        // 从文件中初始化partition column_ids (Initialize partition column_ids from file)
-        std::string fname = "./partition_column_ids.txt"; // Adjust path if necessary
-        logger.log("Reading partition column IDs from: ", fname);
-        TPCH_META->ReadColumnIDFromFile(fname); // Assuming this method exists and handles errors/logging
-        logger.log("TPCH Metadata initialized successfully.");
+        std::string metaFilePath = "/home/mt/MP-Router/serve/db_mate.json";
+        std::cout << "Loading BMSQL metadata from: " << metaFilePath << std::endl;
+        // Load the metadata
+        if (!bmsqlMetadata.loadFromJsonFile(metaFilePath)) {
+            std::cerr << "Fatal Error: Failed to load BMSQL metadata. Exiting." << std::endl;
+            return EXIT_FAILURE;
+        }
+
+        std::cout << "Metadata loaded successfully." << std::endl;
+        std::cout << "-----------------------------" << std::endl;
     } catch (const std::exception &e) {
         logger.log("CRITICAL ERROR initializing TPCH Metadata: ", e.what());
-        delete TPCH_META; // Clean up allocated memory
-        TPCH_META = nullptr;
         return -1;
     }
 #else
@@ -137,7 +155,7 @@ int main() {
 #endif
 
     // --- Thread Pool Setup ---
-    unsigned int num_threads = 12; // Consider making this configurable
+    unsigned int num_threads = 20; // Consider making this configurable
     logger.log("Initializing thread pool with ", num_threads, " threads.");
     ThreadPool pool(num_threads);
     metis.set_thread_pool(&pool); // Set thread pool for metis AFTER pool is created
@@ -246,10 +264,6 @@ int main() {
     logger.log("Server shutting down...");
     close(server_fd); // Close the listening server socket
 
-#if WORKLOAD_MODE == 1
-    delete TPCH_META; // Clean up TPCH meta if allocated
-    TPCH_META = nullptr;
-#endif
 
     return 0;
 }

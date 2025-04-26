@@ -2,7 +2,6 @@
 #include "../log/Logger.h" // Include Logger definition
 
 // --- MODIFICATION START ---
-#include "../db_meta.h"   // Include definition for TPCHMeta and extern TPCH_META
 #include "../config.h"    // Include definition for WORKLOAD_MODE and REGION_SIZE
 // --- MODIFICATION END ---
 
@@ -33,7 +32,8 @@ RegionProcessor::RegionProcessor(Logger &logger) : logger_(logger) {
     logger_.log("RegionProcessor initialized.");
 }
 
-bool RegionProcessor::generateRegionIDs(const std::string &data, std::vector<uint64_t> &out_region_ids) {
+bool RegionProcessor::generateRegionIDs(const std::string &data, std::vector<uint64_t> &out_region_ids,
+                                        const BmSql::Meta &bmsqlMeta) {
     out_region_ids.clear(); // Ensure the output vector is empty
 
     // Check REGION_SIZE again in case it was modified externally (though unlikely if const)
@@ -47,7 +47,7 @@ bool RegionProcessor::generateRegionIDs(const std::string &data, std::vector<uin
     return processYCSB(data, out_region_ids);
 #elif WORKLOAD_MODE == 1
     // TPCH workload
-    return processTPCH(data, out_region_ids);
+    return processTPCH(data, bmsqlMeta, out_region_ids);
 #else
     logger_.log("ERROR: Unknown WORKLOAD_MODE defined: ", WORKLOAD_MODE);
     return true; // Or false, depending on how you want to handle unknown modes
@@ -107,7 +107,7 @@ bool RegionProcessor::processYCSB(const std::string &data, std::vector<uint64_t>
         for (size_t i = 0; i < std::min(out_region_ids.size(), (size_t) 5); ++i) ss_ids << out_region_ids[i] << " ";
         // Log first few
         if (out_region_ids.size() > 5) ss_ids << "...";
-        logger_.log(ss_ids.str());
+        logger_.log(ss_ids.str().c_str());
         // NOTE: Graph building (metis.build_internal_graph) is NOT called here anymore.
         // It should be called in the calling function (e.g., process_client_data) if needed.
     } else {
@@ -116,108 +116,73 @@ bool RegionProcessor::processYCSB(const std::string &data, std::vector<uint64_t>
     return true; // Success (or non-critical failure)
 }
 
-// --- Private TPCH Implementation ---
-bool RegionProcessor::processTPCH(const std::string &data, std::vector<uint64_t> &out_region_ids) {
-    logger_.log("Processing TPCH data (SQL)...");
+bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bmsqlMeta,
+                                  std::vector<uint64_t> &out_region_ids) {
+    logger_.log("Processing BMSQL data (SQL)...");
     try {
-        SQLInfo sql_info = parseTPCHSQL(data); // Assume parseTPCHSQL is available
+        // 1. Call the BMSQL parser
+        std::vector<SQLInfo> sql_infos = parseTPCHSQL(data, bmsqlMeta.idToNameMap_);
 
-        if (sql_info.type == SQLType::SELECT || sql_info.type == SQLType::UPDATE) {
-            std::string type_str = (sql_info.type == SQLType::SELECT) ? "SELECT" : "UPDATE";
-            logger_.log("Parsed ", type_str, " statement.");
+        logger_.log("Parsed ", sql_infos.size(), " SQL info block(s).");
 
-            if (sql_info.tableNames.empty() || sql_info.columnNames.empty()) {
-                logger_.log("Warning: Missing table or column name in ", type_str, ". Skipping region ID generation.");
-                return true; // Non-critical issue
-            }
-            if (sql_info.keyVector.empty()) {
-                logger_.log("No keys found in ", type_str, " WHERE clause. Skipping region ID generation.");
-                return true; // Non-critical issue
-            }
+        // 2. Loop through each parsed block
+        for (size_t i = 0; i < sql_infos.size(); ++i) {
+            const auto &current_sql_info = sql_infos[i];
+            logger_.log("Processing block ", i + 1, " of ", sql_infos.size(), "...");
 
-            std::string table_name = sql_info.tableNames[0];
-            std::string column_name = sql_info.columnNames[0];
+            // 3. Process based on type
+            if (current_sql_info.type == SQLType::SELECT || current_sql_info.type == SQLType::UPDATE) {
+                std::string type_str = (current_sql_info.type == SQLType::SELECT) ? "SELECT" : "UPDATE";
+                logger_.log("Block ", i + 1, ": Parsed ", type_str, " statement.");
 
-            unsigned int table_id;
-            unsigned int column_id;
-            // Safely get table and column IDs
-            try {
-                // Check if TPCH_META is valid
-                if (!TPCH_META) {
-                    throw std::runtime_error("TPCH_META is null.");
+
+                // Store the column name parsed (if any) for potential reference/warning later
+                size_t column_count = current_sql_info.columnNames.size();
+                int affinityColumn = -1;
+                int ser_num = -1;
+
+                for (int j = 0; j < column_count; j++) {
+                    if (bmsqlMeta.isColumnAffinity(current_sql_info.tableIDs[0], current_sql_info.columnIDs[j])) {
+                        affinityColumn = current_sql_info.columnIDs[j];
+                        ser_num = j;
+                        break;
+                    }
                 }
-                table_id = TPCHMeta::tablenameToID.at(table_name); // Use .at() for bounds checking
-                // Ensure table_id is valid index before accessing nested maps/vectors
-                if (table_id >= TPCHMeta::columnNameToID.size() || table_id >= TPCH_META->partition_column_ids.size()) {
-                    throw std::out_of_range(
-                        "Table ID (" + std::to_string(table_id) + ") out of range for metadata access.");
+
+                if (affinityColumn == -1) {
+                    logger_.log("Block ", i + 1, ": Warning: No affinity column found in table '", current_sql_info.tableNames[0],
+                                "'.");
+                } else {
+                    auto inner_key = current_sql_info.keyVector[ser_num] / bmsqlMeta.getRegionSizeByColumnId(
+                                         current_sql_info.columnIDs[ser_num]);
+
+                    Region current_region(current_sql_info.tableIDs[0], inner_key);
+                    uint64_t combined_id = current_region.serializeToUint64();
+                    out_region_ids.push_back(combined_id);
+                    logger_.log("Block ", i + 1, ": Found affinity column ID ", affinityColumn, " in table '",
+                               current_sql_info.tableNames[0], "'.");
                 }
-                column_id = TPCHMeta::columnNameToID[table_id].at(column_name); // Use .at()
-            } catch (const std::out_of_range &oor) {
-                logger_.log("ERROR: Invalid table/column name ('", table_name, "'/'", column_name,
-                            "') or ID lookup failed. ", oor.what());
-                return true; // Invalid name/ID, log but allow sending response
-            } catch (const std::exception &e) {
-                logger_.log("ERROR looking up TPCH metadata: ", e.what());
-                return true; // Metadata error, log but allow sending response
-            }
-
-            // Check if the queried column is the partition key for that table
-            if (TPCH_META->partition_column_ids[table_id] != column_id) {
-                logger_.log("Query key (", table_name, ".", column_name,
-                            ") is not the partition key for table ", table_id,
-                            ". Skipping region ID generation.");
-                return true; // Not an error, just skipping
-            }
-
-            // Partition key matches, proceed to calculate combined IDs
-            logger_.log("Query key matches partition key (", table_name, ".", column_name,
-                        "). Processing keys...");
-
-            for (const auto &key: sql_info.keyVector) {
-                if (key < 0) {
-                    logger_.log("Warning: Skipping negative key ", key, " for table ", table_name);
-                    continue; // Skip negative keys
-                }
-                // REGION_SIZE check already done in generateRegionIDs
-
-                // Calculate inner region ID (ensure unsigned)
-                auto _inner_region_id = static_cast<unsigned int>(key / REGION_SIZE);
-
-                // Create Region object using the looked-up table_id
-                Region current_region(table_id, _inner_region_id);
-
-                // Serialize to uint64_t
-                uint64_t combined_id = current_region.serializeToUint64();
-                out_region_ids.push_back(combined_id);
-            } // End key loop
-
-            if (!out_region_ids.empty()) {
-                // Log the combined IDs being sent
-                std::stringstream ss_ids;
-                ss_ids << "Generated TPCH Combined Region IDs (" << out_region_ids.size() << "): ";
-                for (size_t i = 0; i < std::min(out_region_ids.size(), (size_t) 5); ++i)
-                    ss_ids << out_region_ids[i] << " "; // Log first few
-                if (out_region_ids.size() > 5) ss_ids << "...";
-                logger_.log(ss_ids.str());
-                // NOTE: Graph building (metis.build_internal_graph) is NOT called here anymore.
+                // --- End of logic for SELECT/UPDATE block ---
+            } else if (current_sql_info.type == SQLType::JOIN) {
+                // ... (JOIN handling remains the same) ...
+                std::stringstream ss_join_tables;
+                ss_join_tables << "Block " << (i + 1) << ": Received JOIN block involving tables: ";
+                for (const auto &name: current_sql_info.tableNames) ss_join_tables << name << " ";
+                ss_join_tables << ". Region ID generation not applicable.";
+                logger_.log(ss_join_tables.str().c_str());
             } else {
-                logger_.log("No valid TPCH region IDs generated (keys might have been negative or filtered).");
+                // ... (UNKNOWN handling remains the same) ...
+                logger_.log("Block ", i + 1, ": Unknown or unhandled SQL type encountered. Skipping block.");
             }
-        } else if (sql_info.type == SQLType::JOIN) {
-            logger_.log("Received JOIN statement. Region ID generation not implemented for JOINs.");
-            // Existing JOIN logic (e.g., cardinality update) can remain here if needed
-        } else {
-            std::string truncated_data = data.substr(0, 150) + (data.length() > 150 ? "..." : "");
-            logger_.log("Unknown or unhandled SQL type received. SQL: ", truncated_data);
-        }
+        } // End loop through sql_infos
+
     } catch (const std::exception &e) {
-        // Catch errors during parsing or metadata lookup
-        logger_.log("ERROR processing SQL: ", e.what());
-        // Depending on severity, you might want to stop or just log and continue
-        return true; // Allow sending response by default on SQL processing errors
+        logger_.log("ERROR processing BMSQL SQL data: ", e.what());
+        return true;
+    } catch (...) {
+        logger_.log("ERROR processing BMSQL SQL data: Unknown exception occurred.");
+        return true;
     }
 
-    return true; // Success (or non-critical failure)
+    return true;
 }
-

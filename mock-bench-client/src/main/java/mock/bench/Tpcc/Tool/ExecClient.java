@@ -50,9 +50,10 @@ public class ExecClient {
 
         if (!offline){
             String response = reader.readLine();
-            while (response.equals("")){
-                response = reader.readLine();
-            }
+//             while (response.equals("")){
+//                 response = reader.readLine();
+//             }
+            System.out.println("success: " + response);
         }
     }
 

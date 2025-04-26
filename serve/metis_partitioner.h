@@ -133,12 +133,12 @@ private:
     std::string partition_output_file_ = "graph_partitions.csv"; // Default output file
     std::string partition_log_file_ = "partitioning.log"; // Default log file
     uint64_t num_partitions_ = 8; // Default number of partitions
-    static const uint64_t PARTITION_INTERVAL = 1000; // Trigger partition every 1000 calls
+    static const uint64_t PARTITION_INTERVAL = 50; // Trigger partition every 1000 calls
 
 
     // 新增的映射表和计数器
     std::unordered_map<uint64_t, idx_t> regionid_to_denseid_map_; // 从原始 Region ID 到稠密 ID 的映射
-    std::vector<uint64_t> denseid_to_regionid_map_; // 从稠密 ID 到原始 Region ID 的映射 (用于反向查找)
+    std::vector<uint64_t> regionid_to_dense_map_; // 从稠密 ID 到原始 Region ID 的映射 (用于反向查找)
     std::atomic<idx_t> next_dense_id_{0}; // 用于生成稠密 ID 的原子计数器 (从 0 开始)
 
 
@@ -228,13 +228,10 @@ inline void NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_m
                 regionid_to_denseid_map_[regionid] = new_dense_id;
 
                 // Update reverse map.
-                if (new_dense_id >= denseid_to_regionid_map_.size()) {
-                    // Needs careful handling - potentially resize much larger to reduce frequency
-                    // For example: denseid_to_regionid_map_.resize( (new_dense_id + 1) * 1.5 );
-                    // Simple exact resize for now:
-                    denseid_to_regionid_map_.resize(new_dense_id + 1);
+                if (new_dense_id >= regionid_to_dense_map_.size()) {
+                    regionid_to_dense_map_.resize(new_dense_id + 1);
                 }
-                denseid_to_regionid_map_[new_dense_id] = regionid; // Store original ID
+                regionid_to_dense_map_[new_dense_id] = regionid; // Store original ID
             }
         }
 
@@ -282,8 +279,8 @@ inline void NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_m
             uint64_t unmapped_count = 0; // Count nodes in the group not found in the current map
 
             // Count occurrences of each primary partition ID within the input group
-            for (uint64_t node_id: unique_mapped_ids_in_group) {
-                auto map_it = partition_node_map.find(node_id);
+            for (uint64_t region_id: unique_mapped_ids_in_group) {
+                auto map_it = partition_node_map.find(region_id);
                 if (map_it != partition_node_map.end()) {
                     // Node found in the map, increment count for its primary partition ID
                     partition_counts[map_it->second]++;
@@ -304,7 +301,7 @@ inline void NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_m
                 std::stringstream counts_ss;
                 counts_ss << "{ ";
                 for (const auto &pair: partition_counts) {
-                    counts_ss << "Partition(PrimaryID " << pair.first << "): " << pair.second << " nodes; ";
+                    counts_ss << "Partition(RegionID " << pair.first << "): exist " << pair.second << " times; ";
                     if (pair.second > max_count) {
                         max_count = pair.second;
                         dominant_partition_id = pair.first;
@@ -324,9 +321,9 @@ inline void NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_m
                     }
                     group_ss << "]";
 
-                    std::string log_msg = "Cross-partition access detected for group " + group_ss.str() +
+                    std::string log_msg = "Cross-partition detected in " + group_ss.str() +
                                           ". Counts per partition: " + counts_ss.str() +
-                                          ". Choosing dominant partition (PrimaryID): " + std::to_string(
+                                          ". Choosing dominant partition (PegionID): " + std::to_string(
                                               dominant_partition_id) +
                                           " based on max count (" + std::to_string(max_count) + ").";
                     if (unmapped_count > 0) {
@@ -438,8 +435,8 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
         size_t total_degree_sum_dense = 0;
         for (idx_t dense_i = 0; dense_i < nvtx_metis; ++dense_i) {
             // Safely get original ID (ensure dense_i is within bounds of the reverse map)
-            if (dense_i < denseid_to_regionid_map_.size()) {
-                uint64_t original_id = denseid_to_regionid_map_[dense_i];
+            if (dense_i < regionid_to_dense_map_.size()) {
+                uint64_t original_id = regionid_to_dense_map_[dense_i];
                 // Check if node exists in the actual graph adjacency list
                 if (partition_graph_.count(original_id)) {
                     total_degree_sum_dense += partition_graph_.at(original_id).size();
@@ -482,7 +479,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
 
                 // Get the original regionid corresponding to this dense ID
                 // Add boundary check for safety
-                if (dense_i >= denseid_to_regionid_map_.size()) {
+                if (dense_i >= regionid_to_dense_map_.size()) {
                     log_message(
                         "Error: Dense ID " + std::to_string(dense_i) +
                         " out of bounds in reverse map during CSR population.", log_stream);
@@ -490,7 +487,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
                     partition_node_map.clear();
                     break; // Exit loop on error
                 }
-                uint64_t original_id = denseid_to_regionid_map_[dense_i];
+                uint64_t original_id = regionid_to_dense_map_[dense_i];
 
                 // Get vertex weight using original_id to look up in partition_weight_
                 // Use dense_i as index for vwgt array
@@ -626,16 +623,16 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
             // Need lock to access reverse map and update partition_node_map
             std::lock_guard<std::mutex> lock(graph_mutex_);
             // Choose the original ID corresponding to dense ID 0 as the primary representative for partition 0
-            if (nvtx_metis > 0 && denseid_to_regionid_map_.size() > 0) {
-                primary_id_for_part0 = denseid_to_regionid_map_[0];
+            if (nvtx_metis > 0 && regionid_to_dense_map_.size() > 0) {
+                primary_id_for_part0 = regionid_to_dense_map_[0];
             } // else remains 0 or handle error
 
             partition_node_map.clear(); // Clear previous results
             // Iterate through DENSE IDs to find all ORIGINAL IDs
             for (idx_t dense_i = 0; dense_i < nvtx_metis; ++dense_i) {
-                if (dense_i < denseid_to_regionid_map_.size()) {
+                if (dense_i < regionid_to_dense_map_.size()) {
                     // Safety check
-                    uint64_t original_id = denseid_to_regionid_map_[dense_i];
+                    uint64_t original_id = regionid_to_dense_map_[dense_i];
                     outpartition << original_id << ",0\n"; // Write original ID
                     partition_node_map[original_id] = primary_id_for_part0; // Map original ID to primary original ID
                 }
@@ -664,14 +661,14 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
                 /* log error, lock, clear partition_node_map, return */
             }
             outpartition << "RegionID,PartitionIndex\n";
-            uint64_t primary_id_for_part0 = (nvtx_metis > 0 && denseid_to_regionid_map_.size() > 0)
-                                                ? denseid_to_regionid_map_[0]
+            uint64_t primary_id_for_part0 = (nvtx_metis > 0 && regionid_to_dense_map_.size() > 0)
+                                                ? regionid_to_dense_map_[0]
                                                 : 0; {
                 std::lock_guard<std::mutex> lock(graph_mutex_);
                 partition_node_map.clear();
                 for (idx_t dense_i = 0; dense_i < nvtx_metis; ++dense_i) {
-                    if (dense_i < denseid_to_regionid_map_.size()) {
-                        uint64_t original_id = denseid_to_regionid_map_[dense_i];
+                    if (dense_i < regionid_to_dense_map_.size()) {
+                        uint64_t original_id = regionid_to_dense_map_[dense_i];
                         outpartition << original_id << ",0\n";
                         partition_node_map[original_id] = primary_id_for_part0;
                     }
@@ -750,9 +747,9 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
 
     // Iterate through DENSE IDs to write ORIGINAL ID components and its partition index
     for (idx_t dense_i = 0; dense_i < nvtx_metis; ++dense_i) {
-        if (dense_i < denseid_to_regionid_map_.size()) {
+        if (dense_i < regionid_to_dense_map_.size()) {
             // Safety check
-            uint64_t original_id = denseid_to_regionid_map_[dense_i];
+            uint64_t original_id = regionid_to_dense_map_[dense_i];
             idx_t partition_index = part[dense_i]; // Get the partition index assigned by METIS
 
             // --- NEW: Extract TableID and InnerRegionID from original_id ---
@@ -796,13 +793,13 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
         // Iterate through all DENSE nodes as partitioned by METIS
         for (idx_t dense_i = 0; dense_i < nvtx_metis; ++dense_i) {
             // Get original ID for this dense ID
-            if (dense_i >= denseid_to_regionid_map_.size()) {
+            if (dense_i >= regionid_to_dense_map_.size()) {
                 log_message(
                     "Error: Dense ID " + std::to_string(dense_i) +
                     " out of bounds in reverse map during router rule creation.", log_stream);
                 continue; // Skip this dense ID if reverse map is inconsistent
             }
-            uint64_t current_original_id = denseid_to_regionid_map_[dense_i];
+            uint64_t current_original_id = regionid_to_dense_map_[dense_i];
             idx_t affinity_class = part[dense_i]; // The partition METIS assigned (0..nParts-1)
 
             // Check if we've already assigned a primary original ID for this affinity class
