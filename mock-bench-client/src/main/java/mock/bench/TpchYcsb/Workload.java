@@ -1,4 +1,4 @@
-package mock.bench;
+package mock.bench.TpchYcsb;
 
 import java.security.SecureRandom;
 import java.util.*;

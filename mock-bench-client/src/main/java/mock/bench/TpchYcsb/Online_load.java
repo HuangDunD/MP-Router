@@ -1,4 +1,4 @@
-package mock.bench;
+package mock.bench.TpchYcsb;
 
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 
-import static mock.bench.Client.closeResources;
+import static mock.bench.TpchYcsb.Client.closeResources;
 
 public class Online_load {
     private static ScheduledExecutorService scheduler;

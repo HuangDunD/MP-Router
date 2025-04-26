@@ -1,4 +1,4 @@
-package mock.bench;
+package mock.bench.TpchYcsb;
 
 import java.sql.*;
 import java.util.HashMap;
