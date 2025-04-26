@@ -16,6 +16,8 @@
 #include <ctime>
 #include <atomic>     // Required for automatic partitioning counters
 
+#include "region/region.h"
+
 
 // Forward declarations
 class ThreadPool; // Assume ThreadPool class is defined elsewhere

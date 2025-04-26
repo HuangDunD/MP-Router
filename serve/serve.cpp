@@ -1,354 +1,256 @@
 #include <iostream>
 #include <string>
-#include <cstring>      // For memset
-#include <unistd.h>     // For close
-#include <arpa/inet.h>  // For socket-related functions
+#include <cstring>      // For memset, strerror
+#include <unistd.h>     // For close, read
+#include <arpa/inet.h>  // For socket-related functions, inet_ntop
 #include <sys/socket.h> // For socket API
 
 #include "util/json_config.h"
 #include "threadpool.h" // Include your thread pool header
-
-#include "parse.h"
-#include "queryplan_cardinality.h"
+#include "queryplan_cardinality.h" // Assuming this is needed
 #include "db_meta.h"
-#include "region.h"
-#include "metis_partitioner.h"
+#include "metis_partitioner.h" // Assuming this is needed, replace NewMetis if necessary
+#include "region/region_generator.h"
+#include "log/Logger.h"     // Include the new Logger header
 
 #define PORT 8500       // Port number to listen on
 #define BUFFER_SIZE 4096000 // Buffer size for receiving data
 
-NewMetis metis;
-TPCHMeta *TPCH_META;
-std::atomic<int> send_times = 0;
+// --- Global Variables ---
+Logger logger("server.log");
+NewMetis metis; // Assuming NewMetis is the correct type
+TPCHMeta *TPCH_META = nullptr; // Initialize global pointer
+std::atomic<long long> send_times = 0; // Use long long for potentially large counts
 
-// Function to handle processing in a separate thread
-std::ofstream log_stream("server_log.txt", std::ios::app);
+// Instantiate RegionProcessor within the scope where needed
+RegionProcessor regionProcessor(logger); // Pass the logger
 
-void process_client_data(const std::string &data, int socket_fd) {
-    std::thread::id this_id = std::this_thread::get_id();
-    // Use a shorter representation for potentially long SQL in logs
+// --- Client Data Processing Function ---
+// This function is intended to be run by the thread pool threads.
+void process_client_data(const std::string &data, int socket_fd, Logger &logger_ref) {
+    // Log processing start using the passed logger reference
     std::string truncated_data = data.substr(0, 150) + (data.length() > 150 ? "..." : "");
-    log_message("Socket " + std::to_string(socket_fd) + " processing: " + truncated_data, log_stream);
+    logger_ref.log("Socket ", socket_fd, " processing: ", truncated_data);
 
-    // Vector to hold the final combined IDs to pass to metis
+    // Vector to hold the final combined IDs
     std::vector<uint64_t> combined_region_ids;
 
-#if WORKLOAD_MODE == 0
-    // YCSB workload
-    // We need the raw keys first to calculate inner_region_id.
-    // Extract YCSB keys directly here instead of relying on ParseYcsbKey which calculated region_id.
-    std::vector<int> ycsb_keys;
+    bool processing_successful = false;
     try {
-        std::regex key_pattern(R"(YCSB_KEY\s*=\s*(\d+))"); // Matches YCSB_KEY = <number>
-        std::smatch matches;
-        std::string::const_iterator search_start(data.cbegin());
-        while (std::regex_search(search_start, data.cend(), matches, key_pattern)) {
-            ycsb_keys.push_back(std::stoi(matches[1].str()));
-            search_start = matches.suffix().first;
+        // ---- MODIFICATION START ----
+
+        // Call the generateRegionIDs method of the RegionProcessor instance
+        processing_successful = regionProcessor.generateRegionIDs(
+            data,
+            combined_region_ids
+        );
+
+        // If region IDs were generated successfully and the vector is not empty,
+        // update the Metis graph.
+        if (processing_successful && !combined_region_ids.empty()) {
+            logger_ref.log("Socket ", socket_fd, ": Successfully generated ", combined_region_ids.size(),
+                           " region IDs. Adding to Metis graph.");
+            metis.build_internal_graph(combined_region_ids); // Add the IDs to the graph
+        } else if (processing_successful) {
+            logger_ref.log("Socket ", socket_fd,
+                           ": Region ID generation successful, but no IDs were produced (e.g., non-partition key query).");
+            // Still considered a success in terms of processing the request
         }
-        // Optional: Remove duplicates if needed
-        std::sort(ycsb_keys.begin(), ycsb_keys.end());
-        ycsb_keys.erase(std::unique(ycsb_keys.begin(), ycsb_keys.end()), ycsb_keys.end());
-
-    } catch (const std::exception& e) {
-        log_message("[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] Error parsing YCSB keys: " + e.what(), log_stream);
-        goto send_response; // Skip graph build on parsing error
-    }
-
-    // Assume a default table ID for YCSB keys if not specified otherwise
-    const unsigned int ycsb_table_id = 0; // Example: table 0 for YCSB
-
-    for (const auto &key: ycsb_keys) {
-         if (key < 0) {
-              log_message("Warning: Skipping negative YCSB key " + std::to_string(key), log_stream);
-              continue;
-         }
-         if (REGION_SIZE <= 0) {
-              log_message("Error: REGION_SIZE (" + std::to_string(REGION_SIZE) + ") is not positive. Cannot calculate region ID.", log_stream);
-              // Skip further processing for this workload if REGION_SIZE is invalid
-              combined_region_ids.clear(); // Ensure we don't pass partial data
-              break;
-         }
-         // Calculate inner region ID (ensure unsigned)
-         unsigned int _inner_region_id = static_cast<unsigned int>(key / REGION_SIZE);
-
-         // Create Region object
-         Region current_region(ycsb_table_id, _inner_region_id);
-
-         // Serialize to uint64_t
-         uint64_t combined_id = current_region.serializeToUint64();
-         combined_region_ids.push_back(combined_id);
-    }
-
-    if (!combined_region_ids.empty()) {
-        // Log the combined IDs being sent
-        std::stringstream ss_ids;
-        ss_ids << "[Thread " << std::to_string(std::hash<std::thread::id>{}(this_id)) << "] YCSB Combined Region IDs (" << combined_region_ids.size() << "): ";
-        for(size_t i=0; i< std::min(combined_region_ids.size(), (size_t)5); ++i) ss_ids << combined_region_ids[i] << " "; // Log first few
-        if(combined_region_ids.size() > 5) ss_ids << "...";
-        log_message(ss_ids.str(), log_stream);
-
-        // Call graph building function
-        metis.build_internal_graph(combined_region_ids);
-    } else {
-         log_message("[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] No valid YCSB keys found or REGION_SIZE invalid.", log_stream);
-    }
-
-
-#elif WORKLOAD_MODE == 1
-    // TPCH workload
-    try {
-        SQLInfo sql_info = parseTPCHSQL(data); // Assume parseTPCHSQL is available
-
-        if (sql_info.type == SQLType::SELECT || sql_info.type == SQLType::UPDATE) {
-            std::string type_str = (sql_info.type == SQLType::SELECT) ? "SELECT" : "UPDATE";
-            // log_message("[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] Received " + type_str + " statement.", log_stream);
-
-            if (sql_info.tableNames.empty() || sql_info.columnNames.empty()) {
-                log_message("Warning: Missing table or column name in " + type_str + ". Skipping graph build.",
-                            log_stream);
-            } else if (sql_info.keyVector.empty()) {
-                // No keys provided in the WHERE clause (e.g., SELECT * FROM table;)
-                // log_message("[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] No keys found in " + type_str + " WHERE clause. Skipping graph build.", log_stream);
-            } else {
-                std::string table_name = sql_info.tableNames[0];
-                std::string column_name = sql_info.columnNames[0];
-
-                unsigned int table_id;
-                unsigned int column_id;
-                // Safely get table and column IDs
-                try {
-                    table_id = TPCHMeta::tablenameToID.at(table_name); // Use .at() for bounds checking
-                    // Ensure table_id is valid index before accessing nested maps/vectors
-                    if (table_id >= TPCHMeta::columnNameToID.size() || table_id >= TPCH_META->partition_column_ids.
-                        size()) {
-                        throw std::out_of_range(
-                            "Table ID (" + std::to_string(table_id) + ") out of range for metadata access.");
-                    }
-                    column_id = TPCHMeta::columnNameToID[table_id].at(column_name); // Use .at()
-                } catch (const std::out_of_range &oor) {
-                    log_message(
-                        "Error: Invalid table/column name ('" + table_name + "'/'" + column_name +
-                        "') or ID lookup failed. " + oor.what(), log_stream);
-                    goto send_response; // Skip processing if names/IDs are invalid
-                }
-
-                // Check if the queried column is the partition key for that table
-                if (TPCH_META->partition_column_ids[table_id] != column_id) {
-                    log_message(
-                        "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] Query key (" +
-                        table_name + "." + column_name + ") is not the partition key for table " +
-                        std::to_string(table_id) + ". Skipping graph build.", log_stream);
-                } else {
-                    // Partition key matches, proceed to calculate combined IDs
-                    log_message(
-                        "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) +
-                        "] Query key matches partition key (" + table_name + "." + column_name +
-                        "). Processing keys...", log_stream);
-
-                    for (const auto &key: sql_info.keyVector) {
-                        if (key < 0) {
-                            log_message(
-                                "Warning: Skipping negative key " + std::to_string(key) + " for table " + table_name,
-                                log_stream);
-                            continue; // Skip negative keys
-                        }
-                        if (REGION_SIZE <= 0) {
-                            log_message(
-                                "Error: REGION_SIZE (" + std::to_string(REGION_SIZE) +
-                                ") is not positive. Cannot calculate region ID.", log_stream);
-                            combined_region_ids.clear(); // Invalidate calculation for this query
-                            break; // Stop processing keys for this query
-                        }
-
-                        // Calculate inner region ID (ensure unsigned)
-                        auto _inner_region_id = static_cast<unsigned int>(key / REGION_SIZE);
-
-                        // Create Region object using the looked-up table_id
-                        Region current_region(table_id, _inner_region_id);
-
-                        // Serialize to uint64_t
-                        uint64_t combined_id = current_region.serializeToUint64();
-                        combined_region_ids.push_back(combined_id);
-                    } // End key loop
-
-
-                    if (!combined_region_ids.empty()) {
-                        // Log the combined IDs being sent
-                        std::stringstream ss_ids;
-                        ss_ids << "[Thread " << std::to_string(std::hash<std::thread::id>{}(this_id)) <<
-                                "] TPCH Combined Region IDs (" << combined_region_ids.size() << "): ";
-                        for (size_t i = 0; i < std::min(combined_region_ids.size(), (size_t) 5); ++i)
-                            ss_ids << combined_region_ids[i] << " "; // Log first few
-                        if (combined_region_ids.size() > 5) ss_ids << "...";
-                        log_message(ss_ids.str(), log_stream);
-
-                        // Call graph building function with the vector of combined IDs
-                        metis.build_internal_graph(combined_region_ids);
-                    } else {
-                        log_message(
-                            "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) +
-                            "] No valid keys found matching partition key or REGION_SIZE invalid.", log_stream);
-                    }
-                } // End partition key match check
-            } // End check for table/column names and keys present
-        } else if (sql_info.type == SQLType::JOIN) {
-            log_message(
-                "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) +
-                "] Received JOIN statement. Graph building not implemented for JOINs.", log_stream);
-            // Existing JOIN logic (e.g., cardinality update) can remain here if needed
-        } else {
-            log_message(
-                "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) +
-                "] Unknown or unhandled SQL type received. SQL: " + truncated_data, log_stream);
-        }
+        // If processing_successful is false, the error is logged within generateRegionIDs
+        // ---- MODIFICATION END ----
     } catch (const std::exception &e) {
-        // Catch errors during parsing or metadata lookup
-        log_message(
-            "[Thread " + std::to_string(std::hash<std::thread::id>{}(this_id)) + "] Error processing SQL: " + e.what(),
-            log_stream);
-        // Depending on severity, you might want to stop or just log and continue
+        // Catch potential exceptions from RegionProcessor constructor or methods
+        logger_ref.log("CRITICAL ERROR during RegionProcessor usage for socket ", socket_fd, ": ", e.what());
+        processing_successful = false; // Ensure failure state
     }
 
-#endif // End WORKLOAD_MODE check
 
-send_response: // Label to jump to for sending response, especially after errors
-    // Send response back to the client
+    // Send response back to the client based on processing result
+    if (!processing_successful) {
+        logger_ref.log("ERROR: Failed to process data for socket ", socket_fd, ". Sending ERR response.");
+        // Consider logging more details about why processing failed if available
+        send(socket_fd, "ERR", 3, 0); // Send error response
+        return; // Exit if processing failed critically
+    }
+
+    // Processing was successful (or non-critically failed), send OK
     ssize_t bytes_sent = send(socket_fd, "OK", 2, 0);
-    int current_send_count = send_times.fetch_add(1) + 1; // Get updated count before logging
+    long long current_send_times = send_times.fetch_add(1) + 1; // Atomically increment and get new value
 
-    if (send_times % 5000 == 0) {
-        std::cout << "[Thread " << this_id << "] Sent response to socket " << socket_fd
-                << " (" << send_times << " times)." << std::endl;
+    // Log send status periodically
+    if (current_send_times % 5000 == 0) {
+        logger_ref.set_log_to_console(true);
+        logger_ref.log("Sent response to socket ", socket_fd, " (", current_send_times, " times).");
+        logger_ref.set_log_to_console(false);
     }
+
+    // Log send errors
     if (bytes_sent < 0) {
-        std::cerr << "[Thread " << this_id << "] Failed to send response to socket " << socket_fd << std::endl;
+        logger_ref.log("ERROR: Failed to send OK response to socket ", socket_fd, ". Error: ", strerror(errno));
     } else {
-        //std::cout << "[Thread " << this_id << "] Response sent (" << bytes_sent << " bytes)." << std::endl;
+        // Optional: Log successful send details
+        // logger_ref.log("OK Response sent (", bytes_sent, " bytes) to socket ", socket_fd);
     }
 }
 
-
+// --- Main Function ---
 int main() {
-    std::cout << "Server starting..." << std::endl;
+    logger.set_log_to_console(true);
+    logger.log("Server starting...");
 
-    std::string config_filepath = "../../config/ycsb_config.json";
-    auto json_config = JsonConfig::load_file(config_filepath);
-    auto conf = json_config.get("ycsb");
-    REGION_SIZE = conf.get("key_cnt_per_partition").get_int64();
+    // --- Configuration Loading ---
+    try {
+        std::string config_filepath = "../../config/ycsb_config.json"; // Adjust path if necessary
+        logger.log("Loading configuration from: ", config_filepath);
+        auto json_config = JsonConfig::load_file(config_filepath);
+        auto conf = json_config.get("ycsb"); // Or appropriate config section
+        REGION_SIZE = conf.get("key_cnt_per_partition").get_int64();
+        logger.log("REGION_SIZE set to: ", REGION_SIZE);
+        if (REGION_SIZE <= 0) {
+            logger.log("CRITICAL ERROR: REGION_SIZE loaded from config is not positive. Value: ", REGION_SIZE);
+            return -1; // Cannot proceed with invalid REGION_SIZE
+        }
+    } catch (const std::exception &e) {
+        logger.log("CRITICAL ERROR loading configuration: ", e.what());
+        return -1;
+    }
 
-    // load db meta
+    // --- Load DB Meta (Conditional) ---
 #if WORKLOAD_MODE == 1
     // TPCH workload
-    TPCH_META = new TPCHMeta();
-    // 从文件中初始化partition column_ids
-    std::string fname = "./partition_column_ids.txt";
-    TPCH_META->ReadColumnIDFromFile(fname);
+    logger.log("WORKLOAD_MODE is TPCH (1). Initializing TPCH Metadata...");
+    try {
+        TPCH_META = new TPCHMeta();
+        // 从文件中初始化partition column_ids (Initialize partition column_ids from file)
+        std::string fname = "./partition_column_ids.txt"; // Adjust path if necessary
+        logger.log("Reading partition column IDs from: ", fname);
+        TPCH_META->ReadColumnIDFromFile(fname); // Assuming this method exists and handles errors/logging
+        logger.log("TPCH Metadata initialized successfully.");
+    } catch (const std::exception &e) {
+        logger.log("CRITICAL ERROR initializing TPCH Metadata: ", e.what());
+        delete TPCH_META; // Clean up allocated memory
+        TPCH_META = nullptr;
+        return -1;
+    }
+#else
+    logger.log("WORKLOAD_MODE is YCSB (0) or undefined. Skipping TPCH Metadata initialization.");
 #endif
 
-    // Determine number of threads (e.g., based on hardware)
-    unsigned int num_threads = 12; // Leave one thread for the main thread
-    if (num_threads <= 0) {
-        num_threads = 4; // Default to 4 if hardware_concurrency is not available
-    }
-    std::cout << "Initializing thread pool with " << num_threads << " threads." << std::endl;
-    ThreadPool pool(num_threads); // Create the thread pool
+    // --- Thread Pool Setup ---
+    unsigned int num_threads = 12; // Consider making this configurable
+    logger.log("Initializing thread pool with ", num_threads, " threads.");
+    ThreadPool pool(num_threads);
+    metis.set_thread_pool(&pool); // Set thread pool for metis AFTER pool is created
 
-    int server_fd, new_socket;
+    // --- Server Socket Setup ---
+    int server_fd;
     struct sockaddr_in address{};
     int addrlen = sizeof(address);
-    // char buffer[BUFFER_SIZE] = {0}; // Buffer will be created inside the loop now
 
-    // --- Server Socket Setup (socket, setsockopt, bind, listen) ---
-    // (Your existing code for this part is fine)
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        std::cerr << "Failed to create socket" << std::endl;
+        logger.log("CRITICAL ERROR: Failed to create server socket. Error: ", strerror(errno));
         return -1;
     }
+    logger.log("Server socket created (FD: ", server_fd, ").");
+
     int opt = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
-        std::cerr << "Failed to set socket options" << std::endl;
-        close(server_fd); // Close socket on failure
-        return -1;
+        logger.log("ERROR: Failed to set SO_REUSEADDR option. Error: ", strerror(errno));
+        // Continue if non-critical, but log the error
     }
+
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
+
     if (bind(server_fd, (struct sockaddr *) &address, sizeof(address)) < 0) {
-        std::cerr << "Bind failed" << std::endl;
-        close(server_fd); // Close socket on failure
+        logger.log("CRITICAL ERROR: Bind failed on port ", PORT, ". Error: ", strerror(errno));
+        close(server_fd);
         return -1;
     }
-    if (listen(server_fd, 5) < 0) {
-        // Increased backlog queue slightly
-        std::cerr << "Listen failed" << std::endl;
-        close(server_fd); // Close socket on failure
+    logger.log("Server socket bound to port ", PORT, ".");
+
+    if (listen(server_fd, 10) < 0) {
+        // Increased backlog slightly
+        logger.log("CRITICAL ERROR: Listen failed. Error: ", strerror(errno));
+        close(server_fd);
         return -1;
     }
-    // --- End Server Socket Setup ---
+    logger.log("Server is running and listening on port ", PORT, "...");
 
-    std::cout << "Server is running and listening on port " << PORT << "..." << std::endl;
-
-    // Accept client connections and process data
+    logger.set_log_to_console(false);
+    // --- Accept Client Connections Loop ---
     while (true) {
-        if ((new_socket = accept(server_fd, (struct sockaddr *) &address, (socklen_t *) &addrlen)) < 0) {
-            // Handle accept error (e.g., log it), but maybe continue running
-            std::cerr << "Failed to accept connection. Error: " << strerror(errno) << std::endl;
+        int new_socket;
+        struct sockaddr_in client_address{}; // Use a separate struct for client addr
+        socklen_t client_addrlen = sizeof(client_address); // Use socklen_t
+
+        if ((new_socket = accept(server_fd, (struct sockaddr *) &client_address, &client_addrlen)) < 0) {
+            logger.log("ERROR: Failed to accept connection. Error: ", strerror(errno));
             // Consider adding a small sleep or other logic if accept fails repeatedly
             continue; // Continue to the next iteration to try accepting again
         }
 
         // Get client address info safely
         char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &address.sin_addr, client_ip, INET_ADDRSTRLEN);
-        int client_port = ntohs(address.sin_port);
+        inet_ntop(AF_INET, &client_address.sin_addr, client_ip, INET_ADDRSTRLEN);
+        int client_port = ntohs(client_address.sin_port);
 
-        std::cout << "New client connected, IP: " << client_ip
-                << ", Port: " << client_port << ", Socket FD: " << new_socket << std::endl;
+        logger.log("New client connected, IP: ", client_ip, ", Port: ", client_port, ", Socket FD: ", new_socket);
 
+        // --- Client Handler Thread ---
         // Create a separate thread to handle this client's communication.
         // This prevents the main accept loop from blocking on reads for one client.
         std::thread client_handler_thread([new_socket, &pool, client_ip, client_port]() {
-            // Pass pool by reference
-            std::cout << "Handler thread started for client " << client_ip << ":" << client_port << " (Socket: " <<
-                    new_socket << ")" << std::endl;
+            // Pass pool by reference, other variables captured by value implicitly
+            // Note: The global 'logger' is accessible here directly.
+
+            logger.log("Handler thread started for client ", client_ip, ":", client_port, " (Socket: ", new_socket,
+                       ")");
             char buffer[BUFFER_SIZE]; // Each client handler thread has its own buffer
 
-            metis.set_thread_pool(&pool);
             // Read incoming data from this specific client
             while (true) {
                 memset(buffer, 0, BUFFER_SIZE); // Clear the buffer
-                int valread = read(new_socket, buffer, BUFFER_SIZE - 1); // Leave space for null terminator
+                ssize_t valread = read(new_socket, buffer, BUFFER_SIZE - 1);
+                // Use ssize_t, leave space for null terminator
 
                 if (valread < 0) {
                     // Error occurred
-                    std::cerr << "Error reading from socket " << new_socket
-                            << " (Client: " << client_ip << ":" << client_port
-                            << "). Error: " << strerror(errno) << std::endl;
+                    logger.log("ERROR reading from socket ", new_socket, " (Client: ", client_ip, ":", client_port,
+                               "). Error: ", strerror(errno));
                     break; // Exit the read loop for this client
                 } else if (valread == 0) {
                     // Client disconnected gracefully
-                    std::cout << "Client " << client_ip << ":" << client_port
-                            << " (Socket: " << new_socket << ") disconnected." << std::endl;
+                    logger.log("Client ", client_ip, ":", client_port, " (Socket: ", new_socket,
+                               ") disconnected gracefully.");
                     break; // Exit the read loop for this client
                 }
 
                 // Process received data using the thread pool
                 std::string received_data(buffer, valread); // Use valread for accurate length
 
-                pool.enqueue(process_client_data, received_data, new_socket);
+                // Enqueue the processing task, passing the logger by reference wrapper
+                pool.enqueue(process_client_data, received_data, new_socket, std::ref(logger));
             }
 
             // Close the client socket when the read loop finishes (error or disconnect)
             close(new_socket);
-            std::cout << "Closed socket " << new_socket << " for client " << client_ip << ":" << client_port <<
-                    std::endl;
-        });
+            logger.log("Closed socket ", new_socket, " for client ", client_ip, ":", client_port);
+        }); // End of lambda for client handler thread
 
-        client_handler_thread.detach();
-    }
+        client_handler_thread.detach(); // Detach the thread to run independently
+    } // End of accept loop
 
-    std::cout << "Server shutting down..." << std::endl;
+    // --- Server Shutdown (Code may not be reached in simple loop) ---
+    logger.log("Server shutting down...");
     close(server_fd); // Close the listening server socket
+
+#if WORKLOAD_MODE == 1
+    delete TPCH_META; // Clean up TPCH meta if allocated
+    TPCH_META = nullptr;
+#endif
+
     return 0;
 }
+
