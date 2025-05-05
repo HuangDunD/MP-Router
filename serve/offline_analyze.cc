@@ -64,7 +64,8 @@ std::vector<std::string> load_sql_statements(const std::string& filename) {
 // Function to handle processing in a separate thread
 void process_offline_data(const std::string &data) {
     // TPCH workload
-    SQLInfo sql_info = parseTPCHSQL(data);
+    SQLInfo sql_info ;
+    parseTPCHSQL(data,sql_info);
     if(sql_info.type == SQLType::SELECT) {
         std::cout << "Handling SELECT statement." << std::endl;
         assert(sql_info.tableNames.size() == 1);

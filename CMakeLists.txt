@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 
 project(MP-Router)
 
-option(LINK_SO "Whether are linked dynamically" ON)
+# option(LINK_SO "Whether are linked dynamically" ON)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -fPIC")
 
@@ -10,7 +10,15 @@ set(CMAKE_BUILD_TYPE Debug)
 
 set(CMAKE_CXX_STANDARD 20)
 
+# 强制静态链接
+set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+set(BUILD_SHARED_LIBS OFF)
+set(CMAKE_EXE_LINKER_FLAGS "-static")
+
 include(FindThreads)
+
+include_directories($ENV{HOME}/local/include)
+link_directories($ENV{HOME}/local/lib)
 
 # 在用户目录下寻找 metis.h
 find_path(METIS_INCLUDE_DIR metis.h
@@ -67,7 +75,7 @@ endif()
 # 查找 libpq
 find_library(PQ_LIBRARY 
     pq PATHS 
-    /usr/lib /usr/lib64 /usr/local/lib 
+    /usr/lib /usr/lib64 /usr/local/lib $ENV{HOME}/local/lib
     PATH_SUFFIXES lib
 )
 if (NOT PQ_LIBRARY)

@@ -32,6 +32,8 @@ target_link_libraries(serve PRIVATE # Use PRIVATE or PUBLIC as appropriate
         ${GKLIB_LIBRARY}
         ${PQXX_LIBRARY}
         ${PQ_LIBRARY}
+        pgcommon 
+        pgport
 )
 
 # Link libraries to 'offline_analyzer' (if it also needs Logger, Region etc., add sources above too)
@@ -41,6 +43,8 @@ target_link_libraries(offline_analyzer PRIVATE # Use PRIVATE or PUBLIC
         ${GKLIB_LIBRARY}
         ${PQXX_LIBRARY}
         ${PQ_LIBRARY}
+        pgcommon
+        pgport
 )
 
 add_subdirectory(test)

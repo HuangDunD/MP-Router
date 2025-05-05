@@ -7,9 +7,12 @@ int main() {
     // std::string updateSQL = "UPDATE CUSTOMER ************* WHERE ps_partkey IN (732400, 752384, 707676,781470, 798267, 755211, 782611,745634, 791234, 727513);";
     std::string joinSQL = "*** SELECT * FROM tpch.CUSTOMER JOIN tpch.ORDERS ON CUSTOMER.c_customer = ORDERS.o_customer";
 
-    SQLInfo selectInfo = parseTPCHSQL(selectSQL);
-    SQLInfo updateInfo = parseTPCHSQL(updateSQL);
-    SQLInfo joinInfo = parseTPCHSQL(joinSQL);
+    SQLInfo selectInfo ;
+    parseTPCHSQL(selectSQL,selectInfo);
+    SQLInfo updateInfo ;
+    parseTPCHSQL(updateSQL,updateInfo);
+    SQLInfo joinInfo ;
+    parseTPCHSQL(joinSQL,updateInfo);
 
     // 打印解析结果
     assert(selectInfo.type == SQLType::SELECT);
