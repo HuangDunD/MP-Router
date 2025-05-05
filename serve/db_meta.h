@@ -13,8 +13,7 @@
 #include <stdexcept> // For exception handling during JSON parsing
 #include <map>       // Keep for existing TPCHMeta usage
 
-
-#include "nlohmann/json.hpp"
+#include "nlohmannjson/single_include/nlohmann/json.hpp"
 
 // Use the nlohmann::json namespace for convenience
 using json = nlohmann::json;

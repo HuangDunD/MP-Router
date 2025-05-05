@@ -8,18 +8,18 @@ set(SERVER_SRC
 )
 # --- MODIFICATION END ---
 
-# --- Fetch and Configure nlohmann/json using FetchContent ---
-include(FetchContent)
-FetchContent_Declare(
-        nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        # Specify a version tag for stability (e.g., v3.11.3 or check for latest)
-        GIT_TAG v3.11.3
-        # If you have it downloaded locally, you could use SOURCE_DIR instead:
-        # SOURCE_DIR /path/to/your/local/nlohmann/json
-)
-# Make the content available (downloads if necessary)
-FetchContent_MakeAvailable(nlohmann_json)
+# # --- Fetch and Configure nlohmann/json using FetchContent ---
+# include(FetchContent)
+# FetchContent_Declare(
+#         nlohmann_json
+#         GIT_REPOSITORY https://github.com/nlohmann/json.git
+#         # Specify a version tag for stability (e.g., v3.11.3 or check for latest)
+#         GIT_TAG v3.11.3
+#         # If you have it downloaded locally, you could use SOURCE_DIR instead:
+#         SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/nlohmannjson
+# )
+# # Make the content available (downloads if necessary)
+# FetchContent_MakeAvailable(nlohmann_json)
 
 add_executable(serve ${SERVER_SRC})
 add_executable(offline_analyzer offline_analyze.cc)
@@ -37,15 +37,15 @@ target_link_libraries(serve PRIVATE # Use PRIVATE or PUBLIC as appropriate
 )
 
 # Link libraries to 'offline_analyzer' (if it also needs Logger, Region etc., add sources above too)
-target_link_libraries(offline_analyzer PRIVATE # Use PRIVATE or PUBLIC
-        global
-        ${METIS_LIBRARY}
-        ${GKLIB_LIBRARY}
-        ${PQXX_LIBRARY}
-        ${PQ_LIBRARY}
-        pgcommon
-        pgport
-)
+# target_link_libraries(offline_analyzer PRIVATE # Use PRIVATE or PUBLIC
+#         global
+#         ${METIS_LIBRARY}
+#         ${GKLIB_LIBRARY}
+#         ${PQXX_LIBRARY}
+#         ${PQ_LIBRARY}
+#         pgcommon
+#         pgport
+# )
 
 add_subdirectory(test)
 
