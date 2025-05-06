@@ -18,9 +18,8 @@
 #define MaxComputeNodeCount 128
 
 // 定义所跑的workload 0:smallbank 1:tpcc
-#define WORKLOAD_MODE 1 // 0: ycsb 1: tpch
+#define WORKLOAD_MODE 2 // 0: ycsb 1: tpch, 2: tpcc
 
-extern std::string conninfo;
 extern int ComputeNodeCount;
 extern uint64_t ATTEMPTED_NUM;
 extern double CrossNodeAccessRatio;

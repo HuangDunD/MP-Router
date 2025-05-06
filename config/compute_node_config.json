@@ -1,0 +1,25 @@
+{
+  "remote_compute_nodes": {
+    "remote_compute_node_count": 2,
+    "remote_compute_node_ips": [
+      "10.12.2.125",
+      "10.12.2.127"
+    ],
+    "remote_compute_node_ports": [
+      54321,
+      54321
+    ],
+    "remote_compute_node_usernames": [
+      "system",
+      "system"
+    ],
+    "remote_compute_node_passwords": [
+      "123456",
+      "123456"
+    ],
+    "remote_compute_node_dbnames": [
+      "tpcc_test",
+      "tpcc_test"
+    ]
+  }
+}

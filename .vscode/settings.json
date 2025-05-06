@@ -77,7 +77,27 @@
         "valarray": "cpp",
         "variant": "cpp",
         "pqxx": "cpp",
-        "complex": "cpp"
+        "complex": "cpp",
+        "hash_set": "cpp",
+        "strstream": "cpp",
+        "cfenv": "cpp",
+        "csetjmp": "cpp",
+        "csignal": "cpp",
+        "decimal": "cpp",
+        "buffer": "cpp",
+        "executor": "cpp",
+        "internet": "cpp",
+        "io_context": "cpp",
+        "netfwd": "cpp",
+        "propagate_const": "cpp",
+        "socket": "cpp",
+        "source_location": "cpp",
+        "timer": "cpp",
+        "hash_map": "cpp",
+        "rope": "cpp",
+        "slist": "cpp",
+        "scoped_allocator": "cpp",
+        "typeindex": "cpp"
     },
     "java.configuration.updateBuildConfiguration": "automatic"
 }

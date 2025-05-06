@@ -14,81 +14,54 @@
 #include "metis_partitioner.h" // Assuming this is needed, replace NewMetis if necessary
 #include "region/region_generator.h"
 #include "log/Logger.h"     // Include the new Logger header
+#include <pqxx/pqxx> // PostgreSQL C++ library
 
 #define PORT 8500
 #define THREAD_POOL_SIZE 16
 #define BUFFER_SIZE 8129000 // max 8192kb=8MB 4096000=4MB
 
-
 // --- Global Variables ---
 Logger logger("server.log");
 NewMetis metis; // Assuming NewMetis is the correct type
 TPCHMeta *TPCH_META = nullptr; // Initialize global pointer
+std::string DBConnection[MaxComputeNodeCount];
 std::atomic<long long> send_times = 0; // Use long long for potentially large counts
 
 // Instantiate RegionProcessor within the scope where needed
 RegionProcessor regionProcessor(logger); // Pass the logger
 BmSql::Meta bmsqlMetadata; // Create an instance
 
-
 struct RouterEndpoint {
-    const char *ip;
+    std::string ip;
     uint16_t port;
+    std::string username;
+    std::string password;
+    std::string dbname;
 };
 
-static const std::array<RouterEndpoint, 8> kRouterTable{
-    {
-        /* idx:0 */ {"127.0.0.1", 9100},
-        /* idx:1 */ {"127.0.0.1", 9101},
-        /* idx:2 */ {"127.0.0.1", 9102},
-        /* idx:3 */ {"127.0.0.1", 9103},
-        /* idx:4 */ {"127.0.0.1", 9104},
-        /* idx:5 */ {"127.0.0.1", 9105},
-        /* idx:6 */ {"127.0.0.1", 9106},
-        /* idx:7 */ {"127.0.0.1", 9107}
-    }
-};
-
-// -----------------------------------------------------------------------------
-// 2. 简单的发送辅助函数
-// -----------------------------------------------------------------------------
-static bool send_sql_to_router(const std::string &sql,
-                               const RouterEndpoint &ep,
+static bool send_sql_to_router(const std::string &sqls,
+                               const std::string &conninfo,
                                Logger &lg) {
-    int rsock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (rsock < 0) {
-        lg.log("ERROR: create router socket failed: ", strerror(errno));
+    try {
+        pqxx::connection conn(conninfo);
+        if (!conn.is_open()) {
+            lg.log("ERROR: Failed to connect to the database.");
+            return -1;
+        } else {
+            lg.log("INFO: Connected to the database.");
+        }
+
+        pqxx::work txn(conn);
+
+        pqxx::result result = txn.exec(sqls + "\n");
+
+        txn.commit();
+
+        return true;
+    } catch (const std::exception& e) {
+        lg.log("ERROR: Error while connecting to PostgreSQL or getting query plan: ", e.what());
         return false;
     }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(ep.port);
-    if (inet_pton(AF_INET, ep.ip, &addr.sin_addr) != 1) {
-        lg.log("ERROR: invalid router IP ", ep.ip);
-        ::close(rsock);
-        return false;
-    }
-
-    if (::connect(rsock, reinterpret_cast<sockaddr *>(&addr),
-                  sizeof(addr)) < 0) {
-        lg.log("ERROR: connect router ", ep.ip, ":", ep.port,
-               " failed: ", strerror(errno));
-        ::close(rsock);
-        return false;
-    }
-
-    std::string payload = sql + "\n";
-    ssize_t n = ::send(rsock, payload.data(), payload.size(), 0);
-    if (n < 0) {
-        lg.log("ERROR: send sql to router ", ep.ip, ":", ep.port,
-               " failed: ", strerror(errno));
-    } else if (static_cast<size_t>(n) != payload.size()) {
-        lg.log("WARN : partial send to router ", ep.ip, ":", ep.port,
-               " (", n, "/", payload.size(), " bytes)");
-    }
-    ::close(rsock);
-    return n == static_cast<ssize_t>(payload.size());
 }
 
 void process_client_data(std::string_view data, int socket_fd, Logger &log) {
@@ -142,9 +115,10 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
         uint64_t router_node = metis.build_internal_graph(region_ids);
 
         if (!row_sql.empty() && router_node != UINT64_MAX) {
-            const auto &ep = kRouterTable[router_node % kRouterTable.size()];
-            log.log("Routing row_sql to ", ep.ip, ":", ep.port);
-            //send_sql_to_router(row_sql, ep, log);
+            // Send SQL to the router node
+            const auto &con = DBConnection[router_node % ComputeNodeCount];
+            log.log("Sending SQL to router node ", router_node, ": ", con);
+            send_sql_to_router(row_sql, con, log);
         }
     }
 
@@ -164,11 +138,38 @@ int main() {
     logger.set_log_to_console(true);
     logger.log("Server starting...");
 
-    // --- Configuration Loading ---
+    // --- Load Database Connection Info ---
+    logger.log("Loading database connection info...");
+    std::string compute_node_config_path = "../../config/compute_node_config.json";
+    auto compute_node_config = JsonConfig::load_file(compute_node_config_path);
+    auto compute_node_list = compute_node_config.get("remote_compute_nodes");
+    auto compute_node_count = (int)compute_node_list.get("remote_compute_node_count").get_int64();
+    ComputeNodeCount = compute_node_count;
+    std::cout << "ComputeNodeCount: " << ComputeNodeCount << std::endl;
+    for(int i=0; i < compute_node_count; i++) {
+        auto ip = compute_node_list.get("remote_compute_node_ips").get(i).get_str(); 
+        auto port = (int)compute_node_list.get("remote_compute_node_ports").get(i).get_int64();
+        auto username = compute_node_list.get("remote_compute_node_usernames").get(i).get_str();
+        auto password = compute_node_list.get("remote_compute_node_passwords").get(i).get_str();
+        auto dbname = compute_node_list.get("remote_compute_node_dbnames").get(i).get_str();
+        DBConnection[i] = "host=" + ip +
+                          " port=" + std::to_string(port) +
+                          " user=" + username +
+                          " password=" + password +
+                          " dbname=" + dbname;
+        logger.log("DBConnection[", i, "] = ", DBConnection[i]);
+    }
+
+
+    // --- Load DB Meta (Conditional) ---
+#if WORKLOAD_MODE == 0
+    // YCSB workload
+    logger.log("WORKLOAD_MODE is YCSB (0). Initializing YCSB Metadata...");
     try {
-        std::string config_filepath = "../../config/ycsb_config.json"; // Adjust path if necessary
-        logger.log("Loading configuration from: ", config_filepath);
-        auto json_config = JsonConfig::load_file(config_filepath);
+        std::string metaFilePath = "../../config/ycsb_meta.json";
+        std::cout << "Loading YCSB metadata from: " << metaFilePath << std::endl;
+        // Load the metadata
+        auto json_config = JsonConfig::load_file(metaFilePath);
         auto conf = json_config.get("ycsb"); // Or appropriate config section
         REGION_SIZE = conf.get("key_cnt_per_partition").get_int64();
         logger.log("REGION_SIZE set to: ", REGION_SIZE);
@@ -176,28 +177,28 @@ int main() {
             logger.log("CRITICAL ERROR: REGION_SIZE loaded from config is not positive. Value: ", REGION_SIZE);
             return -1; // Cannot proceed with invalid REGION_SIZE
         }
+        std::cout << "Metadata loaded successfully." << std::endl;
+        std::cout << "-----------------------------" << std::endl;
     } catch (const std::exception &e) {
-        logger.log("CRITICAL ERROR loading configuration: ", e.what());
+        logger.log("CRITICAL ERROR initializing YCSB Metadata: ", e.what());
         return -1;
     }
-
-    // --- Load DB Meta (Conditional) ---
-#if WORKLOAD_MODE == 1
-    // TPCH workload
-    logger.log("WORKLOAD_MODE is TPCH (1). Initializing TPCH Metadata...");
+#elif WORKLOAD_MODE == 2
+    // TPC-C workload
+    logger.log("WORKLOAD_MODE is TPCC (1). Initializing TPCC Metadata...");
     try {
-        std::string metaFilePath = "/home/mt/MP-Router/serve/db_mate.json";
-        std::cout << "Loading BMSQL metadata from: " << metaFilePath << std::endl;
+        std::string metaFilePath = "../../config/tpcc_meta.json";
+        std::cout << "Loading TPCC metadata from: " << metaFilePath << std::endl;
         // Load the metadata
         if (!bmsqlMetadata.loadFromJsonFile(metaFilePath)) {
-            std::cerr << "Fatal Error: Failed to load BMSQL metadata. Exiting." << std::endl;
+            std::cerr << "Fatal Error: Failed to load TPCC metadata. Exiting." << std::endl;
             return EXIT_FAILURE;
         }
 
         std::cout << "Metadata loaded successfully." << std::endl;
         std::cout << "-----------------------------" << std::endl;
     } catch (const std::exception &e) {
-        logger.log("CRITICAL ERROR initializing TPCH Metadata: ", e.what());
+        logger.log("CRITICAL ERROR initializing TPCC Metadata: ", e.what());
         return -1;
     }
 #else

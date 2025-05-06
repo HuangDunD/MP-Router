@@ -13,6 +13,8 @@
 
 TPCHMeta* TPCH_META;
 
+std::string conninfo = "host=localhost port=15432 dbname=template1 user=gpadmin password=gpadmin";
+
 // 去除字符串首尾空白
 inline std::string trim(const std::string &s) {
     auto start = s.begin();

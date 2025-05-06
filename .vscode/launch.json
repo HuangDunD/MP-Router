@@ -5,7 +5,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "(gdb)metis",
+            "name": "(gdb)serve",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/serve/serve",
