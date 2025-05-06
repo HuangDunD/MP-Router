@@ -5,6 +5,7 @@
 #include <arpa/inet.h>  // For socket-related functions, inet_ntop
 #include <sys/socket.h> // For socket API
 #include <csignal>
+#include <random>
 
 #include "util/json_config.h"
 #include "threadpool.h" // Include your thread pool header
@@ -26,6 +27,7 @@ NewMetis metis; // Assuming NewMetis is the correct type
 TPCHMeta *TPCH_META = nullptr; // Initialize global pointer
 std::string DBConnection[MaxComputeNodeCount];
 std::atomic<long long> send_times = 0; // Use long long for potentially large counts
+uint64_t seed = 0xdeadbeef;
 
 // Instantiate RegionProcessor within the scope where needed
 RegionProcessor regionProcessor(logger); // Pass the logger
@@ -96,30 +98,45 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
     std::vector<uint64_t> region_ids;
     std::string row_sql;
     bool ok = false;
-
+    uint64_t router_node = UINT64_MAX;
+    
+    // Parse the socket data to SQLs and region IDs
     try {
         ok = regionProcessor.generateRegionIDs(std::string(data), region_ids, bmsqlMetadata, row_sql);
     } catch (const std::exception &e) {
         log.log("CRITICAL: RegionProcessor exception for socket ", socket_fd, ": ", e.what());
     }
-
     if (!ok) {
         // Hard failure
         safe_send("ERR\n");
         return;
     }
-
+    
     // ---- Successful generation ----
-    if (!region_ids.empty()) {
-        log.log("Socket ", socket_fd, ": generated ", region_ids.size(), " region IDs");
-        uint64_t router_node = metis.build_internal_graph(region_ids);
-
-        if (!row_sql.empty() && router_node != UINT64_MAX) {
-            // Send SQL to the router node
-            const auto &con = DBConnection[router_node % ComputeNodeCount];
-            log.log("Sending SQL to router node ", router_node, ": ", con);
-            send_sql_to_router(row_sql, con, log);
+    if(SYSTEM_MODE == 0) {
+        // random based algorithm
+        // Randomly select a router node
+        std::random_device rd;  // 获取随机种子
+        std::mt19937 gen(rd()); // 使用Mersenne Twister引擎
+        std::uniform_int_distribution<> distrib(0, ComputeNodeCount - 1); // 生成随机数
+        router_node = distrib(gen); // 生成随机数
+    } else if(SYSTEM_MODE == 1) {
+        // affinity based algorithm
+        if (!region_ids.empty()) {
+            log.log("Socket ", socket_fd, ": generated ", region_ids.size(), " region IDs");
+            router_node = metis.build_internal_graph(region_ids);
         }
+    }
+
+    if (!row_sql.empty() && router_node != UINT64_MAX) {
+        // Send SQL to the router node
+        const auto &con = DBConnection[router_node % ComputeNodeCount];
+        log.log("Sending SQL to router node ", router_node, ": ", con);
+        send_sql_to_router(row_sql, con, log);
+    } else {
+        log.log("ERROR: No SQL to send or invalid router node.");
+        safe_send("ERR\n");
+        return;
     }
 
     // ---- Final client acknowledgment ----
@@ -183,7 +200,7 @@ int main() {
         logger.log("CRITICAL ERROR initializing YCSB Metadata: ", e.what());
         return -1;
     }
-#elif WORKLOAD_MODE == 2
+#elif WORKLOAD_MODE == 1
     // TPC-C workload
     logger.log("WORKLOAD_MODE is TPCC (1). Initializing TPCC Metadata...");
     try {

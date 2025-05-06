@@ -97,7 +97,8 @@
         "rope": "cpp",
         "slist": "cpp",
         "scoped_allocator": "cpp",
-        "typeindex": "cpp"
+        "typeindex": "cpp",
+        "cassert": "cpp"
     },
     "java.configuration.updateBuildConfiguration": "automatic"
 }
