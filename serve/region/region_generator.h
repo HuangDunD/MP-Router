@@ -36,13 +36,14 @@ public:
      * @brief Parses data based on WORKLOAD_MODE and generates region IDs.
      * @param data Raw data received from the client.
      * @param out_region_ids Output vector to store generated combined region IDs.
+     * @param raw_txn
      * @return bool Returns false if a critical error occurred that prevents further processing
      * (e.g., invalid REGION_SIZE during processing), true otherwise.
      * Non-critical errors (like parsing errors or invalid keys) might be logged
      * but the function may still return true.
      */
     bool generateRegionIDs(const std::string &data, std::vector<uint64_t> &out_region_ids,
-                           const BmSql::Meta &bmsqlMeta);
+                           const BmSql::Meta &bmsqlMeta, std::string &raw_txn);
 
 private:
     Logger &logger_; // Reference to the logger instance
@@ -61,9 +62,10 @@ private:
      * @brief Processes data assuming TPC-H workload format (SQL).
      * @param data The raw input data string (SQL query).
      * @param out_region_ids Vector to populate with generated region IDs.
+     * @param raw_txn
      * @return bool False on critical errors (invalid REGION_SIZE), true otherwise.
      */
-    bool processTPCH(const std::string &data, const BmSql::Meta &bmsqlMeta, std::vector<uint64_t> &out_region_ids);
+    bool processTPCH(const std::string &data, const BmSql::Meta &bmsqlMeta, std::vector<uint64_t> &out_region_ids, std::string &raw_txn);
 
     // --- Dependencies (Accessed via extern as in original code) ---
     // These are kept extern for minimal changes from original structure,

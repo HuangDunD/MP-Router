@@ -30,40 +30,23 @@ class ThreadPool; // Assume ThreadPool class is defined elsewhere
 #define ENABLE_AUTO_PARTITION
 
 // --- Logging Helper Function ---
-// Note: std::localtime is not guaranteed to be thread-safe.
-// Consider using platform-specific thread-safe alternatives like
-// localtime_s (Windows) or localtime_r (POSIX) for high concurrency.
 inline void log_message(const std::string &message, std::ostream &log_stream) {
     auto now = std::chrono::system_clock::now();
     auto now_c = std::chrono::system_clock::to_time_t(now);
-#ifdef _WIN32 // Handle Windows' localtime_s
-        std::tm now_tm;
-        localtime_s(&now_tm, &now_c);
-#else // POSIX's localtime_r or fallback to potentially non-thread-safe localtime
-    // For localtime_r (thread-safe):
-    // std::tm now_tm;
-    // localtime_r(&now_c, &now_tm);
-    // Fallback:
     std::tm now_tm = *std::localtime(&now_c); // Use non-thread-safe localtime
-#endif
+
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
     std::stringstream ss;
     ss << std::put_time(&now_tm, "%Y-%m-%d %H:%M:%S");
     ss << '.' << std::setfill('0') << std::setw(3) << ms.count();
     std::string log_entry = "[" + ss.str() + "] " + message;
 
-    // Output to console (optional, but often useful for debugging)
-    //std::cout << log_entry << std::endl;
-
-    // Output to log file stream
     if (log_stream.good()) {
         log_stream << log_entry << std::endl;
     } else {
         std::cerr << "[Logging Error] Log stream is not good for message: " << message << std::endl;
     }
 }
-
-// --- End Logging Helper ---
 
 
 class NewMetis {
@@ -97,7 +80,7 @@ public:
      * This function is thread-safe.
      * @param unique_mapped_ids_in_group Vector of unique integer IDs appearing together.
      */
-    void build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group);
+    uint64_t build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group);
 
     /**
      * @brief Partitions the internally stored graph using METIS_PartGraphKway.
@@ -133,7 +116,7 @@ private:
     std::string partition_output_file_ = "graph_partitions.csv"; // Default output file
     std::string partition_log_file_ = "partitioning.log"; // Default log file
     uint64_t num_partitions_ = 8; // Default number of partitions
-    static const uint64_t PARTITION_INTERVAL = 50; // Trigger partition every 1000 calls
+    static const uint64_t PARTITION_INTERVAL = 1000; // Trigger partition every 1000 calls
 
 
     // 新增的映射表和计数器
@@ -175,9 +158,9 @@ inline void NewMetis::set_partition_parameters(std::string output_file, std::str
 // ========================================================================
 // MODIFIED build_internal_graph FUNCTION
 // ========================================================================
-inline void NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group) {
+inline uint64_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group) {
     if (unique_mapped_ids_in_group.empty()) {
-        return; // Nothing to do for empty input
+        return -1; // Nothing to do for empty input
     }
 
     // --- Automatic Partition Trigger Logic ---
@@ -337,8 +320,7 @@ inline void NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_m
                             "' for cross-partition log." << std::endl;
                 }
 
-                // Here you would typically *use* the dominant_partition_id for routing or affinity decisions
-                // For example: route_request_to_partition(dominant_partition_id);
+                return dominant_partition_id;
             } else if (partition_counts.size() == 1 && unmapped_count == 0) {
                 // Optional: Log if all nodes map to the same partition (no cross-access)
                 std::ofstream log_stream(partition_log_file_, std::ios::app);
@@ -348,6 +330,7 @@ inline void NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_m
                             partition_counts.begin()->first), log_stream);
                     log_stream.close();
                 }
+                return partition_counts.begin()->first;
             } else if (partition_counts.empty() && unmapped_count > 0) {
                 // Optional: Log if none of the nodes were found in the map
                 std::ofstream log_stream(partition_log_file_, std::ios::app);
@@ -365,14 +348,14 @@ inline void NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_m
                         " found in the current partition map. Cannot determine dominant partition.", log_stream);
                     log_stream.close();
                 }
+                return -1;
             }
-            // Case: partition_counts.size() == 1 && unmapped_count > 0 is implicitly handled (treated as single partition access among mapped nodes)
-            // Case: partition_counts.empty() && unmapped_count == 0 means input group was empty, already handled.
         } // else: partition_node_map is empty, do nothing.
     } // graph_mutex_ is released here
     // ========================================================================
     // END: Cross-Partition Access Check
     // ========================================================================
+    return static_cast<uint64_t>(-1);
 }
 
 
@@ -623,7 +606,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
             // Need lock to access reverse map and update partition_node_map
             std::lock_guard<std::mutex> lock(graph_mutex_);
             // Choose the original ID corresponding to dense ID 0 as the primary representative for partition 0
-            if (nvtx_metis > 0 && regionid_to_dense_map_.size() > 0) {
+            if (nvtx_metis > 0 && !regionid_to_dense_map_.empty()) {
                 primary_id_for_part0 = regionid_to_dense_map_[0];
             } // else remains 0 or handle error
 
@@ -753,14 +736,10 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
             idx_t partition_index = part[dense_i]; // Get the partition index assigned by METIS
 
             // --- NEW: Extract TableID and InnerRegionID from original_id ---
-            // Option 1: Using the Region class (requires Region class definition)
             Region region(original_id); // Create Region object from the 64-bit ID
             unsigned int table_id = region.getTableId();
             unsigned int inner_region_id = region.getInnerRegionId();
 
-            // Option 2: Direct bit manipulation (if Region class not available here)
-            // unsigned int table_id = static_cast<unsigned int>(original_id >> 32);
-            // unsigned int inner_region_id = static_cast<unsigned int>(original_id); // Lower 32 bits
 
             // --- MODIFIED: Write the new format ---
             outpartition << original_id << ","

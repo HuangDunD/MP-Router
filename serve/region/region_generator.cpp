@@ -33,7 +33,7 @@ RegionProcessor::RegionProcessor(Logger &logger) : logger_(logger) {
 }
 
 bool RegionProcessor::generateRegionIDs(const std::string &data, std::vector<uint64_t> &out_region_ids,
-                                        const BmSql::Meta &bmsqlMeta) {
+                                        const BmSql::Meta &bmsqlMeta, std::string &raw_txn) {
     out_region_ids.clear(); // Ensure the output vector is empty
 
     // Check REGION_SIZE again in case it was modified externally (though unlikely if const)
@@ -47,7 +47,7 @@ bool RegionProcessor::generateRegionIDs(const std::string &data, std::vector<uin
     return processYCSB(data, out_region_ids);
 #elif WORKLOAD_MODE == 1
     // TPCH workload
-    return processTPCH(data, bmsqlMeta, out_region_ids);
+    return processTPCH(data, bmsqlMeta, out_region_ids, raw_txn);
 #else
     logger_.log("ERROR: Unknown WORKLOAD_MODE defined: ", WORKLOAD_MODE);
     return true; // Or false, depending on how you want to handle unknown modes
@@ -117,11 +117,10 @@ bool RegionProcessor::processYCSB(const std::string &data, std::vector<uint64_t>
 }
 
 bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bmsqlMeta,
-                                  std::vector<uint64_t> &out_region_ids) {
-    logger_.log("Processing BMSQL data (SQL)...");
-    try {
+                                  std::vector<uint64_t> &out_region_ids, std::string &raw_txn) {
+try {
         // 1. Call the BMSQL parser
-        std::vector<SQLInfo> sql_infos = parseTPCHSQL(data, bmsqlMeta.idToNameMap_);
+        std::vector<SQLInfo> sql_infos = parseTPCHSQL(data, bmsqlMeta.idToNameMap_, raw_txn);
 
         logger_.log("Parsed ", sql_infos.size(), " SQL info block(s).");
 
@@ -150,7 +149,8 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                 }
 
                 if (affinityColumn == -1) {
-                    logger_.log("Block ", i + 1, ": Warning: No affinity column found in table '", current_sql_info.tableNames[0],
+                    logger_.log("Block ", i + 1, ": Warning: No affinity column found in table '",
+                                current_sql_info.tableNames[0],
                                 "'.");
                 } else {
                     auto inner_key = current_sql_info.keyVector[ser_num] / bmsqlMeta.getRegionSizeByColumnId(
@@ -160,7 +160,7 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                     uint64_t combined_id = current_region.serializeToUint64();
                     out_region_ids.push_back(combined_id);
                     logger_.log("Block ", i + 1, ": Found affinity column ID ", affinityColumn, " in table '",
-                               current_sql_info.tableNames[0], "'.");
+                                current_sql_info.tableNames[0], "'.");
                 }
                 // --- End of logic for SELECT/UPDATE block ---
             } else if (current_sql_info.type == SQLType::JOIN) {
@@ -175,7 +175,6 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                 logger_.log("Block ", i + 1, ": Unknown or unhandled SQL type encountered. Skipping block.");
             }
         } // End loop through sql_infos
-
     } catch (const std::exception &e) {
         logger_.log("ERROR processing BMSQL SQL data: ", e.what());
         return true;

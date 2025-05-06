@@ -4,6 +4,7 @@
 #include <unistd.h>     // For close, read
 #include <arpa/inet.h>  // For socket-related functions, inet_ntop
 #include <sys/socket.h> // For socket API
+#include <csignal>
 
 #include "util/json_config.h"
 #include "threadpool.h" // Include your thread pool header
@@ -14,8 +15,10 @@
 #include "region/region_generator.h"
 #include "log/Logger.h"     // Include the new Logger header
 
-#define PORT 8500       // Port number to listen on
-#define BUFFER_SIZE 4096000 // Buffer size for receiving data
+#define PORT 8500
+#define THREAD_POOL_SIZE 16
+#define BUFFER_SIZE 8129000 // max 8192kb=8MB 4096000=4MB
+
 
 // --- Global Variables ---
 Logger logger("server.log");
@@ -27,90 +30,137 @@ std::atomic<long long> send_times = 0; // Use long long for potentially large co
 RegionProcessor regionProcessor(logger); // Pass the logger
 BmSql::Meta bmsqlMetadata; // Create an instance
 
-// --- Client Data Processing Function ---
-// This function is intended to be run by the thread pool threads.
-void process_client_data(const std::string &data, int socket_fd, Logger &logger_ref) {
-    if (data == "HELLO\n") {
-        ssize_t bytes_sent1 = send(socket_fd, "FINISH\n", 7, 0);
-        if (bytes_sent1 < 0) {
-            std::cerr << "send failed" << std::endl;
+
+struct RouterEndpoint {
+    const char *ip;
+    uint16_t port;
+};
+
+static const std::array<RouterEndpoint, 8> kRouterTable{
+    {
+        /* idx:0 */ {"127.0.0.1", 9100},
+        /* idx:1 */ {"127.0.0.1", 9101},
+        /* idx:2 */ {"127.0.0.1", 9102},
+        /* idx:3 */ {"127.0.0.1", 9103},
+        /* idx:4 */ {"127.0.0.1", 9104},
+        /* idx:5 */ {"127.0.0.1", 9105},
+        /* idx:6 */ {"127.0.0.1", 9106},
+        /* idx:7 */ {"127.0.0.1", 9107}
+    }
+};
+
+// -----------------------------------------------------------------------------
+// 2. 简单的发送辅助函数
+// -----------------------------------------------------------------------------
+static bool send_sql_to_router(const std::string &sql,
+                               const RouterEndpoint &ep,
+                               Logger &lg) {
+    int rsock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (rsock < 0) {
+        lg.log("ERROR: create router socket failed: ", strerror(errno));
+        return false;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(ep.port);
+    if (inet_pton(AF_INET, ep.ip, &addr.sin_addr) != 1) {
+        lg.log("ERROR: invalid router IP ", ep.ip);
+        ::close(rsock);
+        return false;
+    }
+
+    if (::connect(rsock, reinterpret_cast<sockaddr *>(&addr),
+                  sizeof(addr)) < 0) {
+        lg.log("ERROR: connect router ", ep.ip, ":", ep.port,
+               " failed: ", strerror(errno));
+        ::close(rsock);
+        return false;
+    }
+
+    std::string payload = sql + "\n";
+    ssize_t n = ::send(rsock, payload.data(), payload.size(), 0);
+    if (n < 0) {
+        lg.log("ERROR: send sql to router ", ep.ip, ":", ep.port,
+               " failed: ", strerror(errno));
+    } else if (static_cast<size_t>(n) != payload.size()) {
+        lg.log("WARN : partial send to router ", ep.ip, ":", ep.port,
+               " (", n, "/", payload.size(), " bytes)");
+    }
+    ::close(rsock);
+    return n == static_cast<ssize_t>(payload.size());
+}
+
+void process_client_data(std::string_view data, int socket_fd, Logger &log) {
+    using namespace std::literals;
+
+    // Local helper to send data and report errors
+    const auto safe_send = [&](std::string_view msg) -> bool {
+        ssize_t n = send(socket_fd, msg.data(), msg.size(), MSG_NOSIGNAL); // 或无 flag
+        if (n < 0) {
+            if (errno == EPIPE) {
+                log.log("Peer closed connection (EPIPE). Closing socket ", socket_fd);
+                std::cerr << "socket is closed , Closing socket : " << socket_fd << std::endl;
+                close(socket_fd);
+            } else {
+                std::cerr<<"send failed: " << strerror(errno) << std::endl;
+            }
+            return false;
         }
-        return;
-    } else if (data == "BYE\n") {
-        ssize_t bytes_sent1 = send(socket_fd, "FINISH\n", 7, 0);
-        if (bytes_sent1 < 0) {
-            std::cerr << "send failed" << std::endl;
-        }
+        return true;
+    };
+
+    // Immediate FINISH handshake
+    if (data == "HELLO\n"sv || data == "BYE\n"sv) {
+        safe_send("FINISH\n");
         return;
     }
 
-    // Log processing start using the passed logger reference
-    std::string truncated_data = data.substr(0, 150) + (data.length() > 150 ? "..." : "");
-    logger_ref.log("Socket ", socket_fd, " processing: ", truncated_data);
+    // ---- Main request handling ----
+    log.log("Socket ", socket_fd, " processing: ",
+            data.substr(0, 150), data.size() > 150 ? "..." : "");
 
-    // Vector to hold the final combined IDs
-    std::vector<uint64_t> combined_region_ids;
+    std::vector<uint64_t> region_ids;
+    std::string row_sql;
+    bool ok = false;
 
-    bool processing_successful = false;
     try {
-        // ---- MODIFICATION START ----
-
-        // Call the generateRegionIDs method of the RegionProcessor instance
-        processing_successful = regionProcessor.generateRegionIDs(
-            data,
-            combined_region_ids,
-            bmsqlMetadata
-        );
-        // If region IDs were generated successfully and the vector is not empty,
-        // update the Metis graph.
-        if (processing_successful && !combined_region_ids.empty()) {
-            logger_ref.log("Socket ", socket_fd, ": Successfully generated ", combined_region_ids.size(),
-                           " region IDs. Adding to Metis graph.");
-            metis.build_internal_graph(combined_region_ids); // Add the IDs to the graph
-        } else if (processing_successful) {
-            logger_ref.log("Socket ", socket_fd,
-                           ": Region ID generation successful, but no IDs were produced (e.g., non-partition key query).");
-            // Still considered a success in terms of processing the request
-        }
-        // If processing_successful is false, the error is logged within generateRegionIDs
-        // ---- MODIFICATION END ----
+        ok = regionProcessor.generateRegionIDs(std::string(data), region_ids, bmsqlMetadata, row_sql);
     } catch (const std::exception &e) {
-        // Catch potential exceptions from RegionProcessor constructor or methods
-        logger_ref.log("CRITICAL ERROR during RegionProcessor usage for socket ", socket_fd, ": ", e.what());
-        processing_successful = false; // Ensure failure state
+        log.log("CRITICAL: RegionProcessor exception for socket ", socket_fd, ": ", e.what());
     }
 
-
-    // Send response back to the client based on processing result
-    if (!processing_successful) {
-        logger_ref.log("ERROR: Failed to process data for socket ", socket_fd, ". Sending ERR response.");
-        // Consider logging more details about why processing failed if available
-        send(socket_fd, "ERR\n", 4, 0); // Send error response
-        return; // Exit if processing failed critically
+    if (!ok) {
+        // Hard failure
+        safe_send("ERR\n");
+        return;
     }
 
-    // Processing was successful (or non-critically failed), send OK
-    ssize_t bytes_sent = send(socket_fd, "OK\n", 3, 0);
-    send_times.fetch_add(1); // Atomically increment and get new value
+    // ---- Successful generation ----
+    if (!region_ids.empty()) {
+        log.log("Socket ", socket_fd, ": generated ", region_ids.size(), " region IDs");
+        uint64_t router_node = metis.build_internal_graph(region_ids);
 
-    // Log send status periodically
-    if (send_times % 100 == 0) {
-        logger_ref.set_log_to_console(true);
-        logger_ref.log("Sent response to socket %d (%lld times).", socket_fd, send_times.load());
-        logger_ref.set_log_to_console(false);
+        if (!row_sql.empty() && router_node != UINT64_MAX) {
+            const auto &ep = kRouterTable[router_node % kRouterTable.size()];
+            log.log("Routing row_sql to ", ep.ip, ":", ep.port);
+            //send_sql_to_router(row_sql, ep, log);
+        }
     }
 
-    // Log send errors
-    if (bytes_sent < 0) {
-        logger_ref.log("ERROR: Failed to send OK response to socket ", socket_fd, ". Error: ", strerror(errno));
-    } else {
-        // Optional: Log successful send details
-        // logger_ref.log("OK Response sent (", bytes_sent, " bytes) to socket ", socket_fd);
+    // ---- Final client acknowledgment ----
+    if (safe_send("OK\n")) {
+        if (++send_times % 1000 == 0) {
+            std::cout <<"send OK times: " << send_times.load() << std::endl;
+        }
     }
 }
 
+
 // --- Main Function ---
 int main() {
+    signal(SIGPIPE, SIG_IGN);
+
     logger.set_log_to_console(true);
     logger.log("Server starting...");
 
@@ -155,10 +205,9 @@ int main() {
 #endif
 
     // --- Thread Pool Setup ---
-    unsigned int num_threads = 20; // Consider making this configurable
-    logger.log("Initializing thread pool with ", num_threads, " threads.");
-    ThreadPool pool(num_threads);
-    metis.set_thread_pool(&pool); // Set thread pool for metis AFTER pool is created
+    logger.log("Initializing thread pool with ", THREAD_POOL_SIZE, " threads.");
+    ThreadPool pool(THREAD_POOL_SIZE);
+    metis.set_thread_pool(&pool);
 
     // --- Server Socket Setup ---
     int server_fd;
@@ -225,7 +274,7 @@ int main() {
 
             logger.log("Handler thread started for client ", client_ip, ":", client_port, " (Socket: ", new_socket,
                        ")");
-            char buffer[BUFFER_SIZE]; // Each client handler thread has its own buffer
+            char *buffer = new char[BUFFER_SIZE]; // Each client handler thread has its own buffer
 
             // Read incoming data from this specific client
             while (true) {
@@ -254,6 +303,7 @@ int main() {
 
             // Close the client socket when the read loop finishes (error or disconnect)
             close(new_socket);
+            delete [] buffer; // Free the buffer memory
             logger.log("Closed socket ", new_socket, " for client ", client_ip, ":", client_port);
         }); // End of lambda for client handler thread
 

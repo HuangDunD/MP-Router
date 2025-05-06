@@ -10,15 +10,22 @@
 #include <iostream>
 #include <stdexcept> // For exceptions
 #include <utility>   // For std::pair
-#include <memory>    // For std::unique_ptr (optional, for usage example)
 
-// --- Include nlohmann/json Header ---
-// Make sure this header is available in your include paths
-#include "nlohmann/json.hpp"
+#ifndef RAPIDJSON_HAS_STDSTRING
+#define RAPIDJSON_HAS_STDSTRING 1
+#endif
 
-// Use the nlohmann::json namespace alias for convenience
-using json = nlohmann::json;
+#include <rapidjson/document.h>
+#include <rapidjson/error/en.h>
 
+using rapidjson::Document;
+using rapidjson::Value;
+using rapidjson::kArrayType;
+using rapidjson::kObjectType;
+using rapidjson::kNumberType;
+using rapidjson::kStringType;
+using rapidjson::kFalseType;
+using rapidjson::kTrueType;
 
 namespace BmSql {
     // Forward declaration
@@ -110,116 +117,90 @@ namespace BmSql {
             return columunIsAffinity.find(columnId)->second;
         }
 
-        // --- Loading Function ---
-        // Loads metadata from the specified JSON file using nlohmann/json.
         bool loadFromJsonFile(const std::string &filename) {
-            // std::filesystem::path currentPath = std::filesystem::current_path();
-            // std::cout << "当前工作目录: " << currentPath << std::endl;
-            std::ifstream ifs(filename);
-            if (!ifs.is_open()) {
-                std::cerr << "Error [BmSql::Meta]: Cannot open JSON meta file: " << filename << std::endl;
+            // 1. 读取文件到 std::string
+            std::ifstream ifs(filename, std::ios::in | std::ios::binary);
+            if (!ifs) {
+                std::cerr << "Error [BmSql::Meta]: Cannot open JSON meta file: " << filename << '\n';
+                return false;
+            }
+            std::ostringstream oss;
+            oss << ifs.rdbuf();
+            std::string jsonStr = oss.str();
+
+            // 2. 解析
+            rapidjson::Document doc;
+            doc.Parse(jsonStr.c_str());
+            if (doc.HasParseError()) {
+                const char *msg =
+#ifdef RAPIDJSON_ERROR_EN_H_            // 有 en.h
+            rapidjson::GetParseError_En(doc.GetParseError());
+#else                                   // Fallback （较老版本）
+                        rapidjson::GetParseErrorFunc()(doc.GetParseError());
+#endif
+                std::cerr << "Error [BmSql::Meta]: RapidJSON parsing failed for file: " << filename << '\n'
+                        << "Message : " << msg << '\n'
+                        << "Offset  : " << doc.GetErrorOffset() << '\n';
+                return false;
+            }
+            if (!doc.IsArray()) {
+                std::cerr << "Error [BmSql::Meta]: JSON root is not an array in file: " << filename << '\n';
                 return false;
             }
 
-            try {
-                // Parse the entire file into a json object
-                json root = json::parse(ifs);
-                ifs.close(); // Close the file stream
+            // 3. 清空旧数据
+            tables_.clear();
+            tableIdToIndexMap_.clear();
+            tableNameToIndexMap_.clear();
+            globalColumnIdLocationMap_.clear();
+            globalColumnNameLocationMap_.clear();
+            idToNameMap_.clear();
+            idToRegionSize.clear();
+            columunIsAffinity.clear();
 
-                // --- Clear existing data ---
-                tables_.clear();
-                tableIdToIndexMap_.clear();
-                tableNameToIndexMap_.clear();
-                globalColumnIdLocationMap_.clear();
-                globalColumnNameLocationMap_.clear();
-                idToNameMap_.clear(); // Clear the new map too
-                idToRegionSize.clear(); // Clear previously added map
-                columunIsAffinity.clear(); // Clear NEW map
+            tables_.reserve(doc.Size());
 
-                // Validate the root element (expecting an array of tables)
-                if (!root.is_array()) {
-                    std::cerr << "Error [BmSql::Meta]: JSON root is not an array in file: " << filename << std::endl;
+            // 4. 遍历表
+            for (auto itTable = doc.Begin(); itTable != doc.End(); ++itTable) {
+                const rapidjson::Value &t = *itTable;
+                if (!t.IsObject() || !t.HasMember("id") || !t["id"].IsInt() ||
+                    !t.HasMember("name") || !t["name"].IsString() ||
+                    !t.HasMember("columns") || !t["columns"].IsArray()) {
+                    std::cerr << "Error [BmSql::Meta]: Invalid table object structure.\n";
                     return false;
                 }
 
-                tables_.reserve(root.size()); // Pre-allocate space
+                TableInfo tbl{t["id"].GetInt(), t["name"].GetString()};
+                const rapidjson::Value &cols = t["columns"];
+                tbl.columns.reserve(cols.Size());
 
-                // --- Iterate through tables in JSON ---
-                for (const auto &tableJson: root) {
-                    if (!tableJson.is_object()) {
-                        std::cerr << "Error [BmSql::Meta]: Found non-object element in root array." << std::endl;
+                // 4.1 遍历列
+                for (auto itCol = cols.Begin(); itCol != cols.End(); ++itCol) {
+                    const rapidjson::Value &c = *itCol;
+                    if (!c.IsObject() || !c.HasMember("id") || !c["id"].IsInt() ||
+                        !c.HasMember("name") || !c["name"].IsString() ||
+                        !c.HasMember("is_affinity") || !c["is_affinity"].IsBool() ||
+                        !c.HasMember("REGION_SIZE") || !c["REGION_SIZE"].IsInt()) {
+                        std::cerr << "Error [BmSql::Meta]: Invalid column object structure.\n";
                         return false;
                     }
+                    tbl.columns.emplace_back(
+                        c["id"].GetInt(),
+                        c["name"].GetString(),
+                        c["is_affinity"].GetBool(),
+                        c["REGION_SIZE"].GetInt()
+                    );
+                }
 
-                    // Validate and extract table info
-                    if (!tableJson.contains("id") || !tableJson["id"].is_number_integer() ||
-                        !tableJson.contains("name") || !tableJson["name"].is_string() ||
-                        !tableJson.contains("columns") || !tableJson["columns"].is_array()) {
-                        std::cerr <<
-                                "Error [BmSql::Meta]: Invalid table object structure. Missing or wrong type for 'id', 'name', or 'columns'."
-                                << std::endl;
-                        return false;
-                    }
-
-                    TableInfo currentTable(tableJson["id"].get<int>(), tableJson["name"].get<std::string>());
-
-                    const auto &columnsJson = tableJson["columns"];
-                    currentTable.columns.reserve(columnsJson.size());
-
-                    // --- Iterate through columns in JSON ---
-                    for (const auto &columnJson: columnsJson) {
-                        if (!columnJson.is_object()) {
-                            std::cerr << "Error [BmSql::Meta]: Found non-object element in columns array for table '" <<
-                                    currentTable.name << "'." << std::endl;
-                            return false;
-                        }
-
-                        // Validate and extract column info
-                        if (!columnJson.contains("id") || !columnJson["id"].is_number_integer() ||
-                            !columnJson.contains("name") || !columnJson["name"].is_string() ||
-                            !columnJson.contains("is_affinity") || !columnJson["is_affinity"].is_boolean() ||
-                            !columnJson.contains("REGION_SIZE") || !columnJson["REGION_SIZE"].is_number_integer()) {
-                            std::cerr << "Error [BmSql::Meta]: Invalid column object structure for table '" <<
-                                    currentTable.name <<
-                                    "'. Missing/wrong type for 'id', 'name', 'is_affinity', or 'REGION_SIZE'." <<
-                                    std::endl;
-                            return false;
-                        }
-
-                        currentTable.columns.emplace_back(
-                            columnJson["id"].get<int>(),
-                            columnJson["name"].get<std::string>(),
-                            columnJson["is_affinity"].get<bool>(),
-                            columnJson["REGION_SIZE"].get<int>()
-                        );
-                    } // End column loop
-
-                    tables_.push_back(std::move(currentTable)); // Add finished table
-                } // End table loop
-
-                // --- Build helper maps ---
-                buildIndexMaps_();
-
-                std::cout << "Info [BmSql::Meta]: Successfully loaded metadata using nlohmann/json from: " << filename
-                        << std::endl;
-                return true;
-            } catch (json::parse_error &e) {
-                std::cerr << "Error [BmSql::Meta]: nlohmann/json parsing failed for file: " << filename << "\n"
-                        << "Message: " << e.what() << "\n"
-                        << "Byte position: " << e.byte << std::endl;
-                return false;
-            } catch (json::exception &e) {
-                // Catches other nlohmann/json exceptions (type errors, etc.)
-                std::cerr << "Error [BmSql::Meta]: nlohmann/json exception during data extraction: " << e.what() <<
-                        std::endl;
-                return false;
-            } catch (std::exception &e) {
-                std::cerr << "Error [BmSql::Meta]: Standard exception during loading: " << e.what() << std::endl;
-                return false;
-            } catch (...) {
-                std::cerr << "Error [BmSql::Meta]: Unknown exception during loading from " << filename << std::endl;
-                return false;
+                tables_.emplace_back(std::move(tbl));
             }
+
+            // 5. 构建辅助索引
+            buildIndexMaps_();
+
+            std::cout << "Info [BmSql::Meta]: Successfully loaded metadata via RapidJSON from: "
+                    << filename << '\n';
+            return true;
         }
 
         // --- Public Accessor Interfaces (const methods) ---

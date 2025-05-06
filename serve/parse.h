@@ -206,15 +206,20 @@ inline std::vector<int> parseNumbers_internal(const std::string &s) {
  *
  * @param sql_like_text 包含头部信息的类 SQL 文本。
  * @param ID2NAME 一个从整数 ID 映射到表名或列名的 map。
+ * @param row_txn
  * @return std::vector<SQLInfo> 包含所有解析出的 SQLInfo 对象的向量。
  */
-inline std::vector<SQLInfo> parseTPCHSQL(const std::string &sql_like_text, const std::map<int, std::string> &ID2NAME) {
+inline std::vector<SQLInfo> parseTPCHSQL(const std::string &sql_like_text, const std::map<int, std::string> &ID2NAME,
+                                         std::string &row_txn) {
     std::vector<SQLInfo> results;
     std::stringstream inputStream(sql_like_text);
     std::string line;
     bool inHeader = false;
     SQLInfo currentInfo;
     bool buildingInfo = false;
+
+    bool inTxnHeader = false;
+    std::string txn;
 
     while (std::getline(inputStream, line)) {
         std::string trimmedLine = trim_internal(line);
@@ -230,7 +235,25 @@ inline std::vector<SQLInfo> parseTPCHSQL(const std::string &sql_like_text, const
                 std::cerr << "警告: 在 ***Header_End*** 发现未完成的 SQLInfo 块。" << std::endl;
                 buildingInfo = false;
             }
+            continue;
+        }
+        if (trimmedLine == "***Txn_Start***") {
+            // 开始 Txn
+            inTxnHeader = true;
+            txn.clear(); // 重置 txn
+            continue;
+        }
+        if (trimmedLine == "***Txn_End***") {
+            // 结束 Txn
+            inTxnHeader = false;
+            row_txn = txn; // 传递 txn
             break;
+        }
+        if (inTxnHeader) {
+            // 累积正文
+            txn += line;
+            txn.push_back('\n');
+            continue; // 不做其他解析
         }
 
         if (inHeader && !trimmedLine.empty()) {
