@@ -4,3 +4,5 @@ target/
 .idea
 AI4DBCode-master/
 offline_workload.txt
+loadtable/
+loadtable/tpch/tpch-dbgen

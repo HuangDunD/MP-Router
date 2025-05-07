@@ -17,8 +17,11 @@
 #define PartitionDataSize (ComputeNodeBufferPageSize / ComputeNodeCount)
 #define MaxComputeNodeCount 128
 
+// 定义算法版本 0: random 1: affinity
+extern int SYSTEM_MODE; 
+
 // 定义所跑的workload 0:smallbank 1:tpcc
-#define WORKLOAD_MODE 2 // 0: ycsb 1: tpch, 2: tpcc
+#define WORKLOAD_MODE 1 // 0: ycsb 1: tpcc
 
 extern int ComputeNodeCount;
 extern uint64_t ATTEMPTED_NUM;
