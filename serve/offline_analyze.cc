@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <map>
 #include <utility>
+#include <iomanip>
 
 #include "queryplan_cardinality.h"
 #include "db_meta.h"

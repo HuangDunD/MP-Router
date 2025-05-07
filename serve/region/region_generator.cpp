@@ -123,12 +123,12 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
         // 2. Loop through each parsed block
         for (size_t i = 0; i < sql_infos.size(); ++i) {
             const auto &current_sql_info = sql_infos[i];
-            logger_.log("Processing block ", i + 1, " of ", sql_infos.size(), "...");
+            // logger_.log("Processing block ", i + 1, " of ", sql_infos.size(), "...");
 
             // 3. Process based on type
             if (current_sql_info.type == SQLType::SELECT || current_sql_info.type == SQLType::UPDATE) {
                 std::string type_str = (current_sql_info.type == SQLType::SELECT) ? "SELECT" : "UPDATE";
-                logger_.log("Block ", i + 1, ": Parsed ", type_str, " statement.");
+                // logger_.log("Block ", i + 1, ": Parsed ", type_str, " statement.");
 
 
                 // Store the column name parsed (if any) for potential reference/warning later
@@ -156,8 +156,8 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                     Region current_region(current_sql_info.tableIDs[0], inner_key);
                     uint64_t combined_id = current_region.serializeToUint64();
                     out_region_ids.push_back(combined_id);
-                    logger_.log("Block ", i + 1, ": Found affinity column ID ", affinityColumn, " in table '",
-                                current_sql_info.tableNames[0], "'.");
+                    // logger_.log("Block ", i + 1, ": Found affinity column ID ", affinityColumn, " in table '",
+                                // current_sql_info.tableNames[0], "'.");
                 }
                 // --- End of logic for SELECT/UPDATE block ---
             } else if (current_sql_info.type == SQLType::JOIN) {
@@ -166,7 +166,7 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                 }
                 // ... (JOIN handling remains the same) ...
                 std::stringstream ss_join_tables;
-                ss_join_tables << "Block " << (i + 1) << ": Received JOIN block involving tables: ";
+                // ss_join_tables << "Block " << (i + 1) << ": Received JOIN block involving tables: ";
                 for (const auto &name: current_sql_info.tableNames) ss_join_tables << name << " ";
                 ss_join_tables << ". Region ID generation not applicable.";
                 logger_.log(ss_join_tables.str().c_str());
