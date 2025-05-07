@@ -17,7 +17,7 @@
 #include <pqxx/pqxx> // PostgreSQL C++ library
 
 #define PORT 8500
-#define THREAD_POOL_SIZE 16
+#define THREAD_POOL_SIZE 1
 #define BUFFER_SIZE 8129000 // max 8192kb=8MB 4096000=4MB
 
 // --- Global Variables ---
@@ -58,7 +58,7 @@ static bool send_sql_to_router(const std::string &sqls,
         txn.commit();
 
         return true;
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         lg.log("ERROR: Error while connecting to PostgreSQL or getting query plan: ", e.what());
         return false;
     }
@@ -76,7 +76,7 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
                 std::cerr << "socket is closed , Closing socket : " << socket_fd << std::endl;
                 close(socket_fd);
             } else {
-                std::cerr<<"send failed: " << strerror(errno) << std::endl;
+                std::cerr << "send failed: " << strerror(errno) << std::endl;
             }
             return false;
         }
@@ -118,14 +118,14 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
             // Send SQL to the router node
             const auto &con = DBConnection[router_node % ComputeNodeCount];
             log.log("Sending SQL to router node ", router_node, ": ", con);
-            send_sql_to_router(row_sql, con, log);
+            // send_sql_to_router(row_sql, con, log);
         }
     }
 
     // ---- Final client acknowledgment ----
     if (safe_send("OK\n")) {
         if (++send_times % 1000 == 0) {
-            std::cout <<"send OK times: " << send_times.load() << std::endl;
+            std::cout << "send OK times: " << send_times.load() << std::endl;
         }
     }
 }
@@ -143,12 +143,12 @@ int main() {
     std::string compute_node_config_path = "../../config/compute_node_config.json";
     auto compute_node_config = JsonConfig::load_file(compute_node_config_path);
     auto compute_node_list = compute_node_config.get("remote_compute_nodes");
-    auto compute_node_count = (int)compute_node_list.get("remote_compute_node_count").get_int64();
+    auto compute_node_count = (int) compute_node_list.get("remote_compute_node_count").get_int64();
     ComputeNodeCount = compute_node_count;
     std::cout << "ComputeNodeCount: " << ComputeNodeCount << std::endl;
-    for(int i=0; i < compute_node_count; i++) {
-        auto ip = compute_node_list.get("remote_compute_node_ips").get(i).get_str(); 
-        auto port = (int)compute_node_list.get("remote_compute_node_ports").get(i).get_int64();
+    for (int i = 0; i < compute_node_count; i++) {
+        auto ip = compute_node_list.get("remote_compute_node_ips").get(i).get_str();
+        auto port = (int) compute_node_list.get("remote_compute_node_ports").get(i).get_int64();
         auto username = compute_node_list.get("remote_compute_node_usernames").get(i).get_str();
         auto password = compute_node_list.get("remote_compute_node_passwords").get(i).get_str();
         auto dbname = compute_node_list.get("remote_compute_node_dbnames").get(i).get_str();
@@ -247,6 +247,15 @@ int main() {
     logger.log("Server is running and listening on port ", PORT, "...");
 
     logger.set_log_to_console(false);
+    std::cout << R"(
+~~~~~~~~~~~~~~~~~~~~~~~~~~~WELCOME TO THE~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  __  __   ____            ____                    _
+ |  \/  | |  _ \          |  _ \    ___    _   _  | |_    ___   _ __
+ | |\/| | | |_) |  _____  | |_) |  / _ \  | | | | | __|  / _ \ | '__|
+ | |  | | |  __/  |_____| |  _ <  | (_) | | |_| | | |_  |  __/ | |
+ |_|  |_| |_|             |_| \_\  \___/   \__,_|  \__|  \___| |_|
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+)" << std::endl;
     // --- Accept Client Connections Loop ---
     while (true) {
         int new_socket;

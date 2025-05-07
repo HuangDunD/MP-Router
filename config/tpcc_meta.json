@@ -71,7 +71,7 @@
       {
         "id": 19,
         "name": "no_d_id",
-        "is_affinity": true,
+        "is_affinity": false,
         "REGION_SIZE": 1000
       },
       {
@@ -89,13 +89,13 @@
       {
         "id": 21,
         "name": "o_id",
-        "is_affinity": true,
+        "is_affinity": false,
         "REGION_SIZE": 1000
       },
       {
         "id": 22,
         "name": "o_w_id",
-        "is_affinity": false,
+        "is_affinity": true,
         "REGION_SIZE": 1000
       },
       {

@@ -269,6 +269,11 @@ namespace BmSql {
             return table ? table->getColumnById(colId) : nullptr;
         }
 
+        int getTableIdByColumnId(int columnId) const {
+            auto it = columnIdToTableIdMap_.find(columnId);
+            return (it != columnIdToTableIdMap_.end()) ? it->second : -1;
+        }
+
         // --- NEW INTERFACE: Get Name by Global ID ---
         // Returns the name corresponding to any table or column ID.
         // Returns an empty string if the ID is not found.
@@ -280,6 +285,15 @@ namespace BmSql {
             // Optional: Log a warning if ID not found
             // std::cerr << "Warning [BmSql::Meta]: ID " << id << " not found in idToNameMap." << std::endl;
             return ""; // Return empty string as indicator
+        }
+
+        int getIdByName(const std::string& name) const {
+            for (const auto& [id, storedName] : idToNameMap_) {
+                if (storedName == name) {
+                    return id;                       // 找到了
+                }
+            }
+            return -1;                     // 未找到
         }
 
         const ColumnInfo *getColumnInfo(const std::string &tableName, const std::string &columnName) const {
@@ -301,7 +315,7 @@ namespace BmSql {
         std::unordered_map<std::string, std::pair<size_t, size_t> > globalColumnNameLocationMap_;
 
         std::map<int, std::string> idToNameMap_;
-
+        std::unordered_map<int, int> columnIdToTableIdMap_;
 
         void buildIndexMaps_() {
             // Clear all maps before rebuilding
@@ -312,6 +326,7 @@ namespace BmSql {
             idToNameMap_.clear();
             idToRegionSize.clear(); // Clear previously added map
             columunIsAffinity.clear(); // Clear NEW map
+            columnIdToTableIdMap_.clear();
 
             // Optional: Reserve space for maps for potential minor performance gain
             tableIdToIndexMap_.reserve(tables_.size());
@@ -356,8 +371,10 @@ namespace BmSql {
                     // Populate per-table column maps
                     table.columnIdToIndexMap[col.id] = colIdx;
                     table.columnNameToIndexMap[col.name] = colIdx;
+                    columnIdToTableIdMap_[col.id] = table.id;
                 } // End column loop
             } // End table loop
+
         } // End buildIndexMaps_
     }; // End class BmSql::Meta
 } // End namespace BmSql

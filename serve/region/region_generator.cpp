@@ -42,16 +42,8 @@ bool RegionProcessor::generateRegionIDs(const std::string &data, std::vector<uin
         return false; // Critical error
     }
 
-#if WORKLOAD_MODE == 0
-    // YCSB workload
-    return processYCSB(data, out_region_ids);
-#elif WORKLOAD_MODE == 1
-    // TPCH workload
     return processTPCH(data, bmsqlMeta, out_region_ids, raw_txn);
-#else
-    logger_.log("ERROR: Unknown WORKLOAD_MODE defined: ", WORKLOAD_MODE);
-    return true; // Or false, depending on how you want to handle unknown modes
-#endif
+
 }
 
 // --- Private YCSB Implementation ---
@@ -116,9 +108,13 @@ bool RegionProcessor::processYCSB(const std::string &data, std::vector<uint64_t>
     return true; // Success (or non-critical failure)
 }
 
+std::unordered_map<int, long long> col_cardinality;
+std::mutex col_mutex;
+std::atomic<long long> times{0};
+
 bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bmsqlMeta,
                                   std::vector<uint64_t> &out_region_ids, std::string &raw_txn) {
-try {
+    try {
         // 1. Call the BMSQL parser
         std::vector<SQLInfo> sql_infos = parseTPCHSQL(data, bmsqlMeta.idToNameMap_, raw_txn);
 
@@ -141,6 +137,7 @@ try {
                 int ser_num = -1;
 
                 for (int j = 0; j < column_count; j++) {
+                    col_cardinality[current_sql_info.columnIDs[j]]++;
                     if (bmsqlMeta.isColumnAffinity(current_sql_info.tableIDs[0], current_sql_info.columnIDs[j])) {
                         affinityColumn = current_sql_info.columnIDs[j];
                         ser_num = j;
@@ -164,6 +161,9 @@ try {
                 }
                 // --- End of logic for SELECT/UPDATE block ---
             } else if (current_sql_info.type == SQLType::JOIN) {
+                for (auto &columenID: current_sql_info.columnIDs) {
+                    col_cardinality[columenID]++;
+                }
                 // ... (JOIN handling remains the same) ...
                 std::stringstream ss_join_tables;
                 ss_join_tables << "Block " << (i + 1) << ": Received JOIN block involving tables: ";
@@ -181,6 +181,15 @@ try {
     } catch (...) {
         logger_.log("ERROR processing BMSQL SQL data: Unknown exception occurred.");
         return true;
+    }
+    times.fetch_add(1);
+    if (times % 2000 == 0) {
+        std::ofstream ofs("col_cardinality.csv", std::ios::trunc);
+        assert(ofs.is_open());
+        for (auto &[id,cnt]: col_cardinality)
+            ofs << id  << ',' << cnt << '\n';
+        ofs.close();
+        std::cout << "finish"<<std::endl;
     }
 
     return true;
