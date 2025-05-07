@@ -1,5 +1,5 @@
 #include "region_generator.h"
-#include "../log/Logger.h" // Include Logger definition
+
 
 // --- MODIFICATION START ---
 #include "../config.h"    // Include definition for WORKLOAD_MODE and REGION_SIZE
@@ -24,12 +24,11 @@ RegionProcessor::RegionProcessor(Logger &logger) : logger_(logger) {
     // Constructor can perform initial checks if needed
     if (REGION_SIZE <= 0) {
         // Log this critical configuration error immediately
-        logger_.log("CRITICAL ERROR: RegionProcessor initialized when REGION_SIZE (", REGION_SIZE,
-                    ") is not positive.");
+        logger_.error("[region] cfg=REGION_SIZE<=0 value=" + std::to_string(REGION_SIZE));
         // Throwing here prevents the object from being used in an invalid state
         throw std::runtime_error("RegionProcessor Error: REGION_SIZE must be positive.");
     }
-    logger_.log("RegionProcessor initialized.");
+    logger_.info("[region] RegionProcessor status=initialized");
 }
 
 bool RegionProcessor::generateRegionIDs(const std::string &data, std::vector<uint64_t> &out_region_ids,
@@ -38,17 +37,16 @@ bool RegionProcessor::generateRegionIDs(const std::string &data, std::vector<uin
 
     // Check REGION_SIZE again in case it was modified externally (though unlikely if const)
     if (REGION_SIZE <= 0) {
-        logger_.log("ERROR: REGION_SIZE (", REGION_SIZE, ") is not positive during generateRegionIDs call.");
+        logger_.error("[region] generateRegionIDs REGION_SIZE<=0 value=" + std::to_string(REGION_SIZE));
         return false; // Critical error
     }
 
     return processTPCH(data, bmsqlMeta, out_region_ids, raw_txn);
-
 }
 
 // --- Private YCSB Implementation ---
 bool RegionProcessor::processYCSB(const std::string &data, std::vector<uint64_t> &out_region_ids) {
-    logger_.log("Processing YCSB data...");
+    logger_.info("[region] mode=YCSB action=parse");
     std::vector<int> ycsb_keys;
     try {
         std::regex key_pattern(R"(YCSB_KEY\s*=\s*(\d+))"); // Matches YCSB_KEY = <number>
@@ -62,13 +60,13 @@ bool RegionProcessor::processYCSB(const std::string &data, std::vector<uint64_t>
         std::sort(ycsb_keys.begin(), ycsb_keys.end());
         ycsb_keys.erase(std::unique(ycsb_keys.begin(), ycsb_keys.end()), ycsb_keys.end());
     } catch (const std::exception &e) {
-        logger_.log("ERROR parsing YCSB keys: ", e.what());
+        logger_.warning("[region] mode=YCSB parse_error=" + std::string(e.what()));
         // Parsing error is often not fatal, log and continue (return true)
         return true;
     }
 
     if (ycsb_keys.empty()) {
-        logger_.log("No YCSB keys found in data.");
+        logger_.info("[region] mode=YCSB keys=0");
         return true; // Not an error, just no keys to process
     }
 
@@ -76,7 +74,7 @@ bool RegionProcessor::processYCSB(const std::string &data, std::vector<uint64_t>
 
     for (const auto &key: ycsb_keys) {
         if (key < 0) {
-            logger_.log("Warning: Skipping negative YCSB key ", key);
+            logger_.warning("[region] mode=YCSB skip_negative key=" + std::to_string(key));
             continue;
         }
         // REGION_SIZE check already done in generateRegionIDs
@@ -99,11 +97,12 @@ bool RegionProcessor::processYCSB(const std::string &data, std::vector<uint64_t>
         for (size_t i = 0; i < std::min(out_region_ids.size(), (size_t) 5); ++i) ss_ids << out_region_ids[i] << " ";
         // Log first few
         if (out_region_ids.size() > 5) ss_ids << "...";
-        logger_.log(ss_ids.str().c_str());
+        logger_.info("[region] mode=YCSB ids=" + std::to_string(out_region_ids.size()) +
+                     +" sample=" + std::to_string(out_region_ids.front()) + " ...");
         // NOTE: Graph building (metis.build_internal_graph) is NOT called here anymore.
         // It should be called in the calling function (e.g., process_client_data) if needed.
     } else {
-        logger_.log("No valid YCSB region IDs were generated (keys might have been negative).");
+        logger_.warning("No valid YCSB region IDs were generated (keys might have been negative).");
     }
     return true; // Success (or non-critical failure)
 }
@@ -118,17 +117,18 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
         // 1. Call the BMSQL parser
         std::vector<SQLInfo> sql_infos = parseTPCHSQL(data, bmsqlMeta.idToNameMap_, raw_txn);
 
-        logger_.log("Parsed ", sql_infos.size(), " SQL info block(s).");
+        logger_.info("[region] mode=TPCH blocks=" + std::to_string(sql_infos.size()));
 
         // 2. Loop through each parsed block
         for (size_t i = 0; i < sql_infos.size(); ++i) {
             const auto &current_sql_info = sql_infos[i];
-            // logger_.log("Processing block ", i + 1, " of ", sql_infos.size(), "...");
+            logger_.debug("[region] blk=" + std::to_string(i + 1) + "/" + std::to_string(sql_infos.size()));
 
             // 3. Process based on type
             if (current_sql_info.type == SQLType::SELECT || current_sql_info.type == SQLType::UPDATE) {
                 std::string type_str = (current_sql_info.type == SQLType::SELECT) ? "SELECT" : "UPDATE";
-                // logger_.log("Block ", i + 1, ": Parsed ", type_str, " statement.");
+                logger_.debug("[region] blk=" + std::to_string(i + 1) + " type=" + std::string(type_str)
+                              + " table=" + current_sql_info.tableNames[0]);
 
 
                 // Store the column name parsed (if any) for potential reference/warning later
@@ -146,9 +146,8 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                 }
 
                 if (affinityColumn == -1) {
-                    logger_.log("Block ", i + 1, ": Warning: No affinity column found in table '",
-                                current_sql_info.tableNames[0],
-                                "'.");
+                    logger_.warning("[region] blk=" + std::to_string(i + 1) +
+                                    +" no_affinity table=" + std::string(current_sql_info.tableNames[0]));
                 } else {
                     auto inner_key = current_sql_info.keyVector[ser_num] / bmsqlMeta.getRegionSizeByColumnId(
                                          current_sql_info.columnIDs[ser_num]);
@@ -156,8 +155,8 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                     Region current_region(current_sql_info.tableIDs[0], inner_key);
                     uint64_t combined_id = current_region.serializeToUint64();
                     out_region_ids.push_back(combined_id);
-                    // logger_.log("Block ", i + 1, ": Found affinity column ID ", affinityColumn, " in table '",
-                                // current_sql_info.tableNames[0], "'.");
+                    logger_.info("[region] blk=" + std::to_string(i + 1) + " affinity_col=" + std::to_string(
+                                     +affinityColumn) + " table=" + std::string(current_sql_info.tableNames[0]));
                 }
                 // --- End of logic for SELECT/UPDATE block ---
             } else if (current_sql_info.type == SQLType::JOIN) {
@@ -166,20 +165,21 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                 }
                 // ... (JOIN handling remains the same) ...
                 std::stringstream ss_join_tables;
-                // ss_join_tables << "Block " << (i + 1) << ": Received JOIN block involving tables: ";
+                ss_join_tables << "Block " << (i + 1) << ": Received JOIN block involving tables: ";
                 for (const auto &name: current_sql_info.tableNames) ss_join_tables << name << " ";
                 ss_join_tables << ". Region ID generation not applicable.";
-                logger_.log(ss_join_tables.str().c_str());
+                logger_.debug("[region] blk=" + std::to_string(i + 1) + " type=JOIN tables=" + std::to_string(
+                                  +current_sql_info.tableNames.size()));
             } else {
                 // ... (UNKNOWN handling remains the same) ...
-                logger_.log("Block ", i + 1, ": Unknown or unhandled SQL type encountered. Skipping block.");
+                logger_.warning("Block " + std::to_string( i + 1)+": Unknown or unhandled SQL type encountered. Skipping block.");
             }
         } // End loop through sql_infos
     } catch (const std::exception &e) {
-        logger_.log("ERROR processing BMSQL SQL data: ", e.what());
+        logger_.error("[region] TPCH_exception="+std::string( e.what()));
         return true;
     } catch (...) {
-        logger_.log("ERROR processing BMSQL SQL data: Unknown exception occurred.");
+        logger_.error("[region] TPCH_exception=unknown");
         return true;
     }
     times.fetch_add(1);
@@ -187,9 +187,9 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
         std::ofstream ofs("col_cardinality.csv", std::ios::trunc);
         assert(ofs.is_open());
         for (auto &[id,cnt]: col_cardinality)
-            ofs << id  << ',' << cnt << '\n';
+            ofs << id << ',' << cnt << '\n';
         ofs.close();
-        std::cout << "finish"<<std::endl;
+        std::cout << "finish" << std::endl;
     }
 
     return true;

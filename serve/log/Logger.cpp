@@ -1,119 +1,192 @@
-#include "Logger.h"
-#include <chrono>
-#include <cstdio>
-#include <algorithm>
-#include <cstdarg>
-#include <cstring>
-#include <ctime>
-#include <functional>
-#include <iostream>
-#include <mutex>
-#include <thread>
+// log_sys.cpp (or continue in the same file)
+ #include "Logger.h"
 
-// ---------- 常量 ----------
-constexpr size_t LOG_BUFFER_SIZE = 2048; // 用户消息最大长度
-constexpr size_t ENTRY_BUFFER_SIZE = LOG_BUFFER_SIZE + 128;
+// --- Logger Implementation ---
 
-// ---------- 线程局部缓冲 ----------
-namespace {
-    thread_local char g_fmt_buf[LOG_BUFFER_SIZE];
-    thread_local char g_entry_buf[ENTRY_BUFFER_SIZE];
+Logger::Logger()
+    : target(LogTarget::TERMINAL_ONLY),
+      min_level(LogLevel::DEBUG),
+      buffer_capacity_bytes(DEFAULT_BUFFER_CAPACITY) {
+    char time_buffer[64];
+    formatCurrentTime(time_buffer, sizeof(time_buffer));
+    std::cout << "[WELCOME] " << __FILE__ << " " << time_buffer << " : === Start logging ===\n";
+    std::cout.flush(); // Flush welcome message for terminal
 }
 
-// ---------- 辅助函数 ----------
-static bool to_local_tm(const time_t &t, std::tm &out) {
-#ifdef _WIN32
-    return localtime_s(&out, &t) == 0;
-#else
-    return localtime_r(&t, &out) != nullptr;
-#endif
-}
+Logger::Logger(LogTarget target, LogLevel min_level, const std::string& file_path, size_t buffer_cap_bytes)
+    : target(target),
+      min_level(min_level),
+      path(file_path),
+      buffer_capacity_bytes(buffer_cap_bytes) {
 
-static size_t build_timestamp(char *buf, size_t cap) {
-    if (cap < 32) return 0;
-    auto now = std::chrono::system_clock::now();
-    auto t = std::chrono::system_clock::to_time_t(now);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                  now.time_since_epoch()) %
-              1000;
+    char time_buffer[64];
+    formatCurrentTime(time_buffer, sizeof(time_buffer));
+    const char* welcome_prefix = "[WELCOME] ";
+    const char* welcome_suffix = " : === Start logging ===\n";
 
-    std::tm tm{};
-    if (!to_local_tm(t, tm)) return 0;
-
-    size_t n = std::strftime(buf, cap, "%Y-%m-%d %H:%M:%S", &tm);
-    if (n == 0 || n + 5 >= cap) return 0;
-
-    int m = std::snprintf(buf + n, cap - n, ".%03lld",
-                          static_cast<long long>(ms.count()));
-    if (m < 0) return 0;
-    buf[n + m] = '\0';
-    return n + static_cast<size_t>(m);
-}
-
-// ---------- Logger 实现 ----------
-Logger::Logger(const std::string &file, bool append)
-    : log_file_(file,
-                std::ios::binary | std::ios::out |
-                (append ? std::ios::app : std::ios::trunc)) {
-    if (!log_file_) {
-        std::fprintf(stderr,
-                     "Logger CRITICAL: failed to open %s\n", file.c_str());
-        throw std::runtime_error("Logger open failed");
+    if (this->target == LogTarget::FILE_ONLY || this->target == LogTarget::FILE_AND_TERMINAL) {
+        if (this->path.empty()) {
+            std::cerr << welcome_prefix << __FILE__ << " " << time_buffer
+                      << " : ERROR: Log target includes file, but no path provided. Defaulting to TERMINAL_ONLY.\n";
+            std::cerr.flush();
+            this->target = LogTarget::TERMINAL_ONLY; // Fallback
+        } else {
+            outfile.open(this->path, std::ios::out | std::ios::app);
+            if (!outfile.is_open()) {
+                std::cerr << welcome_prefix << __FILE__ << " " << time_buffer
+                          << " : ERROR: Failed to open log file: " << this->path
+                          << ". Defaulting to TERMINAL_ONLY if was FILE_ONLY.\n";
+                std::cerr.flush();
+                if (this->target == LogTarget::FILE_ONLY) this->target = LogTarget::TERMINAL_ONLY;
+                // If FILE_AND_TERMINAL, it effectively becomes TERMINAL_ONLY regarding file operations
+            } else {
+                 // Write welcome message directly to file, bypassing buffer, and flush it.
+                 outfile << welcome_prefix << __FILE__ << " " << time_buffer << welcome_suffix;
+                 outfile.flush();
+            }
+        }
     }
-    is_open_.store(true);
-    log("Logger initialized. Output file: %s", file.c_str());
+
+    if (this->target == LogTarget::TERMINAL_ONLY || this->target == LogTarget::FILE_AND_TERMINAL) {
+        std::cout << welcome_prefix << __FILE__ << " " << time_buffer << welcome_suffix;
+        std::cout.flush(); // Flush welcome message for terminal
+    }
 }
 
 Logger::~Logger() {
-    if (is_open_.load()) {
-        log("Logger shutting down.");
-        log_file_.flush();
+    bool terminal_goodbye_needed = (target == LogTarget::TERMINAL_ONLY || target == LogTarget::FILE_AND_TERMINAL);
+
+    if (outfile.is_open()) {
+        char time_buffer[64];
+        formatCurrentTime(time_buffer, sizeof(time_buffer));
+        // Add goodbye message to the buffer before the final flush
+        file_log_buffer << "[GOODBYE] " << __FILE__ << " " << time_buffer << " : === End logging (file) ===\n";
+        flush_file_buffer(); // Flush any remaining logs including the goodbye message
+        outfile.close();
+    }
+
+    if (terminal_goodbye_needed) {
+        // Avoid duplicate goodbye if file operations failed and it fell back to terminal only AND already logged goodbye
+        // This check is a bit complex, simpler is just to print if terminal was an intended target
+        char time_buffer[64];
+        formatCurrentTime(time_buffer, sizeof(time_buffer));
+        std::cout << "[GOODBYE] " << __FILE__ << " " << time_buffer << " : === End logging (terminal) ===\n";
+        std::cout.flush();
     }
 }
 
-void Logger::set_log_to_console(bool on) {
-    log_to_console_.store(on);
+void Logger::setMinLevel(LogLevel new_level) {
+    this->min_level = new_level;
 }
 
-void Logger::log(const char *fmt, ...) const {
-    if (!is_open_.load()) return;
-
-    va_list ap;
-    va_start(ap, fmt);
-    int len = std::vsnprintf(g_fmt_buf, sizeof(g_fmt_buf), fmt, ap);
-    va_end(ap);
-
-    if (len < 0) return;
-    size_t msg_len =
-            static_cast<size_t>(std::min<int>(len, sizeof(g_fmt_buf) - 1));
-    g_fmt_buf[msg_len] = '\0'; // 保证结束符
-    log_cstring(g_fmt_buf, msg_len);
-}
-
-void Logger::log_cstring(const char *msg, size_t msg_len) const {
-    if (!is_open_.load()) return;
-
-    // 1) 组装完整条目（无锁）
-    char ts[64];
-    size_t ts_len = build_timestamp(ts, sizeof(ts));
-
-    auto tid = std::hash<std::thread::id>{}(std::this_thread::get_id());
-
-    int entry_len = std::snprintf(
-        g_entry_buf, sizeof(g_entry_buf), "%.*s [T%zu] %.*s\n",
-        static_cast<int>(ts_len), ts, tid, static_cast<int>(msg_len), msg);
-
-    if (entry_len <= 0) return;
-    size_t final_len =
-            static_cast<size_t>(std::min<int>(entry_len, sizeof(g_entry_buf) - 1));
-    g_entry_buf[final_len] = '\0';
-
-    // 2) 进入 I/O 临界区
-    {
-        std::lock_guard<std::mutex> lk(mutex_);
-        log_file_.write(g_entry_buf, static_cast<std::streamsize>(final_len));
+void Logger::output(const std::string& text, LogLevel current_message_level) {
+    if (current_message_level < this->min_level) {
+        return;
     }
-    if (log_to_console_.load()) {
-        std::fwrite(g_entry_buf, 1, final_len, stdout);
+
+    char time_buffer[80];
+    formatCurrentTime(time_buffer, sizeof(time_buffer));
+    const char* level_str = levelToString(current_message_level);
+
+    // Terminal output (immediate)
+    if (target == LogTarget::TERMINAL_ONLY || target == LogTarget::FILE_AND_TERMINAL) {
+        std::cout << level_str << __FILE__ << " " << time_buffer << " : " << text << '\n';
+        if (current_message_level == LogLevel::ERROR) {
+            std::cout.flush();
+        }
+    }
+
+    // File output (buffered)
+    if (target == LogTarget::FILE_ONLY || target == LogTarget::FILE_AND_TERMINAL) {
+        if (outfile.is_open()) {
+            // Write to the internal stringstream buffer first
+            file_log_buffer <<level_str<< " " << time_buffer << " : " << text << '\n';
+
+            // Check conditions for flushing
+            if (current_message_level == LogLevel::ERROR) {
+                flush_file_buffer(); // Immediate flush for errors
+            } else if (static_cast<size_t>(file_log_buffer.tellp()) >= buffer_capacity_bytes) {
+                // Using tellp() to get current size of stringstream buffer
+                flush_file_buffer(); // Flush if buffer is full
+            }
+        }
     }
 }
+
+void Logger::flush() {
+    // Flush file buffer if applicable
+    if (target == LogTarget::FILE_ONLY || target == LogTarget::FILE_AND_TERMINAL) {
+        if (outfile.is_open()) { // Redundant check if flush_file_buffer also checks, but safe
+            flush_file_buffer();
+        }
+    }
+    // Flush terminal output if applicable
+    if (target == LogTarget::TERMINAL_ONLY || target == LogTarget::FILE_AND_TERMINAL) {
+        std::cout.flush();
+    }
+}
+
+void Logger::debug(const std::string& text) {
+    output(text, LogLevel::DEBUG);
+}
+
+void Logger::info(const std::string& text) {
+    output(text, LogLevel::INFO);
+}
+
+void Logger::warning(const std::string& text) {
+    output(text, LogLevel::WARNING);
+}
+
+void Logger::error(const std::string& text) {
+    output(text, LogLevel::ERROR);
+}
+
+/*
+// --- Example Usage (main.cpp) ---
+// #include "log_sys.h"
+// #include <string>
+// #include <thread> // For testing flush with time
+// #include <chrono> // For std::chrono::seconds
+
+int main() {
+    std::cout << "--- Default Logger (Terminal, DEBUG) ---\n";
+    Logger defaultLogger;
+    defaultLogger.info("Info from default logger.");
+    defaultLogger.debug("Debug from default logger.");
+
+    std::cout << "\n--- File and Terminal Logger (INFO level, 128 bytes buffer) ---\n";
+    Logger fileAndTerminalLogger(Logger::LogTarget::FILE_AND_TERMINAL, Logger::LogLevel::INFO, "app.log", 128);
+    fileAndTerminalLogger.debug("This DEBUG message won't be shown or logged (below INFO).");
+    fileAndTerminalLogger.info("Short info 1."); // ~50-60 bytes
+    fileAndTerminalLogger.info("Short info 2."); // ~50-60 bytes, buffer ~100-120. Not flushed yet.
+    fileAndTerminalLogger.warning("A warning message that is a bit longer to ensure buffer fills."); // This should trigger flush based on size.
+
+    std::cout << "Pausing for a moment to check app.log before error..." << std::endl;
+    // std::this_thread::sleep_for(std::chrono::seconds(5)); // If you want to check file manually
+
+    fileAndTerminalLogger.error("This ERROR message will flush immediately.");
+    fileAndTerminalLogger.info("Another info after error."); // Will be in buffer
+
+    std::cout << "\n--- File Only Logger (WARNING level) ---\n";
+    Logger fileOnlyLogger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::WARNING, "errors.log");
+    fileOnlyLogger.info("This INFO won't be logged (below WARNING).");
+    fileOnlyLogger.warning("This WARNING will be only in errors.log (buffered).");
+    fileOnlyLogger.error("This ERROR will be only in errors.log (immediate flush).");
+    fileOnlyLogger.warning("Another warning (buffered).");
+    // Remaining messages in fileOnlyLogger flushed on destruction.
+
+    std::cout << "\n--- Manual Flush Demo ---" << std::endl;
+    Logger manualFlushLogger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::DEBUG, "manual_flush.log", 2048);
+    manualFlushLogger.info("Message 1 for manual flush log.");
+    manualFlushLogger.info("Message 2 for manual flush log.");
+    std::cout << "Content of manual_flush.log might not be visible yet." << std::endl;
+    // std::this_thread::sleep_for(std::chrono::seconds(5));
+    manualFlushLogger.flush();
+    std::cout << "Manual flush called. Check manual_flush.log." << std::endl;
+    manualFlushLogger.info("Message 3 after manual flush.");
+
+    std::cout << "\n--- End of main, destructors will be called, flushing remaining buffers. ---\n";
+    return 0;
+}
+*/

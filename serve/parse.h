@@ -209,7 +209,7 @@ inline std::vector<int> parseNumbers_internal(const std::string &s) {
  * @param row_txn
  * @return std::vector<SQLInfo> 包含所有解析出的 SQLInfo 对象的向量。
  */
-inline std::vector<SQLInfo> parseTPCHSQL(const std::string &sql_like_text, const std::map<int, std::string> &ID2NAME,
+inline static  std::vector<SQLInfo> parseTPCHSQL(const std::string &sql_like_text, const std::map<int, std::string> &ID2NAME,
                                          std::string &row_txn) {
     std::vector<SQLInfo> results;
     std::stringstream inputStream(sql_like_text);

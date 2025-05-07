@@ -60,13 +60,6 @@ public:
      */
     void set_thread_pool(ThreadPool *pool);
 
-    /**
-     * @brief Configures parameters for automatic partitioning.
-     * @param output_file Path for the partition result file (CSV).
-     * @param log_file Path for the partitioning log file.
-     * @param num_parts The desired number of partitions for METIS.
-     */
-    void set_partition_parameters(std::string output_file, std::string log_file, uint64_t num_parts);
 
     // --- End Automatic Partitioning Setup ---
 
@@ -115,7 +108,7 @@ private:
     ThreadPool *associated_thread_pool_ = nullptr; // Pointer to the thread pool for async tasks
     std::string partition_output_file_ = "graph_partitions.csv"; // Default output file
     std::string partition_log_file_ = "partitioning.log"; // Default log file
-    uint64_t num_partitions_ = 8; // Default number of partitions
+    uint64_t num_partitions_; // Default number of partitions
     static const uint64_t PARTITION_INTERVAL = 1000; // Trigger partition every 1000 calls
 
 
@@ -136,6 +129,11 @@ private:
         // 图的大小现在是已分配的稠密 ID 的数量
         return next_dense_id_.load(std::memory_order_relaxed);
     }
+
+public:
+    void init_node_nums(int nums) {
+        num_partitions_ = nums;
+    }
 };
 
 // --- Inline Implementations ---
@@ -144,16 +142,6 @@ inline void NewMetis::set_thread_pool(ThreadPool *pool) {
     associated_thread_pool_ = pool;
 }
 
-inline void NewMetis::set_partition_parameters(std::string output_file, std::string log_file, uint64_t num_parts) {
-    partition_output_file_ = std::move(output_file);
-    partition_log_file_ = std::move(log_file);
-    if (num_parts > 0) {
-        num_partitions_ = num_parts;
-    } else {
-        std::cerr << "[Warning] Invalid number of partitions specified (" << num_parts << "). Using default: " <<
-                num_partitions_ << std::endl;
-    }
-}
 
 // ========================================================================
 // MODIFIED build_internal_graph FUNCTION
@@ -185,6 +173,10 @@ inline uint64_t NewMetis::build_internal_graph(const std::vector<uint64_t> &uniq
                     //           << " triggered partitioning for milestone " << current_milestone << "." << std::endl;
                 }
             }
+        }
+        if (current_call_count == 1 || current_call_count == 0) {
+            // First call, trigger immediately
+            should_trigger_partition = true;
         }
     }
 #endif
@@ -348,14 +340,14 @@ inline uint64_t NewMetis::build_internal_graph(const std::vector<uint64_t> &uniq
                         " found in the current partition map. Cannot determine dominant partition.", log_stream);
                     log_stream.close();
                 }
-                return -1;
+                return 0;
             }
         } // else: partition_node_map is empty, do nothing.
     } // graph_mutex_ is released here
     // ========================================================================
     // END: Cross-Partition Access Check
     // ========================================================================
-    return static_cast<uint64_t>(-1);
+    return 0;
 }
 
 
@@ -787,9 +779,9 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
                 // This is the first time we encounter this affinity class.
                 // Assign the current node's ORIGINAL ID as the primary for this class.
                 uint64_t primary_node_for_class = current_original_id; // Use the original ID itself
-                affinity_to_primary_original_id_map[affinity_class] = primary_node_for_class;
+                affinity_to_primary_original_id_map[affinity_class] = affinity_class;
                 // Map the current original ID to its chosen primary original ID
-                partition_node_map[current_original_id] = primary_node_for_class;
+                partition_node_map[current_original_id] = affinity_class;
             } else {
                 // This affinity class already has a primary original ID assigned.
                 // Map the current original ID to the existing primary original ID for its class
