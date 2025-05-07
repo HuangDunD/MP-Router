@@ -149,11 +149,29 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
 
 
 // --- Main Function ---
-int main() {
+int main(int argc, char* argv[]) {
     signal(SIGPIPE, SIG_IGN);
+
+    if (argc != 2) {
+        std::cerr << "./run <system_name>. E.g., ./run affinity" << std::endl;
+        return 0;
+    }
+    std::string system_name = argv[1];
+    int system_value = 0;
+    if(system_name.find("random") != std::string::npos) {
+        system_value = 0;
+    } else if(system_name.find("affinity") != std::string::npos) {
+        system_value = 1;
+    } else {
+        std::cerr << "Invalid system name." << std::endl;
+        return 0;
+    }
+    SYSTEM_MODE = system_value;
 
     logger.set_log_to_console(true);
     logger.log("Server starting...");
+    logger.log("SYSTEM_MODE: ", SYSTEM_MODE);
+    logger.log("WORKLOAD_MODE: ", WORKLOAD_MODE);
 
     // --- Load Database Connection Info ---
     logger.log("Loading database connection info...");
@@ -162,7 +180,7 @@ int main() {
     auto compute_node_list = compute_node_config.get("remote_compute_nodes");
     auto compute_node_count = (int) compute_node_list.get("remote_compute_node_count").get_int64();
     ComputeNodeCount = compute_node_count;
-    std::cout << "ComputeNodeCount: " << ComputeNodeCount << std::endl;
+    logger.log("ComputeNodeCount: ", ComputeNodeCount);
     for (int i = 0; i < compute_node_count; i++) {
         auto ip = compute_node_list.get("remote_compute_node_ips").get(i).get_str();
         auto port = (int) compute_node_list.get("remote_compute_node_ports").get(i).get_int64();
