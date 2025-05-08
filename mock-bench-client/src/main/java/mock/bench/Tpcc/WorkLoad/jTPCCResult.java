@@ -41,8 +41,8 @@ public class jTPCCResult {
     hCounter = histCounter[tdata.trans_type];
     rCounter = resCounter[tdata.trans_type];
 
-    latency = tdata.trans_end - tdata.trans_due;
-    delay = tdata.trans_start - tdata.trans_due;
+    latency = tdata.trans_end - tdata.trans_due; // transaction latency 事务实际结束-事务预定开始
+    delay = tdata.trans_start - tdata.trans_due; // transaction delay 事务实际开始-事务预定开始
     if (latency < 1)
       bucket = 0;
     else

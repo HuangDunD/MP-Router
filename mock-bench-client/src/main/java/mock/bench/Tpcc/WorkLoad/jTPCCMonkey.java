@@ -331,7 +331,8 @@ public class jTPCCMonkey {
          * transactions end time. This eliminates delays caused bu the monkeys not reading or typing
          * at infinite speed.
          */
-        tdata.trans_due = tdata.trans_end + (long) ((think_time + key_time) * 1000.0);
+//        tdata.trans_due = tdata.trans_end + (long) ((think_time + key_time) * 1000.0);
+        tdata.trans_due = tdata.trans_end + 5;
         tdata.trans_start = 0;
         tdata.trans_end = 0;
         tdata.trans_error = false;

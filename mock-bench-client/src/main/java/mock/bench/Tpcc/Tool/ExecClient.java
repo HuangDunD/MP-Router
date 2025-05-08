@@ -53,7 +53,7 @@ public class ExecClient {
 //             while (response.equals("")){
 //                 response = reader.readLine();
 //             }
-            System.out.println("success: " + response);
+//            System.out.println("success: " + response);
         }
     }
 
