@@ -60,6 +60,7 @@ public class jTPCC {
   public static int reportIntervalSecs;
   public static int resultIntervalSecs;
   public static double restartSUTThreadProb;
+  public static double transWaitTime;
   public static double keyingTimeMultiplier;
   public static double thinkTimeMultiplier;
   public static int terminalMultiplier;
@@ -173,8 +174,9 @@ public class jTPCC {
     reportIntervalSecs = Integer.parseInt(getProp(ini, "reportIntervalSecs"));
     resultIntervalSecs = Integer.parseInt(getProp(ini, "resultIntervalSecs", "10"));
     restartSUTThreadProb = Double.parseDouble(getProp(ini, "restartSUTThreadProbability"));
-    keyingTimeMultiplier = Double.parseDouble(getProp(ini, "keyingTimeMultiplier"));
-    thinkTimeMultiplier = Double.parseDouble(getProp(ini, "thinkTimeMultiplier"));
+    transWaitTime = Double.parseDouble(getProp(ini, "transWaitTime"));
+//    keyingTimeMultiplier = Double.parseDouble(getProp(ini, "keyingTimeMultiplier"));
+//    thinkTimeMultiplier = Double.parseDouble(getProp(ini, "thinkTimeMultiplier"));
     terminalMultiplier = Integer.parseInt(getProp(ini, "terminalMultiplier", "1"));
     traceTerminalIO = Boolean.parseBoolean(getProp(ini, "traceTerminalIO"));
     log.info("Main, ");
@@ -313,11 +315,15 @@ public class jTPCC {
             + "loadWarehouses,runWarehouses,numSUTThreads,"
             + "maxDeliveryBGThreads,maxDeliveryBGPerWarehouse," + "restartSUTThreadProbability,"
             + "thinkTimeMultiplier,keyingTimeMultiplier\n");
+//        runInfoCSV.write(runID + "," + iDBType + "," + jTPCCConfig.JTPCCVERSION + ","
+//            + applicationName + "," + rampupMins + "," + runMins + "," + numWarehouses + ","
+//            + numWarehouses + "," + numSUTThreads + "," + maxDeliveryBGThreads + ","
+//            + maxDeliveryBGPerWH + "," + restartSUTThreadProb + "," + thinkTimeMultiplier + ","
+//            + keyingTimeMultiplier + "\n");
         runInfoCSV.write(runID + "," + iDBType + "," + jTPCCConfig.JTPCCVERSION + ","
             + applicationName + "," + rampupMins + "," + runMins + "," + numWarehouses + ","
             + numWarehouses + "," + numSUTThreads + "," + maxDeliveryBGThreads + ","
-            + maxDeliveryBGPerWH + "," + restartSUTThreadProb + "," + thinkTimeMultiplier + ","
-            + keyingTimeMultiplier + "\n");
+            + maxDeliveryBGPerWH + "," + restartSUTThreadProb + "," + transWaitTime + "\n");
         runInfoCSV.close();
       } catch (IOException e) {
         log.error(e.getMessage());

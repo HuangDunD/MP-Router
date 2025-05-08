@@ -323,8 +323,8 @@ public class jTPCCMonkey {
           key_time = key_mean * 10.0;
         else
           key_time = -Math.log(r) * key_mean;
-        think_time *= jTPCC.thinkTimeMultiplier;
-        key_time *= jTPCC.keyingTimeMultiplier;
+//        think_time *= jTPCC.thinkTimeMultiplier;
+//        key_time *= jTPCC.keyingTimeMultiplier;
 
         /*
          * Set up the terminal data header fields. The Transaction due time is based on the last
@@ -332,7 +332,7 @@ public class jTPCCMonkey {
          * at infinite speed.
          */
 //        tdata.trans_due = tdata.trans_end + (long) ((think_time + key_time) * 1000.0);
-        tdata.trans_due = tdata.trans_end + 5;
+        tdata.trans_due = tdata.trans_end + (long) jTPCC.transWaitTime;
         tdata.trans_start = 0;
         tdata.trans_end = 0;
         tdata.trans_error = false;
