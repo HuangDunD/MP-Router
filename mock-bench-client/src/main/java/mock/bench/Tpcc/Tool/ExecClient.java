@@ -53,7 +53,8 @@ public class ExecClient {
 //             while (response.equals("")){
 //                 response = reader.readLine();
 //             }
-//            System.out.println("success: " + response);
+            if (response.contains("ERR"))
+                System.out.println("success: " + response);
         }
     }
 
