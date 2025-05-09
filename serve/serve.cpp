@@ -12,15 +12,18 @@
 #include "queryplan_cardinality.h" // Assuming this is needed
 // #include "db_meta.h"
 #include "bmsql_meta.h" // Include the header file
-#include "metis_partitioner.h" // Assuming this is needed, replace NewMetis if necessary
 #include "region/region_generator.h"
+#include "metis_partitioner.h" // Assuming this is needed, replace NewMetis if necessary
 // #include "log/Logger.h"     // Include the new Logger header
 #include <pqxx/pqxx> // PostgreSQL C++ library
 
-// Config info 
 int PORT;
 int THREAD_POOL_SIZE;
-int SOCKET_BUFFER_SIZE; // max 8192kb=8MB 4096000=4MB
+int SOCKET_BUFFER_SIZE;
+
+constexpr std::string_view HEADER_MARKER = "***Header_Start***";
+constexpr std::string_view END_MARKER = "***Txn_End***";
+
 
 // --- Global Variables ---
 Logger logger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::INFO, "server.log", 1024);
@@ -67,31 +70,25 @@ static bool send_sql_to_router(const std::string &sqls,
     }
 }
 
+
+// Local helper to send data and report errors
+const bool safe_send(std::string_view msg, int socket_fd, Logger &log) {
+    ssize_t n = send(socket_fd, msg.data(), msg.size(), MSG_NOSIGNAL); // 或无 flag
+    if (n < 0) {
+        if (errno == EPIPE) {
+            log.error("Peer closed connection (EPIPE). Closing socket " + std::to_string(socket_fd));
+            std::cerr << "socket is closed , Closing socket : " << socket_fd << std::endl;
+            close(socket_fd);
+        } else {
+            std::cerr << "send failed: " << strerror(errno) << std::endl;
+        }
+        return false;
+    }
+    return true;
+};
+
 void process_client_data(std::string_view data, int socket_fd, Logger &log) {
     using namespace std::literals;
-
-    // Local helper to send data and report errors
-    const auto safe_send = [&](std::string_view msg) -> bool {
-        ssize_t n = send(socket_fd, msg.data(), msg.size(), MSG_NOSIGNAL); // 或无 flag
-        if (n < 0) {
-            if (errno == EPIPE) {
-                log.error("Peer closed connection (EPIPE). Closing socket " + std::to_string(socket_fd));
-                std::cerr << "socket is closed , Closing socket : " << socket_fd << std::endl;
-                close(socket_fd);
-            } else {
-                std::cerr << "send failed: " << strerror(errno) << std::endl;
-            }
-            return false;
-        }
-        return true;
-    };
-
-    // Immediate FINISH handshake
-    if (data == "HELLO\n"sv || data == "BYE\n"sv) {
-        safe_send("FINISH\n");
-        return;
-    }
-
 
     std::vector<uint64_t> region_ids;
     std::string row_sql;
@@ -107,7 +104,7 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
     }
     if (!ok) {
         // Hard failure
-        safe_send("Generate region IDs failed\n");
+        safe_send("Generate region IDs failed\n", socket_fd, log);
         return;
     }
 
@@ -133,21 +130,21 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
         // Send SQL to the router node
         const auto &con = DBConnection[router_node % ComputeNodeCount];
         log.info("Sending SQL to router node " + std::to_string(router_node) + ": " + con);
-        // send_sql_to_router(row_sql, con, log);
+        send_sql_to_router(row_sql, con, log);
     } else {
         if (row_sql.empty()) {
             log.error(" No SQL to send , router node is " + std::to_string(router_node));
-            safe_send("No SQL to send\n");
+            safe_send("No SQL to send\n", socket_fd, log);
         } else {
             log.error("Invalid router node, router node is " + std::to_string(router_node));
-            safe_send("Invalid router node, router node is " + std::to_string(router_node) + "\n");
+            safe_send("Invalid router node, router node is " + std::to_string(router_node) + "\n", socket_fd, log);
         }
 
         return;
     }
 
     // ---- Final client acknowledgment ----
-    if (safe_send("OK\n")) {
+    if (safe_send("OK\n", socket_fd, log)) {
         if (++send_times % 1000 == 0) {
             std::cout << "send OK times: " << send_times.load() << std::endl;
         }
@@ -211,6 +208,7 @@ int main(int argc, char *argv[]) {
     PORT = (int) router_config.get("port").get_int64();
     SOCKET_BUFFER_SIZE = (int) router_config.get("socket_buffer_size").get_int64();
     THREAD_POOL_SIZE = (int) router_config.get("thread_pool_size").get_int64();
+
 
     // --- Load DB Meta (Conditional) ---
 #if WORKLOAD_MODE == 0
@@ -333,46 +331,48 @@ int main(int argc, char *argv[]) {
                         std::to_string(client_port) + " (Socket: " + std::to_string(new_socket) + ")");
 
             std::string buffer;
-            buffer.reserve(SOCKET_BUFFER_SIZE); // 避免频繁realloc
+            buffer.reserve(SOCKET_BUFFER_SIZE);
 
-            char *tmp = new char[SOCKET_BUFFER_SIZE];
+            char tmp[SOCKET_BUFFER_SIZE];
 
-            while (true) {
-                ssize_t valread = read(new_socket, tmp, SOCKET_BUFFER_SIZE);
-                if (valread < 0) {
-                    logger.error("Read error on socket " + std::to_string(new_socket) + ": " + strerror(errno));
-                    break;
-                } else if (valread == 0) {
-                    logger.info("Client disconnected: " + std::string(client_ip) + ":" + std::to_string(client_port));
-                    break;
-                }
+           while (true) {
+               ssize_t valread = read(new_socket, tmp, SOCKET_BUFFER_SIZE);
+               if (valread < 0) {
+                   logger.error("Read error on socket " + std::to_string(new_socket) + ": " + strerror(errno));
+                   break;
+               } else if (valread == 0) {
+                   logger.info("Client disconnected: " + std::string(client_ip) + ":" + std::to_string(client_port));
+                   break;
+               }
 
-                std::string_view chunk(tmp, valread);
+               std::string_view chunk(tmp, valread);
 
-                // 🔹 控制命令立即响应（高效路径）
-                if (chunk == "HELLO\n" || chunk == "BYE\n") {
-                    pool.enqueue(process_client_data, std::string(chunk), new_socket, std::ref(logger));
-                    continue;
-                }
+               if (chunk == "HELLO\n" || chunk == "BYE\n") {
+                   safe_send("FINISH\n", new_socket, logger);
+                   continue;
+               }
 
-                // 🔹 拼接并解析完整事务
-                buffer.append(chunk);
-                while (true) {
-                    size_t h_start = buffer.find("***Header_Start***");
-                    size_t t_end = buffer.find("***Txn_End***");
+               // 🔹 拼接并解析完整事务
+               buffer.append(chunk);
+               if (buffer.starts_with("***Header_Start***") && buffer.ends_with("***Txn_End***")) {
+                   pool.enqueue(process_client_data, buffer, new_socket, std::ref(logger));
+               }else {
+                   while (true) {
+                       size_t h_start = buffer.find("***Header_Start***");
+                       size_t t_end = buffer.find("***Txn_End***");
 
-                    if (h_start != std::string::npos && t_end != std::string::npos && h_start < t_end) {
-                        size_t txn_end_pos = t_end + strlen("***Txn_End***");
-                        std::string txn = buffer.substr(h_start, txn_end_pos - h_start);
-                        pool.enqueue(process_client_data, std::move(txn), new_socket, std::ref(logger));
-                        buffer.erase(0, txn_end_pos);
-                    } else {
-                        break;
-                    }
-                }
-            }
+                       if (h_start != std::string::npos && t_end != std::string::npos && h_start < t_end) {
+                           size_t txn_end_pos = t_end + strlen("***Txn_End***");
+                           std::string txn = buffer.substr(h_start, txn_end_pos - h_start);
+                           pool.enqueue(process_client_data, std::move(txn), new_socket, std::ref(logger));
+                           buffer.erase(0, txn_end_pos);
+                       } else {
+                           break;
+                       }
+                   }
+               }
+           }
 
-            delete[] tmp;
             close(new_socket);
             logger.info("Closed socket " + std::to_string(new_socket) + " for client " + std::string(client_ip) + ":" +
                         std::to_string(client_port));

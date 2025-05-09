@@ -209,123 +209,105 @@ inline std::vector<int> parseNumbers_internal(const std::string &s) {
  * @param row_txn
  * @return std::vector<SQLInfo> 包含所有解析出的 SQLInfo 对象的向量。
  */
-inline static  std::vector<SQLInfo> parseTPCHSQL(const std::string &sql_like_text, const std::map<int, std::string> &ID2NAME,
-                                         std::string &row_txn) {
+inline static std::vector<SQLInfo> parseTPCHSQL(std::string_view sql, std::string &row_txn) {
     std::vector<SQLInfo> results;
-    std::stringstream inputStream(sql_like_text);
-    std::string line;
-    bool inHeader = false;
-    SQLInfo currentInfo;
-    bool buildingInfo = false;
+    results.reserve(64);
 
-    bool inTxnHeader = false;
+    size_t pos = 0;
+    size_t next = 0;
+
+    auto trim_view = [&](std::string_view sv) {
+        size_t b = 0, e = sv.size();
+        while (b < e && std::isspace((unsigned char)sv[b])) ++b;
+        while (e > b && std::isspace((unsigned char)sv[e-1])) --e;
+        return sv.substr(b, e - b);
+    };
+
+    bool inHeader = false;
+    bool building = false;
+    bool inTxn = false;
+    SQLInfo current;
     std::string txn;
 
-    while (std::getline(inputStream, line)) {
-        std::string trimmedLine = trim_internal(line);
+    while (pos < sql.size()) {
+        next = sql.find('\n', pos);
+        std::string_view line_sv = (next == std::string_view::npos)
+            ? trim_view(sql.substr(pos))
+            : trim_view(sql.substr(pos, next - pos));
 
-        if (trimmedLine == "***Header_Start***") {
+        if (line_sv == "***Header_Start***") {
             inHeader = true;
-            buildingInfo = false;
-            continue;
+            building = false;
         }
-        if (trimmedLine == "***Header_End***") {
+        else if (line_sv == "***Header_End***") {
             inHeader = false;
-            if (buildingInfo) {
-                std::cerr << "警告: 在 ***Header_End*** 发现未完成的 SQLInfo 块。" << std::endl;
-                buildingInfo = false;
-            }
-            continue;
+            building = false;
         }
-        if (trimmedLine == "***Txn_Start***") {
-            // 开始 Txn
-            inTxnHeader = true;
-            txn.clear(); // 重置 txn
-            continue;
+        else if (line_sv == "***Txn_Start***") {
+            inTxn = true;
+            txn.clear();
         }
-        if (trimmedLine == "***Txn_End***") {
-            // 结束 Txn
-            inTxnHeader = false;
-            row_txn = txn; // 传递 txn
+        else if (line_sv == "***Txn_End***") {
+            inTxn = false;
+            row_txn = txn;
             break;
         }
-        if (inTxnHeader) {
-            // 累积正文
-            txn += line;
-            txn.push_back('\n');
-            continue; // 不做其他解析
-        }
-
-        if (inHeader && !trimmedLine.empty()) {
-            size_t colonPos = trimmedLine.find(':');
-            size_t bracketOpenPos = trimmedLine.find('[');
-
-            if (colonPos != std::string::npos && bracketOpenPos != std::string::npos && bracketOpenPos < colonPos) {
-                std::string typeStr = trimmedLine.substr(0, bracketOpenPos);
-                // Renamed 'type' to 'typeStr' to avoid conflict
-                std::string numbersStr = trimmedLine.substr(colonPos + 1);
-                std::vector<int> numbers = parseNumbers_internal(numbersStr);
-
-                if (typeStr == "Table") {
-                    if (buildingInfo) {
-                        std::cerr << "警告: 检测到新的 'Table' 行，但前一个 SQLInfo 块似乎未完成。" << std::endl;
-                    }
-                    currentInfo = SQLInfo(); // 创建/重置当前 SQLInfo 对象
-                    buildingInfo = true;
-
-                    // 解析 Table IDs 并查找对应的名称
-                    for (int id: numbers) {
-                        auto it = ID2NAME.find(id);
-                        currentInfo.tableNames.push_back(it != ID2NAME.end()
-                                                             ? it->second
-                                                             : "未找到表名(" + std::to_string(id) + ")");
-                        currentInfo.tableIDs.push_back(id);
-                    }
-
-                    // *** 新逻辑：根据 Table 行中的 ID 数量设置类型 ***
-                    if (numbers.empty()) {
-                        // 如果解析出的数字为空（可能输入有误），保持 UNKNOWN 或设为错误状态
-                        currentInfo.type = SQLType::UNKNOWN;
-                        std::cerr << "警告: 'Table' 行解析出的 ID 列表为空: " << trimmedLine << std::endl;
-                    } else if (numbers.size() == 1) {
-                        currentInfo.type = SQLType::SELECT; // 单个表 ID -> SELECT
-                    } else {
-                        // numbers.size() > 1
-                        currentInfo.type = SQLType::JOIN; // 多个表 ID -> JOIN
-                    }
-                } else if (typeStr == "Column") {
-                    if (!buildingInfo) {
-                        std::cerr << "警告: 发现 'Column' 行，但当前没有正在构建的 SQLInfo 对象。忽略此行。" << std::endl;
-                        continue;
-                    }
-                    for (int id: numbers) {
-                        auto it = ID2NAME.find(id);
-                        currentInfo.columnNames.push_back(it != ID2NAME.end()
-                                                              ? it->second
-                                                              : "未找到列名(" + std::to_string(id) + ")");
-                        currentInfo.columnIDs.push_back(id);
-                    }
-                } else if (typeStr == "Key") {
-                    if (!buildingInfo) {
-                        std::cerr << "警告: 发现 'Key' 行，但当前没有正在构建的 SQLInfo 对象。忽略此行。" << std::endl;
-                        continue;
-                    }
-                    currentInfo.keyVector.insert(currentInfo.keyVector.end(), numbers.begin(), numbers.end());
-                    results.push_back(currentInfo);
-                    buildingInfo = false;
-                } else {
-                    std::cerr << "警告: 忽略未知的头部类型: " << typeStr << std::endl;
-                }
+        else if (inTxn) {
+            if (next == std::string_view::npos) {
+                txn.append(sql.substr(pos));
             } else {
-                std::cerr << "警告: 忽略格式错误的行: " << trimmedLine << std::endl;
+                txn.append(sql.substr(pos, next - pos + 1));
             }
         }
-    }
+        else if (inHeader && !line_sv.empty()) {
+            auto colon = line_sv.find(':');
+            auto brack = line_sv.find('[');
+            if (brack != std::string_view::npos && colon != std::string_view::npos && brack < colon) {
+                auto type_sv = trim_view(line_sv.substr(0, brack));
+                auto nums_sv = line_sv.substr(colon + 1);
+                static thread_local std::vector<int> nums_buf;
+                nums_buf.clear();
+                nums_buf.reserve(8);
+                size_t i = 0, n = nums_sv.size();
+                while (i < n) {
+                    while (i < n && !std::isdigit((unsigned char)nums_sv[i])) ++i;
+                    int v = 0;
+                    bool seen = false;
+                    while (i < n && std::isdigit((unsigned char)nums_sv[i])) {
+                        seen = true;
+                        v = v * 10 + (nums_sv[i++] - '0');
+                    }
+                    if (seen) nums_buf.push_back(v);
+                }
 
-    // *** 移除旧的类型设置逻辑 ***
-    // 不再需要根据 results.size() 来统一设置类型
+                if (type_sv == "Table") {
+                    current = SQLInfo();
+                    current.tableIDs.reserve(nums_buf.size());
+                    for (int id : nums_buf) current.tableIDs.push_back(id);
+                    current.type = nums_buf.size() == 1 ? SQLType::SELECT
+                                     : nums_buf.empty() ? SQLType::UNKNOWN
+                                     : SQLType::JOIN;
+                    building = true;
+                }
+                else if (type_sv == "Column" && building) {
+                    current.columnIDs.reserve(nums_buf.size());
+                    for (int id : nums_buf) current.columnIDs.push_back(id);
+                }
+                else if (type_sv == "Key" && building) {
+                    current.keyVector.reserve(nums_buf.size());
+                    for (int id : nums_buf) current.keyVector.push_back(id);
+                    results.push_back(current);
+                    building = false;
+                }
+            }
+        }
+
+        if (next == std::string_view::npos) break;
+        pos = next + 1;
+    }
 
     return results;
 }
+
 
 #endif // PARSE_H

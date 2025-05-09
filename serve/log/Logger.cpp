@@ -139,7 +139,9 @@ void Logger::warning(const std::string& text) {
 }
 
 void Logger::error(const std::string& text) {
+    target=LogTarget::FILE_AND_TERMINAL;
     output(text, LogLevel::ERROR);
+    target=LogTarget::FILE_ONLY;
 }
 
 /*

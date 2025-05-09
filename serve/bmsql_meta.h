@@ -113,7 +113,7 @@ namespace BmSql {
          * and its 'is_affinity' flag is true. Returns false otherwise (e.g., IDs not found,
          * column belongs to a different table, or is_affinity is false).
          */
-        bool isColumnAffinity(int tableId, int columnId) const {
+        bool isColumnAffinity(int columnId) const {
             return columunIsAffinity.find(columnId)->second;
         }
 
@@ -305,8 +305,8 @@ namespace BmSql {
         // --- Private Data Members ---
         std::vector<TableInfo> tables_; // Main storage
 
-        std::map<int, int> idToRegionSize;
-        std::map<int, bool> columunIsAffinity;
+        std::unordered_map<int, int> idToRegionSize;
+        std::unordered_map<int, bool> columunIsAffinity;
 
         // Helper maps for fast global lookups
         std::unordered_map<int, size_t> tableIdToIndexMap_;
