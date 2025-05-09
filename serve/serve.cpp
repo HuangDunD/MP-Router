@@ -17,9 +17,10 @@
 // #include "log/Logger.h"     // Include the new Logger header
 #include <pqxx/pqxx> // PostgreSQL C++ library
 
-#define PORT 8500
-#define THREAD_POOL_SIZE 1
-#define BUFFER_SIZE 1024000 // max 8192kb=8MB 4096000=4MB
+// Config info 
+int PORT;
+int THREAD_POOL_SIZE;
+int SOCKET_BUFFER_SIZE; // max 8192kb=8MB 4096000=4MB
 
 // --- Global Variables ---
 Logger logger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::INFO, "server.log", 1024);
@@ -132,7 +133,7 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
         // Send SQL to the router node
         const auto &con = DBConnection[router_node % ComputeNodeCount];
         log.info("Sending SQL to router node " + std::to_string(router_node) + ": " + con);
-        send_sql_to_router(row_sql, con, log);
+        // send_sql_to_router(row_sql, con, log);
     } else {
         if (row_sql.empty()) {
             log.error(" No SQL to send , router node is " + std::to_string(router_node));
@@ -202,6 +203,14 @@ int main(int argc, char *argv[]) {
             "Successfully loading connection info, DBConnection[" + std::to_string(i) + "] = " + DBConnection[i]);
     }
 
+    // --- Load Router Config ---
+    logger.info("Loading router config info...");
+    std::string router_config_path = "../../config/router_config.json";
+    auto router_config_file = JsonConfig::load_file(router_config_path);
+    auto router_config = router_config_file.get("router");
+    PORT = (int) router_config.get("port").get_int64();
+    SOCKET_BUFFER_SIZE = (int) router_config.get("socket_buffer_size").get_int64();
+    THREAD_POOL_SIZE = (int) router_config.get("thread_pool_size").get_int64();
 
     // --- Load DB Meta (Conditional) ---
 #if WORKLOAD_MODE == 0
@@ -324,12 +333,12 @@ int main(int argc, char *argv[]) {
                         std::to_string(client_port) + " (Socket: " + std::to_string(new_socket) + ")");
 
             std::string buffer;
-            buffer.reserve(BUFFER_SIZE); // 避免频繁realloc
+            buffer.reserve(SOCKET_BUFFER_SIZE); // 避免频繁realloc
 
-            char *tmp = new char[BUFFER_SIZE];
+            char *tmp = new char[SOCKET_BUFFER_SIZE];
 
             while (true) {
-                ssize_t valread = read(new_socket, tmp, BUFFER_SIZE);
+                ssize_t valread = read(new_socket, tmp, SOCKET_BUFFER_SIZE);
                 if (valread < 0) {
                     logger.error("Read error on socket " + std::to_string(new_socket) + ": " + strerror(errno));
                     break;

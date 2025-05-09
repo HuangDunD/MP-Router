@@ -122,13 +122,13 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
         // 2. Loop through each parsed block
         for (size_t i = 0; i < sql_infos.size(); ++i) {
             const auto &current_sql_info = sql_infos[i];
-            logger_.debug("[region] blk=" + std::to_string(i + 1) + "/" + std::to_string(sql_infos.size()));
+            // logger_.debug("[region] blk=" + std::to_string(i + 1) + "/" + std::to_string(sql_infos.size()));
 
             // 3. Process based on type
             if (current_sql_info.type == SQLType::SELECT || current_sql_info.type == SQLType::UPDATE) {
                 std::string type_str = (current_sql_info.type == SQLType::SELECT) ? "SELECT" : "UPDATE";
-                logger_.debug("[region] blk=" + std::to_string(i + 1) + " type=" + std::string(type_str)
-                              + " table=" + current_sql_info.tableNames[0]);
+                // logger_.debug("[region] blk=" + std::to_string(i + 1) + " type=" + std::string(type_str)
+                            //   + " table=" + current_sql_info.tableNames[0]);
 
 
                 // Store the column name parsed (if any) for potential reference/warning later
@@ -155,8 +155,8 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                     Region current_region(current_sql_info.tableIDs[0], inner_key);
                     uint64_t combined_id = current_region.serializeToUint64();
                     out_region_ids.push_back(combined_id);
-                    logger_.info("[region] blk=" + std::to_string(i + 1) + " affinity_col=" + std::to_string(
-                                     +affinityColumn) + " table=" + std::string(current_sql_info.tableNames[0]));
+                    // logger_.info("[region] blk=" + std::to_string(i + 1) + " affinity_col=" + std::to_string(
+                                    //  +affinityColumn) + " table=" + std::string(current_sql_info.tableNames[0]));
                 }
                 // --- End of logic for SELECT/UPDATE block ---
             } else if (current_sql_info.type == SQLType::JOIN) {
@@ -168,8 +168,8 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                 ss_join_tables << "Block " << (i + 1) << ": Received JOIN block involving tables: ";
                 for (const auto &name: current_sql_info.tableNames) ss_join_tables << name << " ";
                 ss_join_tables << ". Region ID generation not applicable.";
-                logger_.debug("[region] blk=" + std::to_string(i + 1) + " type=JOIN tables=" + std::to_string(
-                                  +current_sql_info.tableNames.size()));
+                // logger_.debug("[region] blk=" + std::to_string(i + 1) + " type=JOIN tables=" + std::to_string(
+                                //   +current_sql_info.tableNames.size()));
             } else {
                 // ... (UNKNOWN handling remains the same) ...
                 logger_.warning("Block " + std::to_string( i + 1)+": Unknown or unhandled SQL type encountered. Skipping block.");

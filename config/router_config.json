@@ -1,0 +1,7 @@
+{
+    "router": {
+      "port": 8500, 
+      "thread_pool_size": 16, 
+      "socket_buffer_size": 1024000
+    }
+  }
