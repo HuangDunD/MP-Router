@@ -2,27 +2,41 @@ package mock.bench.Tpcc.Tool;
 
 import java.io.*;
 import java.net.Socket;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
 
-import static mock.bench.Tpcc.WorkLoad.jTPCC.offlineLoad;
-import static mock.bench.Tpcc.WorkLoad.jTPCC.offlineLoadFilePath;
+import static mock.bench.Tpcc.WorkLoad.jTPCC.*;
 
 public class ExecClient {
 
     private Socket socket;
     private BufferedReader reader;
     private BufferedWriter writer;
+    private Connection connection;
     private boolean offline = false;
+    private boolean jdbc = false;
+    private static final String startMarker = "***Txn_Start***\n";
+    private static final String endMarker = "***Txn_End***\n";
 
     public ExecClient(String host, int port){
         try {
-            if (offlineLoad.equals("false")){
-                offline = false;
-                connect(host, port);
-            }
-            else {
-                offline = true;
-                File file = new File(offlineLoadFilePath);
-                writer = new BufferedWriter(new FileWriter(file, true));
+            switch (loadType) {
+                case "online":
+                    offline = false;
+                    connect(host, port);
+                    break;
+                case "offline":
+                    offline = true;
+                    File file = new File(offlineLoadFilePath);
+                    writer = new BufferedWriter(new FileWriter(file, true));
+                    break;
+                case "jdbc":
+                    jdbc = true;
+                    connection = DriverManager.getConnection(iConn, iUser, iPassword);
+                    break;
+                default:
+                    System.err.println("Unknown load type: " + loadType);
             }
         } catch (Exception e) {
             throw new RuntimeException("Failed to connect to host: " + e.getMessage());
@@ -44,34 +58,69 @@ public class ExecClient {
     }
 
     public void sendTxn(String txn) throws IOException {
-        writer.write(txn); // 写入消息
-        writer.newLine();
-        writer.flush();    // 确保数据被发送
+        if (jdbc){
+            executeSql(txn);
+        } else {
+            writer.write(txn); // 写入消息
+            writer.newLine();
+            writer.flush();    // 确保数据被发送
 
-        if (!offline){
-            String response = reader.readLine();
-//             while (response.equals("")){
-//                 response = reader.readLine();
-//             }
-            if (response.contains("ERR"))
-                System.out.println("success: " + response);
+            if (!offline){
+                String response = reader.readLine();
+                if (response.contains("ERR"))
+                    System.out.println("success: " + response);
+            }
+        }
+    }
+
+    public void executeSql(String sqlBuilderContent) {
+        try {
+            int startIndex = sqlBuilderContent.indexOf(startMarker) + startMarker.length();
+            int endIndex = sqlBuilderContent.indexOf(endMarker);
+
+            if (startIndex < 0 || endIndex < 0 || startIndex >= endIndex) {
+                throw new IllegalArgumentException("Invalid SQL block markers.");
+            }
+
+            String sqlBlock = sqlBuilderContent.substring(startIndex, endIndex).trim();
+
+            try (Statement statement = connection.createStatement()) {
+                String[] sqlStatements = sqlBlock.split(";\n"); // Split SQL block into individual statements
+
+                for (String sql : sqlStatements) {
+                    sql = sql.trim(); // Remove any leading or trailing whitespace
+                    statement.execute(sql); // Execute each SQL statement
+//                    System.out.println("Executed SQL: " + sql);
+                }
+//                System.out.println("————Done————");
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to execute SQL block: " + e.getMessage(), e);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to execute SQL: " + e.getMessage());
         }
     }
 
     public void close() throws IOException {
         // 关闭资源
-        if (!offline){
-            writer.write("BYE"); // 发送关闭信号
-            writer.newLine();    // 添加换行符
-            writer.flush();      // 确保数据被发送
-            writer.close();
-            reader.close();
-            socket.close();
-            System.out.println("Connection closed.");
+        if (jdbc){
+            try {
+                connection.close();
+            } catch (Exception ignored) {}
         } else {
-            writer.flush();      // 确保数据被发送
-            writer.close();
-            System.out.println("File closed.");
+            if (!offline){
+                writer.write("BYE"); // 发送关闭信号
+                writer.newLine();    // 添加换行符
+                writer.flush();      // 确保数据被发送
+                writer.close();
+                reader.close();
+                socket.close();
+//            System.out.println("Connection closed.");
+            } else {
+                writer.flush();      // 确保数据被发送
+                writer.close();
+//            System.out.println("File closed.");
+            }
         }
     }
 }

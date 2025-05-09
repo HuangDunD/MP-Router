@@ -34,11 +34,10 @@ public class jTPCC {
 
   public jTPCCRandom rnd;
   public String applicationName;
-  public String iConn;
-  public String iUser;
-  public String iPassword;
-  public String whetherConnectDB;
-  public static String offlineLoad;
+  public static String iConn;
+  public static String iUser;
+  public static String iPassword;
+  public static String loadType;
   public static String offlineLoadFilePath;
 
   public static String host;
@@ -145,8 +144,7 @@ public class jTPCC {
     iConn = getProp(ini, "conn");
     iUser = getProp(ini, "user");
     iPassword = getProp(ini, "password");
-    whetherConnectDB = getProp(ini, "whetherConnectDB");
-    offlineLoad = getProp(ini, "offlineLoad");
+    loadType = getProp(ini, "loadType");
     offlineLoadFilePath = getProp(ini, "offlineLoadFilePath");
     host = getProp(ini, "host");
     port = Integer.parseInt(getProp(ini, "port"));
@@ -196,7 +194,7 @@ public class jTPCC {
     rollbackPercent = Double.parseDouble(getProp(ini, "rollbackPercent", "1.01"));
     log.info("Main, ");
 
-    numTerms = 10 * terminalMultiplier;
+    numTerms = 10 * terminalMultiplier; // 终端数
     sutThreadDelay = (rampupSUTMins * 60000) / numSUTThreads;
     terminalDelay = (rampupTerminalMins * 60000) / (useWarehouses * numTerms);
 
@@ -230,7 +228,7 @@ public class jTPCC {
     }
 
     // delete the offlineLoad.txt
-    if (offlineLoad.equals("true")){
+    if (loadType.equals("offline")){
       File file = new File(offlineLoadFilePath);
       if (file.exists()) {
         file.delete();

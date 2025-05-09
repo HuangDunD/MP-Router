@@ -66,10 +66,11 @@ public class Server { // 仅本地测试使用
                     } else if(text.contains("***Txn_End***")) {
                         collect_txn = false;
                         collect_header = false;
-                        System.out.println("Txn_Header: [" + header + "]");
-                        System.out.println("Txn_Body: [" + txn + "]");
+//                        System.out.println("Txn_Header: [" + header + "]");
+//                        System.out.println("Txn_Body: [" + txn + "]");
                         txn = "";
                         header = "";
+                        Thread.sleep(10); // Sleep for 1 second
                         writer.write("FINISH");
                         writer.newLine(); // Add a newline character after each message
                         writer.flush();   // Ensure data is sent immediately
@@ -81,6 +82,8 @@ public class Server { // 仅本地测试使用
                 }
             } catch (IOException ex) {
                 System.err.println("Client handler error: " + ex.getMessage());
+            } catch (InterruptedException ex) {
+                System.err.println("Thread sleep interrupted: " + ex.getMessage());
             } finally {
                 try {
                     clientSocket.close();
