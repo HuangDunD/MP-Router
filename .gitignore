@@ -7,3 +7,5 @@ offline_workload.txt
 loadtable/
 loadtable/tpch/tpch-dbgen
 perf.data
+perf.svg
+perf.data.old
