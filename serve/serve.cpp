@@ -29,7 +29,7 @@ constexpr std::string_view END_MARKER = "***Txn_End***";
 Logger logger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::INFO, "server.log", 1024);
 NewMetis metis; // Assuming NewMetis is the correct type
 TPCHMeta *TPCH_META = nullptr; // Initialize global pointer
-std::string DBConnection[MaxComputeNodeCount];
+std::vector<std::string> DBConnection;
 std::atomic<long long> send_times = 0; // Use long long for potentially large counts
 uint64_t seed = 0xdeadbeef;
 
@@ -46,30 +46,24 @@ struct RouterEndpoint {
 };
 
 static bool send_sql_to_router(const std::string &sqls,
-                               const std::string &conninfo,
+                               node_id_t router_node,
                                Logger &lg) {
+
+    pqxx::connection* conn = connections_thread_local[router_node];
+    if (conn == nullptr || !conn->is_open()) {
+        lg.error("Failed to connect to the database. conninfo" + DBConnection[router_node]);
+        return false;
+    }
     try {
-        pqxx::connection conn(conninfo);
-        if (!conn.is_open()) {
-            lg.error(" Failed to connect to the database. conninfo" + conninfo);
-            return -1;
-        } else {
-            lg.info("Connected to the database successful.");
-        }
-
-        pqxx::work txn(conn);
-
+        pqxx::work txn(*conn);
         pqxx::result result = txn.exec(sqls + "\n");
-
         txn.commit();
-
-        return true;
     } catch (const std::exception &e) {
         lg.error("Error while connecting to KingBase or getting query plan: " + std::string(e.what()));
         return false;
     }
+    return true;
 }
-
 
 // Local helper to send data and report errors
 const bool safe_send(std::string_view msg, int socket_fd, Logger &log) {
@@ -119,18 +113,17 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
     } else if (SYSTEM_MODE == 1) {
         // affinity based algorithm
         if (!region_ids.empty()) {
-            log.info(
-                "Socket " + std::to_string(socket_fd) + ": generated " + std::to_string(region_ids.size()) +
-                " region IDs");
+            // log.info(
+            //     "Socket " + std::to_string(socket_fd) + ": generated " + std::to_string(region_ids.size()) +
+            //     " region IDs");
             router_node = metis.build_internal_graph(region_ids);
         }
     }
 
     if (!row_sql.empty() && router_node < 100) {
         // Send SQL to the router node
-        const auto &con = DBConnection[router_node % ComputeNodeCount];
-        log.info("Sending SQL to router node " + std::to_string(router_node) + ": " + con);
-        send_sql_to_router(row_sql, con, log);
+        // log.info("Sending SQL to router node " + std::to_string(router_node) + ": " + con);
+        send_sql_to_router(row_sql, router_node % ComputeNodeCount, log);
     } else {
         if (row_sql.empty()) {
             log.error(" No SQL to send , router node is " + std::to_string(router_node));
@@ -191,11 +184,12 @@ int main(int argc, char *argv[]) {
         auto username = compute_node_list.get("remote_compute_node_usernames").get(i).get_str();
         auto password = compute_node_list.get("remote_compute_node_passwords").get(i).get_str();
         auto dbname = compute_node_list.get("remote_compute_node_dbnames").get(i).get_str();
-        DBConnection[i] = "host=" + ip +
+        DBConnection.push_back(
+                          "host=" + ip +
                           " port=" + std::to_string(port) +
                           " user=" + username +
                           " password=" + password +
-                          " dbname=" + dbname;
+                          " dbname=" + dbname);
         logger.info(
             "Successfully loading connection info, DBConnection[" + std::to_string(i) + "] = " + DBConnection[i]);
     }
@@ -256,7 +250,7 @@ int main(int argc, char *argv[]) {
 
     // --- Thread Pool Setup ---
     logger.info("Initializing thread pool with " + std::to_string(THREAD_POOL_SIZE) + " threads.");
-    ThreadPool pool(THREAD_POOL_SIZE);
+    ThreadPool pool(THREAD_POOL_SIZE, DBConnection, logger);
     metis.set_thread_pool(&pool);
 
     // --- Server Socket Setup ---

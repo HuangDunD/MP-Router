@@ -7,9 +7,9 @@
 #include <stdexcept> // For std::runtime_error
 
 // --- MODIFICATION START ---
-#include "../log/Logger.h" // Include Logger definition
-#include "../parse.h"     // Include SQLInfo definition
-#include "../bmsql_meta.h"   // Include definition for TPCHMeta and extern TPCH_META
+#include "Logger.h" // Include Logger definition
+#include "parse.h"     // Include SQLInfo definition
+#include "bmsql_meta.h"   // Include definition for TPCHMeta and extern TPCH_META
 
 class TPCHMeta; // REMOVED Forward declaration
 

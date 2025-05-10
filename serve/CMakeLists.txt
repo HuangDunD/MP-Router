@@ -1,3 +1,5 @@
+include_directories(log)
+include_directories(region)
 # --- MODIFICATION START ---
 # List all source files needed for the 'serve' executable
 set(SERVER_SRC

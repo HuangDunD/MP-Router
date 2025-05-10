@@ -9,11 +9,16 @@
 #include <functional>
 #include <future>
 #include <stdexcept>
+#include <pqxx/pqxx> // PostgreSQL C++ library
 
+#include "Logger.h" // Include the Logger header
+#include "config.h"
 // --- Thread Pool Class Definition (Paste the ThreadPool class code here) ---
+
+thread_local std::vector<pqxx::connection*> connections_thread_local;
 class ThreadPool {
 public:
-    ThreadPool(size_t threads);
+    ThreadPool(size_t threads, std::vector<std::string> &connections, Logger &lg);
 
     ~ThreadPool();
 
@@ -29,8 +34,8 @@ private:
     bool stop;
 };
 
-inline ThreadPool::ThreadPool(size_t threads) : stop(false) {
-    for (size_t i = 0; i < threads; ++i)
+inline ThreadPool::ThreadPool(size_t threads, std::vector<std::string> &connections, Logger &lg) : stop(false) {
+    for (size_t i = 0; i < threads; ++i) {
         workers.emplace_back([this] {
             while (true) {
                 std::function<void()> task; {
@@ -43,6 +48,23 @@ inline ThreadPool::ThreadPool(size_t threads) : stop(false) {
                 task();
             }
         });
+        for(size_t i = 0; i < connections.size(); ++i) {
+            std::string conninfo = connections[i];
+            try {
+                // Create a connection for each thread
+                pqxx::connection *conn = new pqxx::connection(conninfo);
+                if (!conn->is_open()) {
+                    lg.error(" Failed to connect to the database. conninfo" + conninfo);
+                } else {
+                    lg.info("Connected to the database successful.");
+                }
+                // Store the connection in thread-local storage
+                connections_thread_local.push_back(conn);
+            } catch (const std::exception &e) {
+                lg.error("Error while connecting to KingBase: " + std::string(e.what()));
+            }
+        }
+    }
 }
 
 template<class F, class... Args>

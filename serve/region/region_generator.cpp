@@ -15,9 +15,11 @@
 #include <sstream>
 #include <algorithm> // For std::sort, std::unique, std::min
 #include <thread>    // For std::hash<std::thread::id> - Used only for logging context
+#include <mutex>     // For std::mutex
+#include <atomic>    // For std::atomic
 
 // Assume these are fully defined/included elsewhere
-#include "../region/region.h"     // Definition for Region struct/class
+#include "region.h"     // Definition for Region struct/class
 
 
 RegionProcessor::RegionProcessor(Logger &logger) : logger_(logger) {
@@ -97,8 +99,8 @@ bool RegionProcessor::processYCSB(const std::string &data, std::vector<uint64_t>
         for (size_t i = 0; i < std::min(out_region_ids.size(), (size_t) 5); ++i) ss_ids << out_region_ids[i] << " ";
         // Log first few
         if (out_region_ids.size() > 5) ss_ids << "...";
-        logger_.info("[region] mode=YCSB ids=" + std::to_string(out_region_ids.size()) +
-                     +" sample=" + std::to_string(out_region_ids.front()) + " ...");
+        // logger_.info("[region] mode=YCSB ids=" + std::to_string(out_region_ids.size()) +
+        //              +" sample=" + std::to_string(out_region_ids.front()) + " ...");
         // NOTE: Graph building (metis.build_internal_graph) is NOT called here anymore.
         // It should be called in the calling function (e.g., process_client_data) if needed.
     } else {
@@ -117,18 +119,18 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
         // 1. Call the BMSQL parser
         std::vector<SQLInfo> sql_infos = parseTPCHSQL(data, raw_txn);
 
-        logger_.info("[region] mode=TPCH blocks=" + std::to_string(sql_infos.size()));
+        // logger_.info("[region] mode=TPCH blocks=" + std::to_string(sql_infos.size()));
 
         // 2. Loop through each parsed block
         for (size_t i = 0; i < sql_infos.size(); ++i) {
             const auto &current_sql_info = sql_infos[i];
-            logger_.debug("[region] blk=" + std::to_string(i + 1) + "/" + std::to_string(sql_infos.size()));
+            // logger_.debug("[region] blk=" + std::to_string(i + 1) + "/" + std::to_string(sql_infos.size()));
 
             // 3. Process based on type
             if (current_sql_info.type == SQLType::SELECT || current_sql_info.type == SQLType::UPDATE) {
                 std::string type_str = (current_sql_info.type == SQLType::SELECT) ? "SELECT" : "UPDATE";
-                logger_.debug("[region] blk=" + std::to_string(i + 1) + " type=" + std::string(type_str)
-                              + " tableID = " + std::to_string(current_sql_info.tableIDs[0]));
+                // logger_.debug("[region] blk=" + std::to_string(i + 1) + " type=" + std::string(type_str)
+                            //   + " tableID = " + std::to_string(current_sql_info.tableIDs[0]));
 
 
                 // Store the column name parsed (if any) for potential reference/warning later
@@ -155,8 +157,8 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                     Region current_region(current_sql_info.tableIDs[0], inner_key);
                     uint64_t combined_id = current_region.serializeToUint64();
                     out_region_ids.push_back(combined_id);
-                    logger_.info("[region] blk=" + std::to_string(i + 1) + " affinity_col=" + std::to_string(
-                                     +affinityColumn) + " tableID= " + std::to_string(current_sql_info.tableIDs[0]));
+                    // logger_.info("[region] blk=" + std::to_string(i + 1) + " affinity_col=" + std::to_string(
+                    //                  +affinityColumn) + " tableID= " + std::to_string(current_sql_info.tableIDs[0]));
                 }
                 // --- End of logic for SELECT/UPDATE block ---
             } else if (current_sql_info.type == SQLType::JOIN) {
@@ -168,8 +170,8 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                 ss_join_tables << "Block " << (i + 1) << ": Received JOIN block involving tables: ";
                 for (const auto &name: current_sql_info.tableIDs) ss_join_tables << name << " ";
                 ss_join_tables << ". Region ID generation not applicable.";
-                logger_.debug("[region] blk=" + std::to_string(i + 1) + " type=JOIN tables=" + std::to_string(
-                                  +current_sql_info.tableIDs.size()));
+                // logger_.debug("[region] blk=" + std::to_string(i + 1) + " type=JOIN tables=" + std::to_string(
+                                //   +current_sql_info.tableIDs.size()));
             } else {
                 // ... (UNKNOWN handling remains the same) ...
                 logger_.warning(

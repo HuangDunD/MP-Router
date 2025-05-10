@@ -23,7 +23,7 @@ extern int SYSTEM_MODE;
 // 定义所跑的workload 0:smallbank 1:tpcc
 #define WORKLOAD_MODE 1 // 0: ycsb 1: tpcc
 
-extern int ComputeNodeCount;
+extern int ComputeNodeCount; // 计算节点数量
 extern uint64_t ATTEMPTED_NUM;
 extern double CrossNodeAccessRatio;
 extern int REGION_SIZE;
