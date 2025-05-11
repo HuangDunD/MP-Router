@@ -211,7 +211,14 @@ int main(int argc, char *argv[]) {
     PORT = (int) router_config.get("port").get_int64();
     SOCKET_BUFFER_SIZE = (int) router_config.get("socket_buffer_size").get_int64();
     THREAD_POOL_SIZE = (int) router_config.get("thread_pool_size").get_int64();
+    AffinitySampleRate = router_config.get("sample_rate").get_double();
 
+    std::cout << "Loaded router config: " << std::endl;
+    std::cout << "Port: " << PORT << std::endl;
+    std::cout << "Socket Buffer Size: " << SOCKET_BUFFER_SIZE << std::endl;
+    std::cout << "Thread Pool Size: " << THREAD_POOL_SIZE << std::endl;
+    std::cout << "Affinity Sample Rate: " << AffinitySampleRate << std::endl;
+    std::cout << "-----------------------------" << std::endl;
 
     // --- Load DB Meta (Conditional) ---
 #if WORKLOAD_MODE == 0

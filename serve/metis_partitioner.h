@@ -18,9 +18,10 @@
 #include <iomanip>
 #include <ctime>
 #include <atomic>     // Required for automatic partitioning counters
+#include <random>
 
 #include "region/region.h" // Assuming this path is correct
-
+#include "config.h"
 
 // Forward declarations
 class ThreadPool; // Assume ThreadPool class is defined elsewhere
@@ -30,7 +31,6 @@ class ThreadPool; // Assume ThreadPool class is defined elsewhere
 
 // Enable automatic partitioning via preprocessor directive
 #define ENABLE_AUTO_PARTITION
-
 
 
 class NewMetis {
@@ -84,6 +84,9 @@ private:
 
     Logger logger_;
 
+    // random seed
+    std::random_device rd;
+
     // Helper (not directly used by METIS call after snapshot, but for internal consistency if needed)
     // Must be called while holding graph_data_mutex_.
     uint64_t get_graph_size_unsafe() const {
@@ -131,7 +134,11 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
     // --- End Auto Partition Trigger Check ---
 
     // --- Core Graph Modification (within graph_data_mutex_) ---
-    {
+    // add sample rate here
+    std::mt19937 gen(rd()); // Mersenne Twister RNG
+    std::uniform_real_distribution<double> distrib(0.0, 1.0);
+    double random_value = distrib(gen); // Generate a random value between 0.0 and 1.0
+    if (random_value <= AffinitySampleRate) {
         std::lock_guard<std::mutex> lock(graph_data_mutex_);
 
         for (const uint64_t &regionid: unique_mapped_ids_in_group) {

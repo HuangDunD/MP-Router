@@ -27,3 +27,4 @@ extern int ComputeNodeCount; // 计算节点数量
 extern uint64_t ATTEMPTED_NUM;
 extern double CrossNodeAccessRatio;
 extern int REGION_SIZE;
+extern double AffinitySampleRate;
