@@ -118,6 +118,13 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
             //     " region IDs");
             router_node = metis.build_internal_graph(region_ids);
         }
+    } else if(SYSTEM_MODE == 2) {
+        // single node
+        router_node = 0;
+    } else {
+        log.error("Invalid SYSTEM_MODE: " + std::to_string(SYSTEM_MODE));
+        safe_send("Invalid SYSTEM_MODE\n", socket_fd, log);
+        return;
     }
 
     if (!row_sql.empty() && router_node < 100) {
@@ -159,6 +166,8 @@ int main(int argc, char *argv[]) {
         system_value = 0;
     } else if (system_name.find("affinity") != std::string::npos) {
         system_value = 1;
+    } else if (system_name.find("single") != std::string::npos) {
+        system_value = 2;
     } else {
         std::cerr << "Invalid system name." << std::endl;
         return 0;
