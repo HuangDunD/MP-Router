@@ -34,9 +34,10 @@ public class jTPCC {
 
   public jTPCCRandom rnd;
   public String applicationName;
-  public static String iConn;
-  public static String iUser;
-  public static String iPassword;
+  // 修改为数组形式
+  public static String[] iConn;
+  public static String[] iUser;
+  public static String[] iPassword;
   public static String loadType;
   public static String offlineLoadFilePath;
 
@@ -141,9 +142,28 @@ public class jTPCC {
     String iDBType = getProp(ini, "db");
     String iDriver = getProp(ini, "driver");
     applicationName = getProp(ini, "application");
-    iConn = getProp(ini, "conn");
-    iUser = getProp(ini, "user");
-    iPassword = getProp(ini, "password");
+    
+    // 读取数组形式的连接配置
+    int connCount = 0;
+    while (ini.containsKey("conn[" + connCount + "]")) {
+      connCount++;
+    }
+    
+    if (connCount == 0) {
+      log.error("No database connections configured");
+      return;
+    }
+    
+    iConn = new String[connCount];
+    iUser = new String[connCount];
+    iPassword = new String[connCount];
+    
+    for (int i = 0; i < connCount; i++) {
+      iConn[i] = getProp(ini, "conn[" + i + "]");
+      iUser[i] = getProp(ini, "user[" + i + "]");
+      iPassword[i] = getProp(ini, "password[" + i + "]");
+    }
+    
     loadType = getProp(ini, "loadType");
     offlineLoadFilePath = getProp(ini, "offlineLoadFilePath");
     host = getProp(ini, "host");

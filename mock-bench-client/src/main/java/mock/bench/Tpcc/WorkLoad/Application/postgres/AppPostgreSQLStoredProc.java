@@ -42,10 +42,11 @@ public class AppPostgreSQLStoredProc extends jTPCCApplication {
     this.sut_id = sut_id;
 
     // Connect to the database
+    // !hcy存疑?
     dbProps = new Properties();
-    dbProps.setProperty("user", gdata.iUser);
-    dbProps.setProperty("password", gdata.iPassword);
-    dbConn = DriverManager.getConnection(gdata.iConn, dbProps);
+    dbProps.setProperty("user", gdata.iUser[0]);
+    dbProps.setProperty("password", gdata.iPassword[0]);
+    dbConn = DriverManager.getConnection(gdata.iConn[0], dbProps);
     dbConn.setAutoCommit(false);
 
     // PreparedStataments for NEW_ORDER

@@ -4,6 +4,8 @@ import java.io.*;
 import java.net.Socket;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.SQLClientInfoException;
+import java.sql.SQLException;
 import java.sql.Statement;
 
 import static mock.bench.Tpcc.WorkLoad.jTPCC.*;
@@ -13,7 +15,8 @@ public class ExecClient {
     private Socket socket;
     private BufferedReader reader;
     private BufferedWriter writer;
-    private Connection connection;
+    private Connection[] connections;
+    private final java.util.Random random = new java.util.Random(31); // 使用固定种子
     private boolean offline = false;
     private boolean jdbc = false;
     private static final String startMarker = "***Txn_Start***\n";
@@ -33,7 +36,10 @@ public class ExecClient {
                     break;
                 case "jdbc":
                     jdbc = true;
-                    connection = DriverManager.getConnection(iConn, iUser, iPassword);
+                    connections = new Connection[iConn.length];
+                    for (int i = 0; i < iConn.length; i++) {
+                        connections[i] = DriverManager.getConnection(iConn[i], iUser[i], iPassword[i]);
+                    }
                     break;
                 default:
                     System.err.println("Unknown load type: " + loadType);
@@ -83,18 +89,18 @@ public class ExecClient {
             }
 
             String sqlBlock = sqlBuilderContent.substring(startIndex, endIndex).trim();
+            
+            // 随机选择连接
+            Connection currentConn = connections[random.nextInt(connections.length)];
 
-            try (Statement statement = connection.createStatement()) {
-                String[] sqlStatements = sqlBlock.split(";\n"); // Split SQL block into individual statements
-
+            try (Statement statement = currentConn.createStatement()) {
+                String[] sqlStatements = sqlBlock.split(";\n");
                 for (String sql : sqlStatements) {
-                    sql = sql.trim(); // Remove any leading or trailing whitespace
-                    statement.execute(sql); // Execute each SQL statement
-//                    System.out.println("Executed SQL: " + sql);
+                    sql = sql.trim();
+                    statement.execute(sql);
                 }
-//                System.out.println("————Done————");
             } catch (Exception e) {
-                throw new RuntimeException("Failed to execute SQL block: " + e.getMessage(), e);
+                throw new SQLException("Failed to execute SQL block: " + e.getMessage(), e);
             }
         } catch (Exception e) {
             throw new RuntimeException("Failed to execute SQL: " + e.getMessage());
@@ -104,9 +110,13 @@ public class ExecClient {
     public void close() throws IOException {
         // 关闭资源
         if (jdbc){
-            try {
-                connection.close();
-            } catch (Exception ignored) {}
+            for (Connection conn : connections) {
+                try {
+                    if (conn != null) {
+                        conn.close();
+                    }
+                } catch (Exception ignored) {}
+            }
         } else {
             if (!offline){
                 writer.write("BYE"); // 发送关闭信号

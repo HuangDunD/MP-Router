@@ -143,7 +143,7 @@ public class ExecJDBC {
         if (conn != null)
           conn.close();
       } catch (SQLException se) {
-        log.error(se);
+        // log.error(se);
       } // end finally
 
     } // end try
@@ -158,8 +158,8 @@ public class ExecJDBC {
     try {
       stmt.execute(query);
     } catch (SQLException se) {
-      log.error(se.getMessage());
-      log.info(se);
+      // log.error(se.getMessage());
+      // log.info(se);
     } // end try
 
   } // end execJDBCCommand
