@@ -27,11 +27,18 @@ public class jTPCCMonkey {
 
   private jTPCCRandom rnd;
 
+  // for crossWarehouse
+  private static int crossWarehouseNewOrder = jTPCC.crossWarehouseNewOrder; // 跨wh概率1
+  private static int crossWarehousePayment = 100 - jTPCC.crossWarehousePayment; // 跨wh概率2
+
   public jTPCCMonkey(jTPCC gdata) {
     this.gdata = gdata;
     this.numMonkeys = jTPCC.numMonkeys;
     this.monkeys = new Monkey[jTPCC.numMonkeys];
     this.monkeyThreads = new Thread[jTPCC.numMonkeys];
+
+//    this.crossWarehouseNewOrder = gdata.crossWarehouseNewOrder;
+//    this.crossWarehousePayment = gdata.crossWarehousePayment;
 
     this.queue = new jTPCCTDataList();
     this.queue_lock = new Object();
@@ -362,7 +369,7 @@ public class jTPCCMonkey {
         // 2.4.1.5 2) - In 1% of order lines the supply warehouse
         // is different from the terminal's home warehouse.
         screen.ol_supply_w_id[ol_idx] = tdata.term_w_id;
-        if (rnd.nextInt(1, 100) == jTPCC.crossWarehouseNewOrder) { // 跨wh概率1
+        if (rnd.nextInt(1, 100) == crossWarehouseNewOrder) { // 跨wh概率1
           do {
             screen.ol_supply_w_id[ol_idx] = rnd.nextInt(1, jTPCC.numWarehouses);
           } while (screen.ol_supply_w_id[ol_idx] == tdata.term_w_id && jTPCC.numWarehouses > 1);
@@ -453,7 +460,7 @@ public class jTPCCMonkey {
 
       // 2.5.1.2 - in 85% of cases (c_d_id, c_w_id) = (d_id, w_id)
       // in 15% of cases they are randomly chosen.
-      if (rnd.nextInt(1, 100) <= (100 - jTPCC.crossWarehousePayment)) { // 跨wh概率2
+      if (rnd.nextInt(1, 100) <= crossWarehousePayment) { // 跨wh概率2
         screen.c_d_id = screen.d_id;
         screen.c_w_id = screen.w_id;
       } else {

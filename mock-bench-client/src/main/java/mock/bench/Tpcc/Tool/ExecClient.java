@@ -12,7 +12,7 @@ import static mock.bench.Tpcc.WorkLoad.jTPCC.*;
 public class ExecClient {
 
     private Socket socket;
-    private BufferedReader reader;
+    private DataInputStream reader;
     private  DataOutputStream writer;
     private Connection[] connections;
     private final java.util.Random random = new java.util.Random(31); // 使用固定种子
@@ -51,12 +51,13 @@ public class ExecClient {
     public void connect(String host, int port) throws IOException {
         // 建立 TCP 连接
         socket = new Socket(host, port);
-        socket.setReceiveBufferSize(1024 * 1024); // 1 MB
-        socket.setSendBufferSize(1024 * 1024); // 1 MB
+        socket.setReceiveBufferSize(1024 * 1024 * 4); // 1 MB
+        socket.setSendBufferSize(1024 * 1024 * 4); // 1 MB
 
         // 使用 BufferedReader 和 BufferedWriter 处理输入输出流
-        reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        writer = new DataOutputStream(socket.getOutputStream());
+        reader = new DataInputStream(socket.getInputStream());
+        writer = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream(), 8192 * 2)); // 16 KB
+//        writer = new DataOutputStream(socket.getOutputStream());
         sendTxn("HELLO");
     }
 
@@ -70,11 +71,23 @@ public class ExecClient {
             writer.flush();    // 确保数据被发送
 
             if (!offline){
-                String response = reader.readLine();
+                String response = readLine(reader); // 自定义方法读取一行
                 if (response.contains("ERR"))
                     System.out.println("Success: " + response);
             }
         }
+    }
+
+    private StringBuilder readLineBuffer = new StringBuilder();
+
+    private String readLine(DataInputStream in) throws IOException {
+        int b;
+        while ((b = in.readByte()) != '\n') {
+            readLineBuffer.append((char) b);
+        }
+        String result = readLineBuffer.toString();
+        readLineBuffer.setLength(0); // 清空复用
+        return result;
     }
 
     public void executeSql(String sqlBuilderContent) {

@@ -3,6 +3,8 @@ package mock.bench.TpchYcsb;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.List;
 
 public class Server { // 仅本地测试使用
     public static void main(String[] args) {
@@ -52,15 +54,18 @@ public class Server { // 仅本地测试使用
 
                     // 3. 转换为字符串（假设客户端用 UTF-8 编码发送）
                     String blockText = new String(buffer, StandardCharsets.UTF_8);
-                    System.out.println("Received block with total bytes: " + totalBytes);
-                    System.out.println("Block content:\n" + blockText);
+                    // 以\n为分隔符分割字符串
+                    List<String> txnList = Arrays.asList(blockText.split("\n"));
+
+//                    System.out.println("Received block with total bytes: " + totalBytes);
+//                    System.out.println("Block content:\n" + blockText);
 
                     // 4. 使用 BufferedReader 逐行处理
-                    BufferedReader lineReader = new BufferedReader(new StringReader(blockText));
-                    String text;
-                    while ((text = lineReader.readLine()) != null) {
+//                    BufferedReader lineReader = new BufferedReader(new StringReader(blockText));
+//                    String text;
+//                    while ((text = lineReader.readLine()) != null) {
 //                        System.out.println("Received message from client: " + text);
-
+                    for (String text : txnList) {
                         if (text.contains("BYE")) {
                             clientSocket.close();
                             return; // 结束连接
@@ -81,7 +86,7 @@ public class Server { // 仅本地测试使用
                             writer.write("FINISH");
                             writer.newLine();
                             writer.flush();
-                            Thread.sleep(1000); // Sleep for 1 second
+                            Thread.sleep(1); // Sleep for 1 second
                             txn = "";
                             header = "";
                         } else if (collect_header) {
