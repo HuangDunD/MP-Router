@@ -54,10 +54,8 @@ public class ExecClient {
         socket.setReceiveBufferSize(1024 * 1024 * 4); // 1 MB
         socket.setSendBufferSize(1024 * 1024 * 4); // 1 MB
 
-        // 使用 BufferedReader 和 BufferedWriter 处理输入输出流
-        reader = new DataInputStream(socket.getInputStream());
+        reader = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 8192 * 2));
         writer = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream(), 8192 * 2)); // 16 KB
-//        writer = new DataOutputStream(socket.getOutputStream());
         sendTxn("HELLO");
     }
 
