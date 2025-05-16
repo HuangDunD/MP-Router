@@ -10,7 +10,7 @@
 #include "util/json_config.h"
 #include "threadpool.h" // Include your thread pool header
 #include "queryplan_cardinality.h" // Assuming this is needed
-// #include "db_meta.h"
+#include "RingBuffer/ringbuffer.h"
 #include "bmsql_meta.h" // Include the header file
 #include "region/region_generator.h"
 #include "metis_partitioner.h" // Assuming this is needed, replace NewMetis if necessary
@@ -265,7 +265,7 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) 
     }
 
     if (!row_sql.empty() && router_node < 5) {
-        send_sql_to_router(row_sql, router_node % ComputeNodeCount, log_ref);
+        // send_sql_to_router(row_sql, router_node % ComputeNodeCount, log_ref);
     } else {
         if (row_sql.empty()) {
             log_ref.error(" No SQL to send , router node is " + std::to_string(router_node));
@@ -488,14 +488,12 @@ int main(int argc, char *argv[]) {
             logger.info("Handler thread started for client " + std::string(client_ip) + ":" +
                         std::to_string(client_port) + " (Socket: " + std::to_string(new_socket) + ")");
 
-            std::vector<char> recv_buffer;
-            recv_buffer.reserve(SOCKET_BUFFER_SIZE);
+            const size_t RING_BUFFER_CAP = SOCKET_BUFFER_SIZE * 2; // 足够大
 
+            RingBuffer ring_buffer(RING_BUFFER_CAP);
             char tmp[SOCKET_BUFFER_SIZE];
 
             while (true) {
-                std::chrono::time_point<std::chrono::high_resolution_clock> tcp_start_time, tcp_end_time;
-                tcp_start_time = std::chrono::high_resolution_clock::now();
                 ssize_t valread = read(new_socket, tmp, SOCKET_BUFFER_SIZE);
                 if (valread < 0) {
                     logger.error("Read error on socket " + std::to_string(new_socket) + ": " + strerror(errno));
@@ -505,45 +503,52 @@ int main(int argc, char *argv[]) {
                     break;
                 }
 
-                // 1) 将本次读到的数据追加到 recv_buffer
-                recv_buffer.insert(recv_buffer.end(), tmp, tmp + valread);
-
-                // 2) 循环解析：只要有完整包头（4 字节）就尝试看有没有整条消息
-                while (recv_buffer.size() >= sizeof(uint32_t)) {
-                    uint32_t net_payload_size;
-                    std::memcpy(&net_payload_size, recv_buffer.data(), sizeof(net_payload_size));
-                    uint32_t payload_size = ntohl(net_payload_size);
-
-                    // 2.2) 如果缓冲区里还没攒够 4 + payload_size 字节，就等下次 read
-                    if (recv_buffer.size() < sizeof(net_payload_size) + payload_size) {
+                // 写入环形缓冲区
+                if (valread > 0) {
+                    if (ring_buffer.size() + valread > RING_BUFFER_CAP) {
+                        logger.error("Ring buffer overflow!");
                         break;
                     }
+                    ring_buffer.write(tmp, valread);
+                }
 
-                    // 2.3) 拿到完整消息体
-                    std::string msg(recv_buffer.data() + sizeof(net_payload_size), payload_size);
+                // 环形缓冲区内解析所有可处理的包
+                while (ring_buffer.size() >= 4) {
+                    // 1. 先读4字节包头（可能被环绕了）
+                    char header[4];
+                    ring_buffer.peek(0, header, 4);
+                    uint32_t net_payload_size;
+                    std::memcpy(&net_payload_size, header, 4);
+                    uint32_t payload_size = ntohl(net_payload_size);
 
-                    // 2.4) 处理特殊命令：以 'H' 或 'B' 开头的直接回复 FINISH
+                    if (ring_buffer.size() < 4 + payload_size)
+                        break; // 还没收全
+
+                    // 2. 读取完整包内容（可能被环绕）
+                    std::string msg(payload_size, '\0');
+                    ring_buffer.peek(4, msg.data(), payload_size);
+
+                    // 3. 处理特殊包/普通包
                     if (!msg.empty() && (msg[0] == 'H' || msg[0] == 'B')) {
                         safe_send("FINISH\n", new_socket);
                     } else {
-                        tcp_end_time= std::chrono::high_resolution_clock::now();
-                        double tcp_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                            tcp_end_time - tcp_start_time).count();
-                        {
-                            std::lock_guard<std::mutex> lock(latency_mutex);
-                            latencies_tcp_us.push_back(tcp_duration_us);
-                        }
-                        // 将 msg 拷贝给线程池处理
-                        pool.enqueue(process_client_data, msg, new_socket, std::ref(logger));
+                        auto tcp_start_time = std::chrono::high_resolution_clock::now();
+
+                        pool.enqueue([msg, new_socket, &logger, tcp_start_time]() mutable {
+                            auto tcp_end_time = std::chrono::high_resolution_clock::now();
+                            double tcp_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                tcp_end_time - tcp_start_time).count(); {
+                                std::lock_guard<std::mutex> lock(latency_mutex);
+                                latencies_tcp_us.push_back(tcp_duration_us);
+                            }
+                            process_client_data(msg, new_socket, logger);
+                        });
                     }
 
-                    // 2.5) 从缓冲区移除已处理的字节
-                    recv_buffer.erase(
-                        recv_buffer.begin(),
-                        recv_buffer.begin() + sizeof(net_payload_size) + payload_size
-                    );
+                    // 4. 消费掉缓冲区数据
+                    ring_buffer.pop(4 + payload_size);
                 }
-            } //end while(true)
+            }
 
             close(new_socket);
             logger.info("Closed socket " + std::to_string(new_socket) + " for client " + client_ip + ":" +
