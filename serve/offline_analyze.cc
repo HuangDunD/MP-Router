@@ -47,7 +47,7 @@ static void process_single_sql(const std::string            &sql,
                                std::unordered_map<int,long long> &col_cardinality)
 {
     std::string raw_txn;
-    auto sql_infos = parseTPCHSQL(sql, meta.idToNameMap_, raw_txn);
+    auto sql_infos = parseTPCHSQL(sql,  raw_txn);
     for (const auto &info : sql_infos) {
         if (info.type == SQLType::SELECT ||
             info.type == SQLType::UPDATE ||

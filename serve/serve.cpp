@@ -48,8 +48,7 @@ struct RouterEndpoint {
 static bool send_sql_to_router(const std::string &sqls,
                                node_id_t router_node,
                                Logger &lg) {
-
-    pqxx::connection* conn = connections_thread_local[router_node];
+    pqxx::connection *conn = connections_thread_local[router_node];
     if (conn == nullptr || !conn->is_open()) {
         lg.error("Failed to connect to the database. conninfo" + DBConnection[router_node]);
         return false;
@@ -118,7 +117,7 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
             //     " region IDs");
             router_node = metis.build_internal_graph(region_ids);
         }
-    } else if(SYSTEM_MODE == 2) {
+    } else if (SYSTEM_MODE == 2) {
         // single node
         router_node = 0;
     } else {
@@ -194,11 +193,11 @@ int main(int argc, char *argv[]) {
         auto password = compute_node_list.get("remote_compute_node_passwords").get(i).get_str();
         auto dbname = compute_node_list.get("remote_compute_node_dbnames").get(i).get_str();
         DBConnection.push_back(
-                          "host=" + ip +
-                          " port=" + std::to_string(port) +
-                          " user=" + username +
-                          " password=" + password +
-                          " dbname=" + dbname);
+            "host=" + ip +
+            " port=" + std::to_string(port) +
+            " user=" + username +
+            " password=" + password +
+            " dbname=" + dbname);
         logger.info(
             "Successfully loading connection info, DBConnection[" + std::to_string(i) + "] = " + DBConnection[i]);
     }
@@ -340,48 +339,54 @@ int main(int argc, char *argv[]) {
             logger.info("Handler thread started for client " + std::string(client_ip) + ":" +
                         std::to_string(client_port) + " (Socket: " + std::to_string(new_socket) + ")");
 
-            std::string buffer;
-            buffer.reserve(SOCKET_BUFFER_SIZE);
+            std::vector<char> recv_buffer;
+            recv_buffer.reserve(SOCKET_BUFFER_SIZE);
 
             char tmp[SOCKET_BUFFER_SIZE];
 
-           while (true) {
-               ssize_t valread = read(new_socket, tmp, SOCKET_BUFFER_SIZE);
-               if (valread < 0) {
-                   logger.error("Read error on socket " + std::to_string(new_socket) + ": " + strerror(errno));
-                   break;
-               } else if (valread == 0) {
-                   logger.info("Client disconnected: " + std::string(client_ip) + ":" + std::to_string(client_port));
-                   break;
-               }
+            while (true) {
+                ssize_t valread = read(new_socket, tmp, SOCKET_BUFFER_SIZE);
+                if (valread < 0) {
+                    logger.error("Read error on socket " + std::to_string(new_socket) + ": " + strerror(errno));
+                    break;
+                } else if (valread == 0) {
+                    logger.info("Client disconnected: " + std::string(client_ip) + ":" + std::to_string(client_port));
+                    break;
+                }
 
-               std::string_view chunk(tmp, valread);
+                // 1) 将本次读到的数据追加到 recv_buffer
+                recv_buffer.insert(recv_buffer.end(), tmp, tmp + valread);
 
-               if (chunk == "HELLO\n" || chunk == "BYE\n") {
-                   safe_send("FINISH\n", new_socket, logger);
-                   continue;
-               }
+                // 2) 循环解析：只要有完整包头（4 字节）就尝试看有没有整条消息
+                while (recv_buffer.size() >= sizeof(uint32_t)) {
+                    // 2.1) 读取网络序的 payload 长度
+                    uint32_t net_payload_size;
+                    std::memcpy(&net_payload_size, recv_buffer.data(), sizeof(net_payload_size));
+                    uint32_t payload_size = ntohl(net_payload_size);
 
-               // 🔹 拼接并解析完整事务
-               buffer.append(chunk);
-               if (buffer.starts_with("***Header_Start***") && buffer.ends_with("***Txn_End***")) {
-                   pool.enqueue(process_client_data, buffer, new_socket, std::ref(logger));
-               }else {
-                   while (true) {
-                       size_t h_start = buffer.find("***Header_Start***");
-                       size_t t_end = buffer.find("***Txn_End***");
+                    // 2.2) 如果缓冲区里还没攒够 4 + payload_size 字节，就等下次 read
+                    if (recv_buffer.size() < sizeof(net_payload_size) + payload_size) {
+                        break;
+                    }
 
-                       if (h_start != std::string::npos && t_end != std::string::npos && h_start < t_end) {
-                           size_t txn_end_pos = t_end + strlen("***Txn_End***");
-                           std::string txn = buffer.substr(h_start, txn_end_pos - h_start);
-                           pool.enqueue(process_client_data, std::move(txn), new_socket, std::ref(logger));
-                           buffer.erase(0, txn_end_pos);
-                       } else {
-                           break;
-                       }
-                   }
-               }
-           }
+                    // 2.3) 拿到完整消息体
+                    std::string msg(recv_buffer.data() + sizeof(net_payload_size), payload_size);
+
+                    // 2.4) 处理特殊命令：以 'H' 或 'B' 开头的直接回复 FINISH
+                    if (!msg.empty() && (msg[0] == 'H' || msg[0] == 'B')) {
+                        safe_send("FINISH\n", new_socket, logger);
+                    } else {
+                        // 将 msg 拷贝给线程池处理
+                        pool.enqueue(process_client_data, msg, new_socket, std::ref(logger));
+                    }
+
+                    // 2.5) 从缓冲区移除已处理的字节
+                    recv_buffer.erase(
+                        recv_buffer.begin(),
+                        recv_buffer.begin() + sizeof(net_payload_size) + payload_size
+                    );
+                }
+            }
 
             close(new_socket);
             logger.info("Closed socket " + std::to_string(new_socket) + " for client " + std::string(client_ip) + ":" +
