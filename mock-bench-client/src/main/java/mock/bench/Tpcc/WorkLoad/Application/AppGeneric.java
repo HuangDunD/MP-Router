@@ -24,8 +24,6 @@ public class AppGeneric extends jTPCCApplication {
   }
 
   public void executePayment(jTPCCTData.PaymentData payMent) throws Exception {
-//    Payment payment = new Payment();
-//    String payment_txn = payment.executePayment(payMent);
     execClient.sendTxn(Payment.executePayment(payMent, rnd));
   }
 

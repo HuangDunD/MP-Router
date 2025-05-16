@@ -4,7 +4,6 @@ import java.io.*;
 import java.net.Socket;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.SQLClientInfoException;
 import java.sql.SQLException;
 import java.sql.Statement;
 
@@ -14,7 +13,7 @@ public class ExecClient {
 
     private Socket socket;
     private BufferedReader reader;
-    private BufferedWriter writer;
+    private  DataOutputStream writer;
     private Connection[] connections;
     private final java.util.Random random = new java.util.Random(31); // 使用固定种子
     private boolean offline = false;
@@ -32,7 +31,7 @@ public class ExecClient {
                 case "offline":
                     offline = true;
                     File file = new File(offlineLoadFilePath);
-                    writer = new BufferedWriter(new FileWriter(file, true));
+                    writer = new DataOutputStream(new FileOutputStream(file));
                     break;
                 case "jdbc":
                     jdbc = true;
@@ -52,14 +51,12 @@ public class ExecClient {
     public void connect(String host, int port) throws IOException {
         // 建立 TCP 连接
         socket = new Socket(host, port);
-
-        // 使用 BufferedReader 和 BufferedWriter 处理输入输出流
-        reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
-
         socket.setReceiveBufferSize(1024 * 1024); // 1 MB
         socket.setSendBufferSize(1024 * 1024); // 1 MB
 
+        // 使用 BufferedReader 和 BufferedWriter 处理输入输出流
+        reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+        writer = new DataOutputStream(socket.getOutputStream());
         sendTxn("HELLO");
     }
 
@@ -67,14 +64,15 @@ public class ExecClient {
         if (jdbc){
             executeSql(txn);
         } else {
-            writer.write(txn); // 写入消息
-            writer.newLine();
+            int totalLength = txn.length() + 1;
+            writer.writeInt(totalLength); // 发送消息长度
+            writer.write((txn + "\n").getBytes()); // 发送消息
             writer.flush();    // 确保数据被发送
 
             if (!offline){
                 String response = reader.readLine();
                 if (response.contains("ERR"))
-                    System.out.println("success: " + response);
+                    System.out.println("Success: " + response);
             }
         }
     }
@@ -119,17 +117,14 @@ public class ExecClient {
             }
         } else {
             if (!offline){
-                writer.write("BYE"); // 发送关闭信号
-                writer.newLine();    // 添加换行符
+                writer.write("Bye\n".getBytes());
                 writer.flush();      // 确保数据被发送
                 writer.close();
                 reader.close();
                 socket.close();
-//            System.out.println("Connection closed.");
             } else {
                 writer.flush();      // 确保数据被发送
                 writer.close();
-//            System.out.println("File closed.");
             }
         }
     }

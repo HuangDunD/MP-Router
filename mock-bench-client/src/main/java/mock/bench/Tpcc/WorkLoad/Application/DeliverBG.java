@@ -24,6 +24,8 @@ public class DeliverBG {
         StringBuilder sqlBuilder = new StringBuilder();
 
         String last_stmt = "unknown";
+        header = "WareHouse[1]:" + deliveryBG.w_id; // 标记主仓库id
+        sqlHeaderList.add(header);
 
         for (d_id = 1; d_id <= 10; d_id++) {
             /*
@@ -31,7 +33,6 @@ public class DeliverBG {
              * is a case that needs to be reportd.
              */
             last_stmt = "stmtDeliveryBGSelectOldestNewOrder";
-
             header = "Table[1]:4\n" +
                     "Column[2]:18,19\n" +
                     "Key[2]:{0},{1}\n";
@@ -48,11 +49,9 @@ public class DeliverBG {
 
 
             last_stmt = "stmtDeliveryBGDeleteOldestNewOrder";
-
             // get the min o_id and update it
             o_id = min_o_id[deliveryBG.w_id][d_id];
             min_o_id[deliveryBG.w_id][d_id] = o_id + 1;
-
             header = "Table[1]:4\n" +
                     "Column[3]:18,19,20\n" +
                     "Key[3]:{0},{1},{2}\n";
@@ -68,7 +67,6 @@ public class DeliverBG {
 
             // Update the ORDER setting the o_carrier_id.
             last_stmt = "stmtDeliveryBGUpdateOrder";
-
             header = "Table[1]:5\n" +
                     "Column[3]:22,23,21\n" +
                     "Key[3]:{0},{1},{2}\n";
@@ -85,7 +83,6 @@ public class DeliverBG {
 
             // Get the o_c_id from the ORDER.
             last_stmt = "stmtDeliveryBGSelectOrder";
-
             header = "Table[1]:5\n" +
                     "Column[3]:22,23,21\n" +
                     "Key[3]:{0},{1},{2}\n";
@@ -102,7 +99,6 @@ public class DeliverBG {
 
             // Update ORDER_LINE setting the ol_delivery_d.
             last_stmt = "stmtDeliveryBGUpdateOrderLine";
-
             header = "Table[1]:6\n" +
                     "Column[3]:25,26,27\n" +
                     "Key[3]:{0},{1},{2}\n";
@@ -119,7 +115,6 @@ public class DeliverBG {
 
             // Select the sum(ol_amount) from ORDER_LINE.
             last_stmt = "stmtDeliveryBGSelectSumOLAmount";
-
             header = "Table[1]:6\n" +
                     "Column[3]:25,26,27\n" +
                     "Key[3]:{0},{1},{2}\n";
@@ -136,9 +131,7 @@ public class DeliverBG {
 
             // Update the CUSTOMER.
             last_stmt = "stmtDeliveryBGUpdateCustomer";
-
             int c_id = rnd.getCustomerID();
-
             header = "Table[1]:0\n" +
                     "Column[3]:10,11,12\n" +
                     "Key[3]:{0},{1},{2}\n";
@@ -155,6 +148,9 @@ public class DeliverBG {
             // Recored the delivered O_ID in the DELIVERY_BG
             deliveryBG.delivered_o_id[d_id - 1] = o_id;
         }
+
+        header = "Remote[1]:0";
+        sqlHeaderList.add(header);
 
         sqlBuilder.append("***Header_Start***\n");
         for (String headerSql : sqlHeaderList) {

@@ -66,6 +66,9 @@ public class jTPCC {
   public static int terminalMultiplier;
   public static boolean traceTerminalIO = false;
 
+  public static int crossWarehouseNewOrder;
+  public static int crossWarehousePayment;
+
   public static int sutThreadDelay;
   public static int terminalDelay;
   public static int numTerms;
@@ -163,6 +166,9 @@ public class jTPCC {
       iUser[i] = getProp(ini, "user[" + i + "]");
       iPassword[i] = getProp(ini, "password[" + i + "]");
     }
+
+    crossWarehouseNewOrder = Integer.parseInt(getProp(ini, "crossWarehouseNewOrder", "1"));
+    crossWarehousePayment = Integer.parseInt(getProp(ini, "crossWarehousePayment", "15"));
     
     loadType = getProp(ini, "loadType");
     offlineLoadFilePath = getProp(ini, "offlineLoadFilePath");

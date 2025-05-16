@@ -4,7 +4,7 @@ import mock.bench.Tpcc.WorkLoad.jTPCCTData;
 import java.text.MessageFormat;
 
 public class StockLevel {
-    public static String executeStockLevel(jTPCCTData.StockLevelData stockLevel) throws Exception {
+    public static String executeStockLevel(jTPCCTData.StockLevelData stockLevel) throws Exception { // 不使用
         String last_stmt = "unknown";
 
         String stmt;

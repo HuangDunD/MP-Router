@@ -1,11 +1,8 @@
 package mock.bench.TpchYcsb;
 
-import org.apache.tools.ant.taskdefs.Sleep;
-
 import java.io.*;
 import java.net.*;
-
-import static java.lang.System.exit;
+import java.nio.charset.StandardCharsets;
 
 public class Server { // 仅本地测试使用
     public static void main(String[] args) {
@@ -19,7 +16,6 @@ public class Server { // 仅本地测试使用
                 Socket socket = serverSocket.accept();
                 System.out.println("New client connected: " + count);
                 count++;
-                // Handle the client in a new thread
                 new Thread(new ClientHandler(socket)).start();
             }
         } catch (IOException ex) {
@@ -37,53 +33,66 @@ public class Server { // 仅本地测试使用
 
         @Override
         public void run() {
-            try {
-                InputStream input = clientSocket.getInputStream();
-                BufferedReader reader = new BufferedReader(new InputStreamReader(input));
-                OutputStream output = clientSocket.getOutputStream();
-                BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(output));
-                String text;
-
-                // Read messages from the client
+            try (
+                    InputStream input = clientSocket.getInputStream();
+                    DataInputStream dis = new DataInputStream(input);
+                    OutputStream output = clientSocket.getOutputStream();
+                    BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(output))
+            ) {
                 String txn = "", header = "";
                 boolean collect_txn = true, collect_header = false;
-                while ((text = reader.readLine()) != null) {
-//                    System.out.println("Received message from client: " + text);
-                    if (text.contains("BYE")) {
-                        break;
-                    } else if (text.contains("HELLO")) {
-                        writer.write("FINISH");
-                        writer.newLine(); // Add a newline character after each message
-                        writer.flush();   // Ensure data is sent immediately
-                    }
-                    else if(text.contains("***Header_Start***")) {
-                        collect_header = true;
-                    } else if(text.contains("***Header_End***")) {
-                        collect_txn = false;
-                    } else if(text.contains("***Txn_Start***")) {
-                        collect_txn = true;
-                        collect_header = false;
-                    } else if(text.contains("***Txn_End***")) {
-                        collect_txn = false;
-                        collect_header = false;
-//                        System.out.println("Txn_Header: [" + header + "]");
-//                        System.out.println("Txn_Body: [" + txn + "]");
-                        txn = "";
-                        header = "";
-                        Thread.sleep(10); // Sleep for 1 second
-                        writer.write("FINISH");
-                        writer.newLine(); // Add a newline character after each message
-                        writer.flush();   // Ensure data is sent immediately
-                    } else if(collect_header) {
-                        header = header + text + "\n";
-                    } else if (collect_txn) {
-                        txn = txn + text + "\n";
+
+                while (true) {
+                    // 1. 读取前4个字节作为 int，表示后续文本长度（单位：字节）
+                    int totalBytes = dis.readInt();
+
+                    // 2. 读取指定字节数
+                    byte[] buffer = new byte[totalBytes];
+                    dis.readFully(buffer); // 安全读取所有字节
+
+                    // 3. 转换为字符串（假设客户端用 UTF-8 编码发送）
+                    String blockText = new String(buffer, StandardCharsets.UTF_8);
+                    System.out.println("Received block with total bytes: " + totalBytes);
+                    System.out.println("Block content:\n" + blockText);
+
+                    // 4. 使用 BufferedReader 逐行处理
+                    BufferedReader lineReader = new BufferedReader(new StringReader(blockText));
+                    String text;
+                    while ((text = lineReader.readLine()) != null) {
+//                        System.out.println("Received message from client: " + text);
+
+                        if (text.contains("BYE")) {
+                            clientSocket.close();
+                            return; // 结束连接
+                        } else if (text.contains("HELLO")) {
+                            writer.write("FINISH");
+                            writer.newLine();
+                            writer.flush();
+                        } else if (text.contains("***Header_Start***")) {
+                            collect_header = true;
+                        } else if (text.contains("***Header_End***")) {
+                            collect_txn = false;
+                        } else if (text.contains("***Txn_Start***")) {
+                            collect_txn = true;
+                            collect_header = false;
+                        } else if (text.contains("***Txn_End***")) {
+                            collect_txn = false;
+                            collect_header = false;
+                            writer.write("FINISH");
+                            writer.newLine();
+                            writer.flush();
+                            Thread.sleep(1000); // Sleep for 1 second
+                            txn = "";
+                            header = "";
+                        } else if (collect_header) {
+                            header += text + "\n";
+                        } else if (collect_txn) {
+                            txn += text + "\n";
+                        }
                     }
                 }
-            } catch (IOException ex) {
+            } catch (IOException | InterruptedException ex) {
                 System.err.println("Client handler error: " + ex.getMessage());
-            } catch (InterruptedException ex) {
-                System.err.println("Thread sleep interrupted: " + ex.getMessage());
             } finally {
                 try {
                     clientSocket.close();
@@ -94,6 +103,3 @@ public class Server { // 仅本地测试使用
         }
     }
 }
-
-
-

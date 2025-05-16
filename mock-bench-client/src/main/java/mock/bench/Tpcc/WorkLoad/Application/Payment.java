@@ -19,10 +19,11 @@ public class Payment {
         long h_date = System.currentTimeMillis();
 
         String last_stmt = "unknown";
+        header = "WareHouse[1]:" + payment.w_id; // 标记主仓库id
+        sqlHeaderList.add(header);
 
         // Update the DISTRICT.
         last_stmt = "stmtPaymentUpdateDistrict";
-
         header = "Table[1]:1\n" +
                 "Column[2]:13,14\n" +
                 "Key[2]:{0},{1}\n";
@@ -39,7 +40,6 @@ public class Payment {
 
         // Select the DISTRICT.
         last_stmt = "stmtPaymentSelectDistrict";
-
         header = "Table[1]:1\n" +
                 "Column[2]:13,14\n" +
                 "Key[2]:{0},{1}\n";
@@ -57,7 +57,6 @@ public class Payment {
 
         // Update the WAREHOUSE.
         last_stmt = "stmtPaymentUpdateWarehouse";
-
         header = "Table[1]:8\n" +
                 "Column[1]:9\n" +
                 "Key[1]:{0}\n";
@@ -71,10 +70,8 @@ public class Payment {
         sqlList.add(stmt);
 
 
-
         // Select the WAREHOUSE.
         last_stmt = "stmtPaymentSelectWarehouse";
-
         header = "Table[1]:8\n" +
                 "Column[1]:9\n" +
                 "Key[1]:{0}\n";
@@ -93,7 +90,6 @@ public class Payment {
 
         // Select the CUSTOMER.
         last_stmt = "stmtPaymentSelectCustomer";
-
         header = "Table[1]:0\n" +
                 "Column[3]:10,11,12\n" +
                 "Key[3]:{0},{1},{2}\n";
@@ -112,7 +108,6 @@ public class Payment {
 
 
         last_stmt = "stmtPaymentUpdateCustomer";
-
         header = "Table[1]:0\n" +
                 "Column[3]:10,11,12\n" +
                 "Key[3]:{0},{1},{2}\n";
@@ -128,6 +123,7 @@ public class Payment {
                 String.valueOf(payment.c_w_id), String.valueOf(payment.c_d_id), String.valueOf(payment.c_id));
         sqlList.add(stmt);
 
+
         // Insert the HISORY row.
         last_stmt = "stmtPaymentInsertHistory";
         stmt = "INSERT INTO bmsql_history ("
@@ -138,6 +134,11 @@ public class Payment {
                 String.valueOf(payment.d_id), String.valueOf(payment.w_id), "'" + String.valueOf(h_date) + "'", String.valueOf(payment.h_amount),
                 rnd.getAString_12_24()); // TODO: 随机生成 DONE
 
+        if (payment.w_id != payment.c_w_id) // 判断有没有remote
+            header = "Remote[1]:1";
+        else
+            header = "Remote[1]:0";
+        sqlHeaderList.add(header);
 
         payment.h_date = new Timestamp(h_date).toString();
 

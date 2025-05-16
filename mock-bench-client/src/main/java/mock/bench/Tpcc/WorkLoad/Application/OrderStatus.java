@@ -17,10 +17,11 @@ public class OrderStatus {
         StringBuilder sqlBuilder = new StringBuilder();
 
         String last_stmt = "unknown";
+        header = "WareHouse[1]:" + orderStatus.w_id; // 标记主仓库id
+        sqlHeaderList.add(header);
 
-        // Select the CUSTOMER ID. 100% by ID
+        // Select the CUSTOMER ID. 100% by ID 修改注意
         last_stmt = "stmtOrderStatusSelectCustomer";
-
         header = "Table[1]:0\n" +
                 "Column[3]:10,11,12\n" +
                 "Key[3]:{0},{1},{2}\n";
@@ -37,7 +38,6 @@ public class OrderStatus {
 
         // Select the last ORDER for this customer.
         last_stmt = "stmtOrderStatusSelectLastOrder";
-
         header = "Table[1]:5\n" +
                 "Column[3]:22,23,24\n" +
                 "Key[3]:{0},{1},{2}\n";
@@ -60,9 +60,7 @@ public class OrderStatus {
 
         // Select the ORDER LINE for this order.
         last_stmt = "stmtOrderStatusSelectOrderLine";
-
         int ol_d_id = rnd.nextInt(1, 2999);
-
         header = "Table[1]:6\n" +
                 "Column[3]:25,26,27\n" +
                 "Key[3]:{0},{1},{2}\n";
@@ -77,7 +75,8 @@ public class OrderStatus {
         stmt = MessageFormat.format(stmt, String.valueOf(orderStatus.w_id), String.valueOf(orderStatus.d_id), String.valueOf(ol_d_id)); // o_id 随机生成
         sqlList.add(stmt);
 
-
+        header = "Remote[1]:0";
+        sqlHeaderList.add(header);
 
         sqlBuilder.append("***Header_Start***\n");
         for (String headerSql : sqlHeaderList) {

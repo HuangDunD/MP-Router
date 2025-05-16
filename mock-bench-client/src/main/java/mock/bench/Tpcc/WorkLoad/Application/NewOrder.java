@@ -2,6 +2,7 @@ package mock.bench.Tpcc.WorkLoad.Application;
 
 import mock.bench.Tpcc.Tool.jTPCCRandom;
 import mock.bench.Tpcc.WorkLoad.jTPCCTData;
+import org.apache.tools.ant.taskdefs.email.Header;
 
 import java.sql.Timestamp;
 import java.text.MessageFormat;
@@ -19,7 +20,7 @@ public class NewOrder {
         String stmt, header;
         StringBuilder sqlBuilder = new StringBuilder();
 
-        int o_id = 0; // TODO：需要全局维护
+        int o_id = 0; // TODO：需要全局维护 Done
         int o_all_local = 1; // 是否全在一家
         long o_entry_d;
         int ol_cnt;
@@ -56,10 +57,11 @@ public class NewOrder {
         newOrder.o_ol_cnt = ol_cnt;
 
         String last_stmt = "unknown";
+        header = "WareHouse[1]:" + newOrder.w_id; // 标记主仓库id
+        sqlHeaderList.add(header);
 
         // Retrieve the required data from DISTRICT
         last_stmt = "stmtNewOrderSelectDist";
-
         header = "Table[1]:1\n" +
                 "Column[2]:13,14\n" +
                 "Key[2]:{0},{1}\n";
@@ -77,7 +79,6 @@ public class NewOrder {
 
         // Retrieve the required data from CUSTOMER and WAREHOUSE
         last_stmt = "stmtNewOrderSelectWhseCust";
-
         header = "Table[2]:0,8\n" +
                 "Column[4]:9,10,11,12\n" +
                 "Key[4]:{0},{1},{2},{3}\n";
@@ -95,7 +96,6 @@ public class NewOrder {
 
         // Update the DISTRICT bumping the D_NEXT_O_ID 全局维护的d_next_o_id
         last_stmt = "stmtNewOrderUpdateDist";
-
         header = "Table[1]:1\n" +
                 "Column[2]:13,14\n" +
                 "Key[2]:{0},{1}\n";
@@ -112,7 +112,6 @@ public class NewOrder {
 
         // Insert the ORDER row
         last_stmt = "stmtNewOrderInsertOrder";
-
         o_id = next_o_id[newOrder.w_id][newOrder.d_id];
         newOrder.o_id = o_id;
         next_o_id[newOrder.w_id][newOrder.d_id] = o_id + 1;
@@ -129,20 +128,17 @@ public class NewOrder {
 
         // Insert the NEW_ORDER row
         last_stmt = "stmtNewOrderInsertNewOrder";
-
         stmt = "INSERT INTO bmsql_new_order ("
                 + "    no_o_id, no_d_id, no_w_id) "
                 + "VALUES ({0}, {1}, {2})";
         stmt = MessageFormat.format(stmt, String.valueOf(o_id), String.valueOf(newOrder.d_id), String.valueOf(newOrder.w_id));
         sqlList.add(stmt);
 
+        boolean remote_warehouse = false;
         for (int i = 0; i < ol_cnt; i++) {
             int seq = ol_seq[i];
 
-
-
             last_stmt = "stmtNewOrderSelectItem";
-
             header = "Table[1]:3\n" +
                     "Column[1]:15\n" +
                     "Key[1]:{0}\n";
@@ -156,10 +152,8 @@ public class NewOrder {
             sqlList.add(stmt);
 
 
-
             // Select STOCK for update.
             last_stmt = "stmtNewOrderSelectStock";
-
             header = "Table[1]:7\n" +
                     "Column[2]:16,17\n" +
                     "Key[2]:{0},{1}\n";
@@ -177,9 +171,7 @@ public class NewOrder {
             sqlList.add(stmt);
 
 
-
             last_stmt = "stmtNewOrderUpdateStock";
-
             header = "Table[1]:7\n" +
                     "Column[2]:16,17\n" +
                     "Key[2]:{0},{1}\n";
@@ -193,18 +185,18 @@ public class NewOrder {
                     + "    WHERE s_w_id = {3} AND s_i_id = {4}";
 
             int s_remote_cnt = 0;
-            if (newOrder.ol_supply_w_id[seq] != newOrder.w_id) // 仓库是否相同
+            if (newOrder.ol_supply_w_id[seq] != newOrder.w_id) { // 仓库是否相同
                 s_remote_cnt = 1;
+                remote_warehouse = true;
+            }
 
             stmt = MessageFormat.format(stmt, String.valueOf(newOrder.ol_quantity[seq] + 10), String.valueOf(newOrder.ol_quantity[seq]),
                     String.valueOf(s_remote_cnt), String.valueOf(newOrder.ol_supply_w_id[seq]), String.valueOf(newOrder.ol_i_id[seq]));
             sqlList.add(stmt);
 
 
-
             // Insert the ORDER_LINE row.
             last_stmt = "stmtNewOrderInsertOrderLine";
-
             stmt = "INSERT INTO bmsql_order_line ("
                     + "    ol_o_id, ol_d_id, ol_w_id, ol_number, "
                     + "    ol_i_id, ol_supply_w_id, ol_quantity, "
@@ -214,9 +206,15 @@ public class NewOrder {
                     String.valueOf(seq + 1), String.valueOf(newOrder.ol_i_id[seq]), String.valueOf(newOrder.ol_supply_w_id[seq]),
                     String.valueOf(newOrder.ol_quantity[seq]), String.valueOf(newOrder.ol_amount[seq]), rnd.getAString_24()); // 随机设置一个dist_info字符串
         }
+        if (remote_warehouse)
+            header = "Remote[1]:1";
+        else
+            header = "Remote[1]:0";
+        sqlHeaderList.add(header);
 
         newOrder.execution_status = new String("Order placed"); // 订单完成
 
+        // 生成SQL语句
         sqlBuilder.append("***Header_Start***\n");
         for (String headerSql : sqlHeaderList) {
             sqlBuilder.append(headerSql).append("\n");
