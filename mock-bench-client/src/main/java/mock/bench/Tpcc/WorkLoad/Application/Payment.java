@@ -21,6 +21,12 @@ public class Payment {
         String last_stmt = "unknown";
         header = "WareHouse[1]:" + payment.w_id; // 标记主仓库id
         sqlHeaderList.add(header);
+        if (payment.w_id != payment.c_w_id) // 判断有没有remote
+            header = "Remote[1]:1";
+        else
+            header = "Remote[1]:0";
+        sqlHeaderList.add(header + "\n");
+
 
         // Update the DISTRICT.
         last_stmt = "stmtPaymentUpdateDistrict";
@@ -133,12 +139,6 @@ public class Payment {
         stmt = MessageFormat.format(stmt, String.valueOf(payment.c_id), String.valueOf(payment.c_d_id), String.valueOf(payment.c_w_id),
                 String.valueOf(payment.d_id), String.valueOf(payment.w_id), "'" + String.valueOf(h_date) + "'", String.valueOf(payment.h_amount),
                 rnd.getAString_12_24()); // TODO: 随机生成 DONE
-
-        if (payment.w_id != payment.c_w_id) // 判断有没有remote
-            header = "Remote[1]:1";
-        else
-            header = "Remote[1]:0";
-        sqlHeaderList.add(header);
 
         payment.h_date = new Timestamp(h_date).toString();
 

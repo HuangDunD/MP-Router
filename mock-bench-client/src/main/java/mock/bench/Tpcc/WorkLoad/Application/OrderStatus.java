@@ -19,6 +19,8 @@ public class OrderStatus {
         String last_stmt = "unknown";
         header = "WareHouse[1]:" + orderStatus.w_id; // 标记主仓库id
         sqlHeaderList.add(header);
+        header = "Remote[1]:0";
+        sqlHeaderList.add(header + "\n");
 
         // Select the CUSTOMER ID. 100% by ID 修改注意
         last_stmt = "stmtOrderStatusSelectCustomer";
@@ -74,9 +76,6 @@ public class OrderStatus {
                 + "    ORDER BY ol_w_id, ol_d_id, ol_o_id, ol_number";
         stmt = MessageFormat.format(stmt, String.valueOf(orderStatus.w_id), String.valueOf(orderStatus.d_id), String.valueOf(ol_d_id)); // o_id 随机生成
         sqlList.add(stmt);
-
-        header = "Remote[1]:0";
-        sqlHeaderList.add(header);
 
         sqlBuilder.append("***Header_Start***\n");
         for (String headerSql : sqlHeaderList) {

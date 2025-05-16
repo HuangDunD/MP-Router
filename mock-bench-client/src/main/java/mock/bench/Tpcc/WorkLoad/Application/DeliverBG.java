@@ -26,6 +26,8 @@ public class DeliverBG {
         String last_stmt = "unknown";
         header = "WareHouse[1]:" + deliveryBG.w_id; // 标记主仓库id
         sqlHeaderList.add(header);
+        header = "Remote[1]:0";
+        sqlHeaderList.add(header + "\n");
 
         for (d_id = 1; d_id <= 10; d_id++) {
             /*
@@ -148,9 +150,6 @@ public class DeliverBG {
             // Recored the delivered O_ID in the DELIVERY_BG
             deliveryBG.delivered_o_id[d_id - 1] = o_id;
         }
-
-        header = "Remote[1]:0";
-        sqlHeaderList.add(header);
 
         sqlBuilder.append("***Header_Start***\n");
         for (String headerSql : sqlHeaderList) {

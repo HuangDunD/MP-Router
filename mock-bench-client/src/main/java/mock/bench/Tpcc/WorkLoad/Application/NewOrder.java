@@ -60,6 +60,22 @@ public class NewOrder {
         header = "WareHouse[1]:" + newOrder.w_id; // 标记主仓库id
         sqlHeaderList.add(header);
 
+        boolean remote_warehouse = false;
+        for (int i = 0; i < ol_cnt; i++) {
+            int seq = ol_seq[i];
+            if (newOrder.ol_supply_w_id[seq] != newOrder.w_id) { // 仓库是否相同
+                remote_warehouse = true;
+                break;
+            }
+        }
+        if (remote_warehouse)
+            header = "Remote[1]:1";
+        else
+            header = "Remote[1]:0";
+        sqlHeaderList.add(header + "\n");
+
+
+
         // Retrieve the required data from DISTRICT
         last_stmt = "stmtNewOrderSelectDist";
         header = "Table[1]:1\n" +
@@ -134,7 +150,7 @@ public class NewOrder {
         stmt = MessageFormat.format(stmt, String.valueOf(o_id), String.valueOf(newOrder.d_id), String.valueOf(newOrder.w_id));
         sqlList.add(stmt);
 
-        boolean remote_warehouse = false;
+
         for (int i = 0; i < ol_cnt; i++) {
             int seq = ol_seq[i];
 
@@ -206,11 +222,6 @@ public class NewOrder {
                     String.valueOf(seq + 1), String.valueOf(newOrder.ol_i_id[seq]), String.valueOf(newOrder.ol_supply_w_id[seq]),
                     String.valueOf(newOrder.ol_quantity[seq]), String.valueOf(newOrder.ol_amount[seq]), rnd.getAString_24()); // 随机设置一个dist_info字符串
         }
-        if (remote_warehouse)
-            header = "Remote[1]:1";
-        else
-            header = "Remote[1]:0";
-        sqlHeaderList.add(header);
 
         newOrder.execution_status = new String("Order placed"); // 订单完成
 
