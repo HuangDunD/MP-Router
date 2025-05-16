@@ -17,6 +17,15 @@
 // #include "log/Logger.h"     // Include the new Logger header
 #include <pqxx/pqxx> // PostgreSQL C++ library
 
+// --- Latency Statistics Variables ---
+std::mutex latency_mutex;
+std::vector<double> latencies_overall_us;
+std::vector<double> latencies_generate_ids_us;
+std::vector<double> latencies_build_graph_us;
+std::vector<double> latencies_tcp_us;
+// --- End Latency Statistics Variables ---
+
+
 int PORT;
 int THREAD_POOL_SIZE;
 int SOCKET_BUFFER_SIZE;
@@ -36,6 +45,93 @@ uint64_t seed = 0xdeadbeef;
 // Instantiate RegionProcessor within the scope where needed
 RegionProcessor regionProcessor(logger); // Pass the logger
 BmSql::Meta bmsqlMetadata; // Create an instance
+
+void print_latency_stats(long long send_count,
+                         const std::vector<std::pair<std::string, std::vector<double> &> > &metrics,
+                         Logger &lg_ref,
+                         bool clear_after_print = false) {
+    std::lock_guard<std::mutex> lock(latency_mutex);
+
+    // 构建整张表的输出流
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2);
+    oss << "==== Latency Report @ " << send_count << " Txns ====" << "\n";
+
+    // 表头
+    oss << std::left << std::setw(20) << "Metric"
+            << std::setw(10) << "Count"
+            << std::setw(10) << "Min"
+            << std::setw(10) << "Mean"
+            << std::setw(10) << "Max"
+            << std::setw(10) << "StdDev"
+            << std::setw(10) << "Median"
+            << std::setw(10) << "P90"
+            << std::setw(10) << "P95"
+            << std::setw(10) << "P99"
+            << "\n";
+
+    // 分隔线
+    oss << std::string(100, '-') << "\n";
+
+    // 逐行计算并添加数据
+    for (auto &m: metrics) {
+        const auto &name = m.first;
+        auto &latencies = m.second;
+        size_t count = latencies.size();
+
+        double min_val = 0, mean = 0, max_val = 0, stddev = 0, median = 0, p90 = 0, p95 = 0, p99 = 0;
+        if (!latencies.empty()) {
+            std::vector<double> sorted = latencies;
+            std::sort(sorted.begin(), sorted.end());
+            count = sorted.size();
+            double sum = std::accumulate(sorted.begin(), sorted.end(), 0.0);
+            mean = sum / count;
+            min_val = sorted.front();
+            max_val = sorted.back();
+            double sq_sum = std::accumulate(sorted.begin(), sorted.end(), 0.0,
+                                            [mean](double acc, double v) { return acc + (v - mean) * (v - mean); });
+            stddev = std::sqrt(sq_sum / count);
+            median = (count % 2 == 0)
+                         ? (sorted[count / 2 - 1] + sorted[count / 2]) / 2
+                         : sorted[count / 2];
+            auto percentile = [&](double p) {
+                double idx = p * (count - 1);
+                size_t lo = static_cast<size_t>(std::floor(idx));
+                size_t hi = static_cast<size_t>(std::ceil(idx));
+                return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+            };
+            p90 = percentile(0.90);
+            p95 = percentile(0.95);
+            p99 = percentile(0.99);
+        }
+
+        // 输出一行
+        oss << std::left << std::setw(20) << name
+                << std::setw(10) << count
+                << std::setw(10) << min_val
+                << std::setw(10) << mean
+                << std::setw(10) << max_val
+                << std::setw(10) << stddev
+                << std::setw(10) << median
+                << std::setw(10) << p90
+                << std::setw(10) << p95
+                << std::setw(10) << p99
+                << "\n";
+
+        if (clear_after_print) {
+            latencies.clear();
+        }
+    }
+
+    // 末尾分隔
+    oss << std::string(100, '=') << "\n";
+
+    // 输出到日志与控制台
+    lg_ref.info(oss.str());
+    std::cout << oss.str();
+}
+
+// --- End Latency Statistics Helper Function ---
 
 struct RouterEndpoint {
     std::string ip;
@@ -65,11 +161,10 @@ static bool send_sql_to_router(const std::string &sqls,
 }
 
 // Local helper to send data and report errors
-const bool safe_send(std::string_view msg, int socket_fd, Logger &log) {
+const bool safe_send(std::string_view msg, int socket_fd) {
     ssize_t n = send(socket_fd, msg.data(), msg.size(), MSG_NOSIGNAL); // 或无 flag
     if (n < 0) {
         if (errno == EPIPE) {
-            log.error("Peer closed connection (EPIPE). Closing socket " + std::to_string(socket_fd));
             std::cerr << "socket is closed , Closing socket : " << socket_fd << std::endl;
             close(socket_fd);
         } else {
@@ -80,8 +175,10 @@ const bool safe_send(std::string_view msg, int socket_fd, Logger &log) {
     return true;
 };
 
-void process_client_data(std::string_view data, int socket_fd, Logger &log) {
+void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) {
+    // Renamed log to log_ref to avoid conflict
     using namespace std::literals;
+    auto pcd_start_time = std::chrono::high_resolution_clock::now(); // Timer for overall function
 
     std::vector<uint64_t> region_ids;
     std::string row_sql;
@@ -89,64 +186,123 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log) {
     uint64_t router_node = UINT64_MAX;
 
     // Parse the socket data to SQLs and region IDs
+    std::chrono::time_point<std::chrono::high_resolution_clock> gen_ids_start_time, gen_ids_end_time;
+    double gen_ids_duration_us = 0;
+
     try {
+        gen_ids_start_time = std::chrono::high_resolution_clock::now();
         ok = regionProcessor.generateRegionIDs(std::string(data), region_ids, bmsqlMetadata, row_sql);
+        gen_ids_end_time = std::chrono::high_resolution_clock::now();
+        gen_ids_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            gen_ids_end_time - gen_ids_start_time).count();
     } catch (const std::exception &e) {
-        log.error(
+        gen_ids_end_time = std::chrono::high_resolution_clock::now(); // Also record time on exception
+        gen_ids_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            gen_ids_end_time - gen_ids_start_time).count();
+        log_ref.error(
             "Generate region IDs failed: " + std::string(e.what()) + " send ERR to client " + " Row SQL: " + row_sql);
     }
+    // Store generateRegionIDs latency
+    {
+        std::lock_guard<std::mutex> lock(latency_mutex);
+        latencies_generate_ids_us.push_back(gen_ids_duration_us);
+    }
+
     if (!ok) {
         // Hard failure
-        safe_send("Generate region IDs failed\n", socket_fd, log);
+        safe_send("Generate region IDs failed\n", socket_fd);
+        // Overall time measurement before early return
+        auto pcd_end_time = std::chrono::high_resolution_clock::now();
+        double pcd_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(pcd_end_time - pcd_start_time).
+                count(); {
+            std::lock_guard<std::mutex> lock(latency_mutex);
+            latencies_overall_us.push_back(pcd_duration_us);
+        }
         return;
     }
 
     // ---- Successful generation ----
+    std::chrono::time_point<std::chrono::high_resolution_clock> build_graph_start_time, build_graph_end_time;
+    double build_graph_duration_us = 0;
+    bool build_graph_called = false;
+
     if (SYSTEM_MODE == 0) {
         // random based algorithm
-        // Randomly select a router node
-        std::random_device rd; // 获取随机种子
-        std::mt19937 gen(rd()); // 使用Mersenne Twister引擎
-        std::uniform_int_distribution<> distrib(0, ComputeNodeCount - 1); // 生成随机数
-        router_node = distrib(gen); // 生成随机数
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> distrib(0, ComputeNodeCount - 1);
+        router_node = distrib(gen);
     } else if (SYSTEM_MODE == 1) {
         // affinity based algorithm
         if (!region_ids.empty()) {
-            // log.info(
-            //     "Socket " + std::to_string(socket_fd) + ": generated " + std::to_string(region_ids.size()) +
-            //     " region IDs");
+            build_graph_start_time = std::chrono::high_resolution_clock::now();
             router_node = metis.build_internal_graph(region_ids);
+            build_graph_end_time = std::chrono::high_resolution_clock::now();
+            build_graph_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                build_graph_end_time - build_graph_start_time).count();
+            build_graph_called = true;
         }
     } else if (SYSTEM_MODE == 2) {
         // single node
         router_node = 0;
     } else {
-        log.error("Invalid SYSTEM_MODE: " + std::to_string(SYSTEM_MODE));
-        safe_send("Invalid SYSTEM_MODE\n", socket_fd, log);
+        log_ref.error("Invalid SYSTEM_MODE: " + std::to_string(SYSTEM_MODE));
+        safe_send("Invalid SYSTEM_MODE\n", socket_fd);
+        // Overall time measurement before early return
+        auto pcd_end_time = std::chrono::high_resolution_clock::now();
+        double pcd_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(pcd_end_time - pcd_start_time).
+                count(); {
+            std::lock_guard<std::mutex> lock(latency_mutex);
+            latencies_overall_us.push_back(pcd_duration_us);
+        }
         return;
     }
 
-    if (!row_sql.empty() && router_node < 100) {
-        // Send SQL to the router node
-        // log.info("Sending SQL to router node " + std::to_string(router_node) + ": " + con);
-        send_sql_to_router(row_sql, router_node % ComputeNodeCount, log);
+    // Store metis.build_internal_graph latency if called
+    if (build_graph_called) {
+        std::lock_guard<std::mutex> lock(latency_mutex);
+        latencies_build_graph_us.push_back(build_graph_duration_us);
+    }
+
+    if (!row_sql.empty() && router_node < 5) {
+        send_sql_to_router(row_sql, router_node % ComputeNodeCount, log_ref);
     } else {
         if (row_sql.empty()) {
-            log.error(" No SQL to send , router node is " + std::to_string(router_node));
-            safe_send("No SQL to send\n", socket_fd, log);
+            log_ref.error(" No SQL to send , router node is " + std::to_string(router_node));
+            safe_send("No SQL to send\n", socket_fd);
         } else {
-            log.error("Invalid router node, router node is " + std::to_string(router_node));
-            safe_send("Invalid router node, router node is " + std::to_string(router_node) + "\n", socket_fd, log);
+            log_ref.error("Invalid router node, router node is " + std::to_string(router_node));
+            safe_send("Invalid router node, router node is " + std::to_string(router_node) + "\n", socket_fd);
         }
-
+        // Overall time measurement before early return
+        auto pcd_end_time = std::chrono::high_resolution_clock::now();
+        double pcd_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(pcd_end_time - pcd_start_time).
+                count(); {
+            std::lock_guard<std::mutex> lock(latency_mutex);
+            latencies_overall_us.push_back(pcd_duration_us);
+        }
         return;
     }
 
     // ---- Final client acknowledgment ----
-    if (safe_send("OK\n", socket_fd, log)) {
-        if (++send_times % 1000 == 0) {
-            std::cout << "send OK times: " << send_times.load() << std::endl;
+    if (safe_send("OK\n", socket_fd)) {
+        long long current_send_times = ++send_times; // Increment and get value
+        if (current_send_times % 100000 == 0) {
+            print_latency_stats(current_send_times, {
+                                    {"Overall Txn", latencies_overall_us},
+                                    {"RegionGenerateIDs", latencies_generate_ids_us},
+                                    {"MetisBuildGraph", latencies_build_graph_us},
+                                    {"TCP Latency", latencies_tcp_us}
+                                }, log_ref, true);
         }
+    }
+
+    // Store overall latency at the very end of successful processing
+    auto pcd_end_time = std::chrono::high_resolution_clock::now();
+    double pcd_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(pcd_end_time - pcd_start_time).
+            count(); {
+        std::lock_guard<std::mutex> lock(latency_mutex);
+        latencies_overall_us.push_back(pcd_duration_us);
     }
 }
 
@@ -226,7 +382,6 @@ int main(int argc, char *argv[]) {
     try {
         std::string metaFilePath = "../../config/ycsb_meta.json";
         std::cout << "Loading YCSB metadata from: " << metaFilePath << std::endl;
-        // Load the metadata
         auto json_config = JsonConfig::load_file(metaFilePath);
         auto conf = json_config.get("ycsb"); // Or appropriate config section
         REGION_SIZE = conf.get("key_cnt_per_partition").get_int64();
@@ -247,12 +402,10 @@ int main(int argc, char *argv[]) {
     try {
         std::string metaFilePath = "../../config/tpcc_meta.json";
         std::cout << "Loading TPCC metadata from: " << metaFilePath << std::endl;
-        // Load the metadata
         if (!bmsqlMetadata.loadFromJsonFile(metaFilePath)) {
             std::cerr << "Fatal Error: Failed to load TPCC metadata. Exiting." << std::endl;
             return EXIT_FAILURE;
         }
-
         std::cout << "Metadata loaded successfully." << std::endl;
         std::cout << "-----------------------------" << std::endl;
     } catch (const std::exception &e) {
@@ -260,12 +413,12 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 #else
-    logger.log("WORKLOAD_MODE is YCSB (0) or undefined. Skipping TPCH Metadata initialization.");
+    logger.log("WORKLOAD_MODE is not YCSB (0) or TPCC (1). Skipping specific Metadata initialization.");
 #endif
 
     // --- Thread Pool Setup ---
     logger.info("Initializing thread pool with " + std::to_string(THREAD_POOL_SIZE) + " threads.");
-    ThreadPool pool(THREAD_POOL_SIZE, DBConnection, logger);
+    ThreadPool pool(THREAD_POOL_SIZE, DBConnection, logger); // Pass the global logger
     metis.set_thread_pool(&pool);
 
     // --- Server Socket Setup ---
@@ -282,7 +435,6 @@ int main(int argc, char *argv[]) {
     int opt = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
         logger.error(" Failed to set SO_REUSEADDR option. Error: " + std::string(strerror(errno)));
-        // Continue if non-critical, but log the error
     }
 
     address.sin_family = AF_INET;
@@ -297,13 +449,11 @@ int main(int argc, char *argv[]) {
     logger.info("Server socket bound to port " + std::to_string(PORT) + ".");
 
     if (listen(server_fd, 10) < 0) {
-        // Increased backlog slightly
         logger.error("Listen failed. Error: " + std::string(strerror(errno)));
         close(server_fd);
         return -1;
     }
     logger.info("Server is running and listening on port " + std::to_string(PORT) + "...");
-
 
     std::cout << R"(
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~WELCOME TO THE~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -314,19 +464,18 @@ int main(int argc, char *argv[]) {
  |_|  |_| |_|             |_| \_\  \___/   \__,_|  \__|  \___| |_|
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 )" << std::endl;
+
     // --- Accept Client Connections Loop ---
     while (true) {
         int new_socket;
-        struct sockaddr_in client_address{}; // Use a separate struct for client addr
-        socklen_t client_addrlen = sizeof(client_address); // Use socklen_t
+        struct sockaddr_in client_address{};
+        socklen_t client_addrlen = sizeof(client_address);
 
         if ((new_socket = accept(server_fd, (struct sockaddr *) &client_address, &client_addrlen)) < 0) {
             logger.error("Failed to accept connection. Error: " + std::string(strerror(errno)));
-            // Consider adding a small sleep or other logic if accept fails repeatedly
-            continue; // Continue to the next iteration to try accepting again
+            continue;
         }
 
-        // Get client address info safely
         char client_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_address.sin_addr, client_ip, INET_ADDRSTRLEN);
         int client_port = ntohs(client_address.sin_port);
@@ -345,6 +494,8 @@ int main(int argc, char *argv[]) {
             char tmp[SOCKET_BUFFER_SIZE];
 
             while (true) {
+                std::chrono::time_point<std::chrono::high_resolution_clock> tcp_start_time, tcp_end_time;
+                tcp_start_time = std::chrono::high_resolution_clock::now();
                 ssize_t valread = read(new_socket, tmp, SOCKET_BUFFER_SIZE);
                 if (valread < 0) {
                     logger.error("Read error on socket " + std::to_string(new_socket) + ": " + strerror(errno));
@@ -359,7 +510,6 @@ int main(int argc, char *argv[]) {
 
                 // 2) 循环解析：只要有完整包头（4 字节）就尝试看有没有整条消息
                 while (recv_buffer.size() >= sizeof(uint32_t)) {
-                    // 2.1) 读取网络序的 payload 长度
                     uint32_t net_payload_size;
                     std::memcpy(&net_payload_size, recv_buffer.data(), sizeof(net_payload_size));
                     uint32_t payload_size = ntohl(net_payload_size);
@@ -374,8 +524,15 @@ int main(int argc, char *argv[]) {
 
                     // 2.4) 处理特殊命令：以 'H' 或 'B' 开头的直接回复 FINISH
                     if (!msg.empty() && (msg[0] == 'H' || msg[0] == 'B')) {
-                        safe_send("FINISH\n", new_socket, logger);
+                        safe_send("FINISH\n", new_socket);
                     } else {
+                        tcp_end_time= std::chrono::high_resolution_clock::now();
+                        double tcp_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            tcp_end_time - tcp_start_time).count();
+                        {
+                            std::lock_guard<std::mutex> lock(latency_mutex);
+                            latencies_tcp_us.push_back(tcp_duration_us);
+                        }
                         // 将 msg 拷贝给线程池处理
                         pool.enqueue(process_client_data, msg, new_socket, std::ref(logger));
                     }
@@ -386,21 +543,18 @@ int main(int argc, char *argv[]) {
                         recv_buffer.begin() + sizeof(net_payload_size) + payload_size
                     );
                 }
-            }
+            } //end while(true)
 
             close(new_socket);
-            logger.info("Closed socket " + std::to_string(new_socket) + " for client " + std::string(client_ip) + ":" +
+            logger.info("Closed socket " + std::to_string(new_socket) + " for client " + client_ip + ":" +
                         std::to_string(client_port));
         });
 
-        client_handler_thread.detach(); // Detach the thread to run independently
-    } // End of accept loop
+        client_handler_thread.detach();
+    }
 
-    // --- Server Shutdown (Code may not be reached in simple loop) ---
     logger.info("Server shutting down...");
-    close(server_fd); // Close the listening server socket
-
-
+    close(server_fd);
     return 0;
 }
 
