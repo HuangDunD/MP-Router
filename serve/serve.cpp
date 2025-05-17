@@ -534,7 +534,7 @@ int main(int argc, char *argv[]) {
                     } else {
                         auto tcp_start_time = std::chrono::high_resolution_clock::now();
 
-                        pool.enqueue([msg, new_socket, &logger, tcp_start_time]() mutable {
+                        pool.enqueue([msg, new_socket, tcp_start_time]() mutable {
                             auto tcp_end_time = std::chrono::high_resolution_clock::now();
                             double tcp_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                 tcp_end_time - tcp_start_time).count(); {

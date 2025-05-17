@@ -5,11 +5,23 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "type": "java",
+            "name": "(java)DBWorkload",
+            "request": "launch",
+            "mainClass": "com.oltpbenchmark.DBWorkload",
+            "args": [
+                "my.properties"
+            ],
+            "projectName": "benchbase"
+        },
+        {
             "name": "(gdb)serve",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/serve/serve",
-            "args": ["random"],
+            "args": [
+                "random"
+            ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/build/serve/",
             "environment": [],
