@@ -16,6 +16,7 @@
 #include <charconv>   // C++17: std::from_chars
 #include <cctype>     // C++17: ::isspace
 
+#include "common.h"
 
 enum class SQLType {
     SELECT,
@@ -209,7 +210,7 @@ inline std::vector<int> parseNumbers_internal(const std::string &s) {
  * @param row_txn
  * @return std::vector<SQLInfo> 包含所有解析出的 SQLInfo 对象的向量。
  */
-inline static std::vector<SQLInfo> parseTPCHSQL(std::string_view sql, std::string &row_txn) {
+inline static std::vector<SQLInfo> parseTPCHSQL(std::string_view sql, std::string &row_txn, partition_id_t* partition_id = nullptr) {
     std::vector<SQLInfo> results;
     results.reserve(64);
 
@@ -280,6 +281,10 @@ inline static std::vector<SQLInfo> parseTPCHSQL(std::string_view sql, std::strin
                     if (seen) nums_buf.push_back(v);
                 }
 
+                if(type_sv == "WareHouse" && partition_id != nullptr) {
+                    assert(nums_buf.size() == 1);
+                    *partition_id = nums_buf[0];
+                }
                 if (type_sv == "Table") {
                     current = SQLInfo();
                     current.tableIDs.reserve(nums_buf.size());

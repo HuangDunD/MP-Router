@@ -22,6 +22,7 @@ std::mutex latency_mutex;
 std::vector<double> latencies_overall_us;
 std::vector<double> latencies_generate_ids_us;
 std::vector<double> latencies_build_graph_us;
+std::vector<double> latencies_exec_sql_us;
 std::vector<double> latencies_tcp_us;
 // --- End Latency Statistics Variables ---
 
@@ -265,7 +266,14 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) 
     }
 
     if (!row_sql.empty() && router_node < 5) {
-        // send_sql_to_router(row_sql, router_node % ComputeNodeCount, log_ref);
+        auto sql_start_time = std::chrono::high_resolution_clock::now();
+        // Send SQL to the router node
+        send_sql_to_router(row_sql, router_node % ComputeNodeCount, log_ref);
+        auto sql_end_time = std::chrono::high_resolution_clock::now();
+        double sql_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            sql_end_time - sql_start_time).count();
+        std::lock_guard<std::mutex> lock(latency_mutex);
+        latencies_exec_sql_us.push_back(sql_duration_us);
     } else {
         if (row_sql.empty()) {
             log_ref.error(" No SQL to send , router node is " + std::to_string(router_node));
@@ -286,14 +294,8 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) 
 
     // ---- Final client acknowledgment ----
     if (safe_send("OK\n", socket_fd)) {
-        long long current_send_times = ++send_times; // Increment and get value
-        if (current_send_times % 100000 == 0) {
-            print_latency_stats(current_send_times, {
-                                    {"Overall Txn", latencies_overall_us},
-                                    {"RegionGenerateIDs", latencies_generate_ids_us},
-                                    {"MetisBuildGraph", latencies_build_graph_us},
-                                    {"TCP Latency", latencies_tcp_us}
-                                }, log_ref, true);
+        if (++send_times % 1000 == 0) {
+            std::cout << "send OK times: " << send_times.load() << std::endl;
         }
     }
 
@@ -307,8 +309,26 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) 
 }
 
 
+// --- Signal Handler Function ---
+void signal_handler(int signum) {
+    std::cout << "\nCaught signal " << signum << " (SIGINT)" << std::endl;
+    std::cout << "Printing final statistics before exit..." << std::endl;
+
+    print_latency_stats(send_times.load(), {
+        {"Overall Txn", latencies_overall_us},
+        {"RegionGenerateIDs", latencies_generate_ids_us},
+        {"MetisBuildGraph", latencies_build_graph_us},
+        {"SQL Execution", latencies_exec_sql_us},
+        {"TCP Latency", latencies_tcp_us}
+    }, logger, false);
+
+    exit(signum);
+}
+
 // --- Main Function ---
 int main(int argc, char *argv[]) {
+    // Register signal handler for SIGINT (Ctrl+C)
+    signal(SIGINT, signal_handler);
     signal(SIGPIPE, SIG_IGN);
 
     if (argc != 2) {
@@ -557,6 +577,15 @@ int main(int argc, char *argv[]) {
 
         client_handler_thread.detach();
     }
+
+    // Print final statistics if normal exit
+    print_latency_stats(send_times.load(), {
+        {"Overall Txn", latencies_overall_us},
+        {"RegionGenerateIDs", latencies_generate_ids_us},
+        {"MetisBuildGraph", latencies_build_graph_us},
+        {"SQL Execution", latencies_exec_sql_us},
+        {"TCP Latency", latencies_tcp_us}
+    }, logger, false);
 
     logger.info("Server shutting down...");
     close(server_fd);

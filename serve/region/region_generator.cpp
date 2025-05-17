@@ -117,7 +117,8 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                                   std::vector<uint64_t> &out_region_ids, std::string &raw_txn) {
     try {
         // 1. Call the BMSQL parser
-        std::vector<SQLInfo> sql_infos = parseTPCHSQL(data, raw_txn);
+        partition_id_t wid = -1; 
+        std::vector<SQLInfo> sql_infos = parseTPCHSQL(data, raw_txn, &wid);
 
         // logger_.info("[region] mode=TPCH blocks=" + std::to_string(sql_infos.size()));
 
