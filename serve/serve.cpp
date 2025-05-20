@@ -186,13 +186,15 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) 
     bool ok = false;
     uint64_t router_node = UINT64_MAX;
 
+    partition_id_t perfect_par_id = -1;
+
     // Parse the socket data to SQLs and region IDs
     std::chrono::time_point<std::chrono::high_resolution_clock> gen_ids_start_time, gen_ids_end_time;
     double gen_ids_duration_us = 0;
 
     try {
         gen_ids_start_time = std::chrono::high_resolution_clock::now();
-        ok = regionProcessor.generateRegionIDs(std::string(data), region_ids, bmsqlMetadata, row_sql);
+        ok = regionProcessor.generateRegionIDs(std::string(data), region_ids, bmsqlMetadata, row_sql, &perfect_par_id);
         gen_ids_end_time = std::chrono::high_resolution_clock::now();
         gen_ids_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(
             gen_ids_end_time - gen_ids_start_time).count();
@@ -246,7 +248,13 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) 
     } else if (SYSTEM_MODE == 2) {
         // single node
         router_node = 0;
-    } else {
+    } else if (SYSTEM_MODE == 3) {
+        // perfect partition
+        assert(perfect_par_id <= TPCC_WAREHOUSE_NUM);
+        int w_per_node = TPCC_WAREHOUSE_NUM / ComputeNodeCount;
+        router_node = (perfect_par_id-1) / w_per_node;
+    }
+    else {
         log_ref.error("Invalid SYSTEM_MODE: " + std::to_string(SYSTEM_MODE));
         safe_send("Invalid SYSTEM_MODE\n", socket_fd);
         // Overall time measurement before early return
@@ -331,8 +339,8 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGPIPE, SIG_IGN);
 
-    if (argc != 2) {
-        std::cerr << "./run <system_name>. E.g., ./run affinity" << std::endl;
+    if (argc < 2) {
+        std::cerr << "./run <system_name> <warehouse_num>. E.g., ./run affinity" << std::endl;
         return 0;
     }
     std::string system_name = argv[1];
@@ -343,6 +351,13 @@ int main(int argc, char *argv[]) {
         system_value = 1;
     } else if (system_name.find("single") != std::string::npos) {
         system_value = 2;
+    } else if (system_name.find("perfect") != std::string::npos) {
+        if(argc != 3){
+            std::cerr << "Please provide the number of warehouses for perfect partitioning." << std::endl;
+            return 0;
+        }
+        system_value = 3;
+        TPCC_WAREHOUSE_NUM = std::stoi(argv[2]);
     } else {
         std::cerr << "Invalid system name." << std::endl;
         return 0;

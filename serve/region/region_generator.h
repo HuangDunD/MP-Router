@@ -43,7 +43,7 @@ public:
      * but the function may still return true.
      */
     bool generateRegionIDs(const std::string &data, std::vector<uint64_t> &out_region_ids,
-                           const BmSql::Meta &bmsqlMeta, std::string &raw_txn);
+                           const BmSql::Meta &bmsqlMeta, std::string &raw_txn, partition_id_t* perfect_par_id = nullptr);
 
 private:
     Logger &logger_; // Reference to the logger instance
@@ -65,7 +65,7 @@ private:
      * @param raw_txn
      * @return bool False on critical errors (invalid REGION_SIZE), true otherwise.
      */
-    bool processTPCH(const std::string &data, const BmSql::Meta &bmsqlMeta, std::vector<uint64_t> &out_region_ids, std::string &raw_txn);
+    bool processTPCH(const std::string &data, const BmSql::Meta &bmsqlMeta, std::vector<uint64_t> &out_region_ids, std::string &raw_txn, partition_id_t* wid = nullptr);
 
     // --- Dependencies (Accessed via extern as in original code) ---
     // These are kept extern for minimal changes from original structure,

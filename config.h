@@ -17,7 +17,7 @@
 #define PartitionDataSize (ComputeNodeBufferPageSize / ComputeNodeCount)
 #define MaxComputeNodeCount 128
 
-// 定义算法版本 0: random 1: affinity 2: single 
+// 定义算法版本 0: random 1: affinity 2: single 3: perfect
 extern int SYSTEM_MODE; 
 
 // 定义所跑的workload 0:smallbank 1:tpcc
@@ -28,3 +28,6 @@ extern uint64_t ATTEMPTED_NUM;
 extern double CrossNodeAccessRatio;
 extern int REGION_SIZE;
 extern double AffinitySampleRate;
+
+// for TPC-C
+extern int TPCC_WAREHOUSE_NUM;

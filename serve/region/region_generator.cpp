@@ -34,7 +34,7 @@ RegionProcessor::RegionProcessor(Logger &logger) : logger_(logger) {
 }
 
 bool RegionProcessor::generateRegionIDs(const std::string &data, std::vector<uint64_t> &out_region_ids,
-                                        const BmSql::Meta &bmsqlMeta, std::string &raw_txn) {
+                                        const BmSql::Meta &bmsqlMeta, std::string &raw_txn, partition_id_t* perfect_par_id) {
     out_region_ids.clear(); // Ensure the output vector is empty
 
     // Check REGION_SIZE again in case it was modified externally (though unlikely if const)
@@ -43,7 +43,7 @@ bool RegionProcessor::generateRegionIDs(const std::string &data, std::vector<uin
         return false; // Critical error
     }
 
-    return processTPCH(data, bmsqlMeta, out_region_ids, raw_txn);
+    return processTPCH(data, bmsqlMeta, out_region_ids, raw_txn, perfect_par_id);
 }
 
 // --- Private YCSB Implementation ---
@@ -114,11 +114,10 @@ std::mutex col_mutex;
 std::atomic<long long> times{0};
 
 bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bmsqlMeta,
-                                  std::vector<uint64_t> &out_region_ids, std::string &raw_txn) {
+                                  std::vector<uint64_t> &out_region_ids, std::string &raw_txn, partition_id_t* wid) {
     try {
         // 1. Call the BMSQL parser
-        partition_id_t wid = -1; 
-        std::vector<SQLInfo> sql_infos = parseTPCHSQL(data, raw_txn, &wid);
+        std::vector<SQLInfo> sql_infos = parseTPCHSQL(data, raw_txn, wid);
 
         // logger_.info("[region] mode=TPCH blocks=" + std::to_string(sql_infos.size()));
 
