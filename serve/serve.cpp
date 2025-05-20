@@ -6,6 +6,7 @@
 #include <sys/socket.h> // For socket API
 #include <csignal>
 #include <random>
+#include <atomic>
 
 #include "util/json_config.h"
 #include "threadpool.h" // Include your thread pool header
@@ -41,6 +42,7 @@ NewMetis metis; // Assuming NewMetis is the correct type
 TPCHMeta *TPCH_META = nullptr; // Initialize global pointer
 std::vector<std::string> DBConnection;
 std::atomic<long long> send_times = 0; // Use long long for potentially large counts
+std::vector<std::atomic<long long> > exec_txns_counts_node_vec(MaxComputeNodeCount);
 uint64_t seed = 0xdeadbeef;
 
 // Instantiate RegionProcessor within the scope where needed
@@ -158,6 +160,8 @@ static bool send_sql_to_router(const std::string &sqls,
         lg.error("Error while connecting to KingBase or getting query plan: " + std::string(e.what()));
         return false;
     }
+    // 统计
+    exec_txns_counts_node_vec[router_node]++;
     return true;
 }
 
@@ -250,7 +254,7 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) 
         router_node = 0;
     } else if (SYSTEM_MODE == 3) {
         // perfect partition
-        assert(perfect_par_id <= TPCC_WAREHOUSE_NUM);
+        assert(perfect_par_id <= TPCC_WAREHOUSE_NUM); // w 从 1 开始
         int w_per_node = TPCC_WAREHOUSE_NUM / ComputeNodeCount;
         router_node = (perfect_par_id-1) / w_per_node;
     }
@@ -273,7 +277,7 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) 
         latencies_build_graph_us.push_back(build_graph_duration_us);
     }
 
-    if (!row_sql.empty() && router_node < 5) {
+    if (!row_sql.empty() && router_node < ComputeNodeCount) {
         auto sql_start_time = std::chrono::high_resolution_clock::now();
         // Send SQL to the router node
         send_sql_to_router(row_sql, router_node % ComputeNodeCount, log_ref);
@@ -322,6 +326,11 @@ void signal_handler(int signum) {
     std::cout << "\nCaught signal " << signum << " (SIGINT)" << std::endl;
     std::cout << "Printing final statistics before exit..." << std::endl;
 
+    std::cout << "Total transactions sent: " << send_times.load() << std::endl;
+    for(int i = 0; i < ComputeNodeCount; i++) {
+        std::cout << "ComputeNode " << i << " executed transactions: " << exec_txns_counts_node_vec[i].load() << std::endl;
+    }
+    std::cout << "Latency statistics:" << std::endl;
     print_latency_stats(send_times.load(), {
         {"Overall Txn", latencies_overall_us},
         {"RegionGenerateIDs", latencies_generate_ids_us},
