@@ -32,6 +32,9 @@ class ThreadPool; // Assume ThreadPool class is defined elsewhere
 // Enable automatic partitioning via preprocessor directive
 #define ENABLE_AUTO_PARTITION
 
+std::vector<double> change_rates_history_;
+std::atomic<int> change_times;
+
 
 class NewMetis {
 public:
@@ -53,6 +56,13 @@ public:
     void partition_internal_graph(const std::string &output_partition_file,
                                   const std::string &log_file_path,
                                   uint64_t ComputeNodeCount);
+
+    void stabilize_partition_indices(
+        idx_t nvtx,
+        const std::vector<idx_t> &new_part_csr,
+        const std::vector<uint64_t> &dense_to_original_id_snapshot,
+        std::unordered_map<uint64_t, idx_t> &current_partition_node_map_ref // 传入引用以修改
+    );
 
 private:
     // Internal Graph Representation
@@ -328,11 +338,12 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
         } else {
             dense_to_original_snapshot = this->regionid_to_dense_map_;
             logger_.warning("num_dense_ids_snapshot (" + std::to_string(num_dense_ids_snapshot) +
-                        ") > regionid_to_dense_map_ size (" + std::to_string(this->regionid_to_dense_map_.size()) +
-                        "). Copying entire dense_map. Review synchronization.");
+                            ") > regionid_to_dense_map_ size (" + std::to_string(this->regionid_to_dense_map_.size()) +
+                            "). Copying entire dense_map. Review synchronization.");
             if (this->regionid_to_dense_map_.size() < nvtx_for_metis) {
                 nvtx_for_metis = this->regionid_to_dense_map_.size();
-                logger_.info("Adjusted nvtx_for_metis to " + std::to_string(nvtx_for_metis) + " due to dense_map size.");
+                logger_.info(
+                    "Adjusted nvtx_for_metis to " + std::to_string(nvtx_for_metis) + " due to dense_map size.");
             }
         }
         if (nvtx_for_metis == 0 && num_dense_ids_snapshot > 0) {
@@ -378,7 +389,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
     }
 
     logger_.info("Snapshot state (dense): nvtx_for_metis = " + std::to_string(nvtx_for_metis) +
-                ", Total degree sum = " + std::to_string(total_degree_sum_csr));
+                 ", Total degree sum = " + std::to_string(total_degree_sum_csr));
 
     if (nvtx_for_metis == 0) {
         // Double check, could have been set to 0 if snapshot was inconsistent
@@ -469,8 +480,8 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
             xadj_csr[nvtx_for_metis] = current_edge_ptr;
             if (current_edge_ptr != total_degree_sum_csr) {
                 logger_.info("Warning: CSR edge pointer count (" + std::to_string(current_edge_ptr) +
-                            ") does not match calculated total degree sum (" + std::to_string(total_degree_sum_csr) +
-                            "). Mismatch in dense graph structure from snapshot.");
+                             ") does not match calculated total degree sum (" + std::to_string(total_degree_sum_csr) +
+                             "). Mismatch in dense graph structure from snapshot.");
             } else {
                 logger_.info(
                     "CSR conversion of snapshot successful. Total entries in adjncy/adjwgt: " + std::to_string(
@@ -527,8 +538,8 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
     }
     if (nParts_metis > nvtx_for_metis) {
         logger_.warning("Requested partitions (" + std::to_string(nParts_metis) +
-                    ") > number of dense vertices (" + std::to_string(nvtx_for_metis) +
-                    "). Reducing partitions to nvtx_for_metis.");
+                        ") > number of dense vertices (" + std::to_string(nvtx_for_metis) +
+                        "). Reducing partitions to nvtx_for_metis.");
         nParts_metis = nvtx_for_metis;
         if (nParts_metis == 1) {
             logger_.info("Partitions reduced to 1. Assigning all nodes to PartitionIndex 0.");
@@ -573,8 +584,8 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
     idx_t *adjwgt_metis_ptr = adjwgt_csr.empty() ? nullptr : adjwgt_csr.data();
 
     logger_.info("Calling METIS_PartGraphKway with nparts = " + std::to_string(nParts_metis) +
-                ", nvtx (dense snapshot) = " + std::to_string(nvtx_for_metis) +
-                ", ncon = " + std::to_string(nWeights_metis) + "...");
+                 ", nvtx (dense snapshot) = " + std::to_string(nvtx_for_metis) +
+                 ", ncon = " + std::to_string(nWeights_metis) + "...");
 
     int metis_ret = METIS_PartGraphKway(
         &nvtx_for_metis,
@@ -601,6 +612,23 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
     }
     logger_.info("METIS partitioning successful! Objective value (edge cut/volume): " + std::to_string(objval_metis));
 
+    this->stabilize_partition_indices(
+        nvtx_for_metis,
+        part_csr, // Raw METIS output (dense ID -> new_idx)
+        dense_to_original_snapshot, // Mapping from dense ID to original ID
+        this->partition_node_map // The member map that will be updated with stabilized indices
+    );
+
+    // 调用稳定化函数，它会修改 this->partition_node_map
+    // 在调用前，this->partition_node_map 存储的是旧的分区结果
+    // 传递 this->partition_node_map 的引用，它将作为旧分区信息被读取，并被新的稳定化结果覆盖
+    this->stabilize_partition_indices(
+        nvtx_for_metis,
+        part_csr, // METIS 原始输出
+        dense_to_original_snapshot,
+        this->partition_node_map // 将被修改的路由映射
+    );
+
     std::ofstream out_part_final(output_partition_file);
     if (!out_part_final.is_open()) {
         logger_.error("Cannot open partition output file " + output_partition_file); {
@@ -609,41 +637,298 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
         }
         return;
     }
-    out_part_final << "RegionID,TableID,InnerRegionID,PartitionIndex\n";
-    for (idx_t dense_i = 0; dense_i < nvtx_for_metis; ++dense_i) {
-        if (dense_i < dense_to_original_snapshot.size()) {
-            uint64_t original_id = dense_to_original_snapshot[dense_i];
-            idx_t partition_index_val = part_csr[dense_i]; // Value from METIS
+    out_part_final << "RegionID,TableID,InnerRegionID,PartitionIndex\n"; {
+        std::shared_lock<std::shared_mutex> lock(partition_map_mutex_); // 只需要读锁
+        for (const auto &pair: partition_node_map) {
+            uint64_t original_id = pair.first;
+            idx_t assigned_partition_index = pair.second;
             Region region(original_id);
             out_part_final << original_id << "," << region.getTableId() << "," << region.getInnerRegionId() << "," <<
-                    partition_index_val << "\n";
-        } else {
-            logger_.error(
-                "Dense ID " + std::to_string(dense_i) +
-                " out of bounds in dense_to_original_snapshot during file writing.");
+                    assigned_partition_index << "\n";
         }
     }
     out_part_final.close();
     logger_.info(
         "Partition results (RegionID,TableID,InnerRegionID,PartitionIndex) successfully written to " +
-        output_partition_file); {
-        std::unique_lock<std::shared_mutex> lock(partition_map_mutex_);
-        logger_.info("Acquired partition_map_mutex_ for populating router rules.");
-        partition_node_map.clear();
+        output_partition_file);
+}
 
-        for (idx_t dense_i = 0; dense_i < nvtx_for_metis; ++dense_i) {
-            if (dense_i >= dense_to_original_snapshot.size()) {
-                logger_.error(
-                    "Dense ID " + std::to_string(dense_i) +
-                    " out of bounds in dense_to_original_snapshot during router rule creation.");
-                continue;
-            }
-            uint64_t current_original_id = dense_to_original_snapshot[dense_i];
-            idx_t assigned_partition_index = part_csr[dense_i];
-            partition_node_map[current_original_id] = assigned_partition_index;
-        }
-        logger_.info("Router rules map (OriginalRegionID -> PartitionIndex) populated.");
+
+void NewMetis::stabilize_partition_indices(
+    idx_t nvtx,
+    const std::vector<idx_t> &new_part_csr, // METIS's raw partition result (dense ID -> new_idx)
+    const std::vector<uint64_t> &dense_to_original_id_snapshot, // dense ID -> original ID mapping
+    std::unordered_map<uint64_t, idx_t> &current_partition_node_map_ref
+    // Original ID -> old_idx, will be updated to stabilized new_idx
+) {
+    logger_.info(
+        "Starting partition index stabilization process, ensuring indices are within [0, " + std::to_string(
+            num_partitions_ - 1) + "].");
+
+    // Create a copy of the OLD partition map to compare against.
+    std::unordered_map<uint64_t, idx_t> old_partition_node_map_copy; {
+        std::shared_lock<std::shared_mutex> lock(partition_map_mutex_); // Acquire read lock to copy
+        old_partition_node_map_copy = current_partition_node_map_ref;
     }
 
-    logger_.info("Finished internal graph partitioning task.");
+    // Step 1: Collect information about existing (OLD) partitions
+    std::map<idx_t, std::vector<uint64_t> > old_partition_to_nodes;
+    for (const auto &pair: old_partition_node_map_copy) {
+        uint64_t original_id = pair.first;
+        idx_t old_partition_idx = pair.second;
+        // 确保旧的索引本身就在合法范围内
+        if (old_partition_idx < 0 || static_cast<uint64_t>(old_partition_idx) >= num_partitions_) {
+            logger_.warning(
+                "Old partition index " + std::to_string(old_partition_idx) + " for node " + std::to_string(original_id)
+                + " is out of target range [0, " + std::to_string(num_partitions_ - 1) +
+                "]. Adjusting to 0 for matching purposes.");
+            old_partition_idx = 0; // 或者进行其他合理的调整，这里简单回退到0
+        }
+        old_partition_to_nodes[old_partition_idx].push_back(original_id);
+    }
+    logger_.info(
+        "Collected information from " + std::to_string(old_partition_to_nodes.size()) +
+        " existing partitions for matching.");
+
+    // Step 2: Collect information about NEW partitions (from METIS's raw output)
+    std::unordered_map<uint64_t, idx_t> temp_new_original_to_partition;
+    std::map<idx_t, std::vector<uint64_t> > new_partition_to_nodes_metis_idx;
+    // Map: METIS raw index -> List of Original IDs
+    for (idx_t dense_i = 0; dense_i < nvtx; ++dense_i) {
+        if (dense_i < dense_to_original_id_snapshot.size()) {
+            uint64_t original_id = dense_to_original_id_snapshot[dense_i];
+            idx_t new_partition_idx_metis = new_part_csr[dense_i];
+            temp_new_original_to_partition[original_id] = new_partition_idx_metis;
+            new_partition_to_nodes_metis_idx[new_partition_idx_metis].push_back(original_id);
+        } else {
+            logger_.error("Error: Dense ID " + std::to_string(dense_i) +
+                          " out of bounds in dense_to_original_id_snapshot during new partition info collection. Skipping node.");
+        }
+    }
+    logger_.info(
+        "Collected information for " + std::to_string(new_partition_to_nodes_metis_idx.size()) +
+        " new METIS partitions.");
+
+    // Step 3: Calculate Overlap Matrix
+    std::map<idx_t, std::map<idx_t, size_t> > overlap_matrix;
+    // Map: Old Partition Index -> (New METIS Partition Index -> Overlap Count)
+    for (const auto &old_part_pair: old_partition_to_nodes) {
+        idx_t old_partition_idx = old_part_pair.first;
+        const std::vector<uint64_t> &nodes_in_old_part = old_part_pair.second;
+
+        for (uint64_t node_id: nodes_in_old_part) {
+            auto it_new_part = temp_new_original_to_partition.find(node_id);
+            if (it_new_part != temp_new_original_to_partition.end()) {
+                idx_t new_partition_idx_metis = it_new_part->second;
+                overlap_matrix[old_partition_idx][new_partition_idx_metis]++;
+            }
+        }
+    }
+    logger_.info("Overlap matrix calculated. Matrix size: " + std::to_string(overlap_matrix.size()) + " (rows).");
+
+    // Step 4: Establish Best Mapping (Greedy Algorithm for maximum overlap)
+    std::map<idx_t, idx_t> old_to_new_metis_mapping;
+    // Map: Old Partition Index -> New METIS Partition Index (raw index)
+    std::set<idx_t> assigned_old_partitions; // Track old partition indices that have been matched
+    std::set<idx_t> assigned_new_metis_partitions; // Track new METIS partition indices that have been matched
+
+    std::vector<std::tuple<size_t, idx_t, idx_t> > sorted_overlaps;
+    for (const auto &old_pair: overlap_matrix) {
+        idx_t old_idx = old_pair.first;
+        for (const auto &new_pair: old_pair.second) {
+            idx_t new_idx_metis = new_pair.first;
+            size_t count = new_pair.second;
+            sorted_overlaps.emplace_back(count, old_idx, new_idx_metis);
+        }
+    }
+    std::sort(sorted_overlaps.rbegin(), sorted_overlaps.rend()); // Sort descending by overlap count
+
+    for (const auto &entry: sorted_overlaps) {
+        size_t count = std::get<0>(entry);
+        idx_t old_idx = std::get<1>(entry);
+        idx_t new_idx_metis = std::get<2>(entry);
+
+        // If both the old partition and the new METIS partition haven't been assigned yet
+        if (assigned_old_partitions.find(old_idx) == assigned_old_partitions.end() &&
+            assigned_new_metis_partitions.find(new_idx_metis) == assigned_new_metis_partitions.end()) {
+            // Only establish match if old_idx is within the target range [0, num_partitions_ - 1]
+            if (static_cast<uint64_t>(old_idx) < num_partitions_) {
+                old_to_new_metis_mapping[old_idx] = new_idx_metis;
+                assigned_old_partitions.insert(old_idx);
+                assigned_new_metis_partitions.insert(new_idx_metis);
+                logger_.debug("Matched old partition " + std::to_string(old_idx) +
+                              " to new METIS partition " + std::to_string(new_idx_metis) +
+                              " with overlap " + std::to_string(count));
+            } else {
+                logger_.warning("Skipping match for old partition " + std::to_string(old_idx) +
+                                " as it's outside target range [0, " + std::to_string(num_partitions_ - 1) + "].");
+            }
+        }
+    }
+    logger_.info(
+        "Best partition index mapping established using greedy algorithm. Total matches: " + std::to_string(
+            old_to_new_metis_mapping.size()) + ".");
+
+    // Step 5: Construct the stabilized partition index mapping
+    // Map: New METIS Partition Index -> Stabilized (Target) Partition Index
+    std::map<idx_t, idx_t> new_metis_idx_to_stabilized_idx_map;
+    std::set<idx_t> used_target_stabilized_indices;
+    // Track which target stable indices (0 to num_partitions_-1) are already taken
+
+    // First, populate `new_metis_idx_to_stabilized_idx_map` based on established matches
+    for (const auto &pair: old_to_new_metis_mapping) {
+        idx_t old_idx = pair.first; // This is the desired stable PartitionIndex (0 to num_partitions_-1)
+        idx_t new_idx_metis = pair.second; // This is the raw METIS index
+
+        new_metis_idx_to_stabilized_idx_map[new_idx_metis] = old_idx;
+        used_target_stabilized_indices.insert(old_idx);
+    }
+
+    // Now, handle new METIS partitions that did not find a direct match.
+    // Assign them a stable index from [0, num_partitions_ - 1] in a round-robin fashion,
+    // prioritizing unused indices first, then reusing if necessary.
+    idx_t current_round_robin_idx = 0; // Start round-robin from 0
+
+    // Iterate through all METIS-assigned new partitions
+    for (const auto &new_part_pair: new_partition_to_nodes_metis_idx) {
+        idx_t new_idx_metis = new_part_pair.first;
+
+        if (new_metis_idx_to_stabilized_idx_map.find(new_idx_metis) == new_metis_idx_to_stabilized_idx_map.end()) {
+            // This METIS partition index was not matched to an old partition.
+            // Assign it a stable index from [0, num_partitions_ - 1].
+
+            // First, try to find an *unused* target index within the allowed range.
+            idx_t assigned_stabilized_idx = -1;
+            for (uint64_t i = 0; i < num_partitions_; ++i) {
+                idx_t candidate_idx = (current_round_robin_idx + i) % num_partitions_;
+                if (used_target_stabilized_indices.find(candidate_idx) == used_target_stabilized_indices.end()) {
+                    assigned_stabilized_idx = candidate_idx;
+                    break;
+                }
+            }
+
+            if (assigned_stabilized_idx != -1) {
+                // Found an unused target index
+                new_metis_idx_to_stabilized_idx_map[new_idx_metis] = assigned_stabilized_idx;
+                used_target_stabilized_indices.insert(assigned_stabilized_idx);
+                current_round_robin_idx = (assigned_stabilized_idx + 1) % num_partitions_; // Advance round-robin
+                logger_.debug("Assigned new METIS partition " + std::to_string(new_idx_metis) +
+                              " to UNUSED stabilized index " + std::to_string(assigned_stabilized_idx) +
+                              " (round-robin).");
+            } else {
+                // All target indices [0, num_partitions_ - 1] are currently "used" by a match.
+                // We have to reuse one. Simply pick the next in round-robin sequence.
+                // This will cause multiple METIS partitions to map to the same target index,
+                // which is acceptable as long as the total number of partitions (num_partitions_) is the hard limit.
+                assigned_stabilized_idx = current_round_robin_idx;
+                new_metis_idx_to_stabilized_idx_map[new_idx_metis] = assigned_stabilized_idx;
+                // No need to insert into used_target_stabilized_indices as it's already "used"
+                current_round_robin_idx = (current_round_robin_idx + 1) % num_partitions_; // Advance round-robin
+                logger_.warning("Assigned new METIS partition " + std::to_string(new_idx_metis) +
+                                " to REUSED stabilized index " + std::to_string(assigned_stabilized_idx) +
+                                " (round-robin). All target indices are currently occupied.");
+            }
+        }
+    }
+
+    logger_.info(
+        "Stabilized partition index mapping created. Total target indices used (potentially reused): " +
+        std::to_string(used_target_stabilized_indices.size()) + " out of " + std::to_string(num_partitions_) + ".");
+
+    // Step 6: Construct the final stabilized `current_partition_node_map_ref` and calculate change rate
+    uint64_t nodes_unchanged_count = 0;
+    uint64_t nodes_existing_in_old_map = old_partition_node_map_copy.size(); {
+        std::unique_lock<std::shared_mutex> lock(partition_map_mutex_); // Acquire exclusive write lock for router map
+        current_partition_node_map_ref.clear(); // Clear the old map
+
+        for (idx_t dense_i = 0; dense_i < nvtx; ++dense_i) {
+            if (dense_i < dense_to_original_id_snapshot.size()) {
+                uint64_t original_id = dense_to_original_id_snapshot[dense_i];
+                idx_t original_new_partition_idx_metis = new_part_csr[dense_i]; // Raw index from METIS
+
+                auto it_stabilized_idx_map = new_metis_idx_to_stabilized_idx_map.find(original_new_partition_idx_metis);
+                idx_t final_assigned_partition_index;
+
+                if (it_stabilized_idx_map != new_metis_idx_to_stabilized_idx_map.end()) {
+                    final_assigned_partition_index = it_stabilized_idx_map->second;
+                } else {
+                    // This should ideally not happen if new_metis_idx_to_stabilized_idx_map
+                    // is correctly populated with all raw METIS partition indices.
+                    logger_.error(
+                        "CRITICAL ERROR: METIS partition index " + std::to_string(original_new_partition_idx_metis) +
+                        " for node " + std::to_string(original_id) +
+                        " not found in stabilization map. Assigning to (0 % num_partitions_).");
+                    final_assigned_partition_index = 0 % static_cast<idx_t>(num_partitions_);
+                    // Fallback to 0 (within range)
+                }
+
+                // Final check to ensure the assigned index is within bounds [0, num_partitions_ - 1]
+                if (static_cast<uint64_t>(final_assigned_partition_index) >= num_partitions_) {
+                    logger_.error("CRITICAL ERROR: Stabilized index " + std::to_string(final_assigned_partition_index) +
+                                  " for node " + std::to_string(original_id) + " is out of bounds [0, " +
+                                  std::to_string(num_partitions_ - 1) + "]. Modulo correcting.");
+                    final_assigned_partition_index %= static_cast<idx_t>(num_partitions_);
+                }
+                current_partition_node_map_ref[original_id] = final_assigned_partition_index;
+
+                // Calculate unchanged nodes: only for nodes that existed in the previous partition map
+                auto it_old_map = old_partition_node_map_copy.find(original_id);
+                if (it_old_map != old_partition_node_map_copy.end()) {
+                    if (it_old_map->second == final_assigned_partition_index) {
+                        nodes_unchanged_count++;
+                    }
+                }
+            } else {
+                logger_.error("Dense ID " + std::to_string(dense_i) +
+                              " out of bounds in dense_to_original_id_snapshot during final map creation. Skipping node for final map.");
+            }
+        }
+    } // partition_map_mutex_ (UNIQUE lock) released
+
+    // Log the change rate
+    double change_rate = 0.0;
+    if (nodes_existing_in_old_map > 0) {
+        change_rate = static_cast<double>(nodes_existing_in_old_map - nodes_unchanged_count) /
+                      nodes_existing_in_old_map;
+        change_rates_history_.push_back(change_rate);
+        change_times++;
+        if (change_times % 10 == 0) {
+            double sum_change_rates = 0.0;
+            // Sum the last 10 rates, or all if fewer than 10
+            size_t start_idx = 0;
+            if (change_rates_history_.size() > 10) {
+                start_idx = change_rates_history_.size() - 10;
+            }
+            for (size_t i = start_idx; i < change_rates_history_.size(); ++i) {
+                sum_change_rates += change_rates_history_[i];
+            }
+            double average_change_rate = sum_change_rates / (change_rates_history_.size() - start_idx);
+
+            std::string change_rate_report_file_ = "partition_change_rate_report.txt";
+            std::ofstream report_file(change_rate_report_file_, std::ios::app); // 以追加模式打开文件
+            if (report_file.is_open()) {
+                report_file << "--- Partition Change Rate Report ---\n";
+                report_file << "Run: " << change_times << "\n"; // 使用 change_times 作为当前运行次数
+                report_file << "Total successful partition runs: " << change_times << ".\n";
+                report_file << "Average change rate over last " << (change_rates_history_.size() - start_idx) << " runs: "
+                            << std::fixed << std::setprecision(4) << (average_change_rate * 100.0) << "%.\n";
+                report_file << "------------------------------------\n";
+                report_file.close();
+                logger_.info("Partition change rate report written to " + change_rate_report_file_);
+            } else {
+                logger_.error("Failed to open partition change rate report file: " + change_rate_report_file_);
+                // 失败时 fallback 到控制台输出
+                std::cout << "--- Partition Change Rate Report ---" << std::endl;
+                std::cout << "Total successful partition runs: " << change_times << "." << std::endl;
+                std::cout << "Average change rate over last " << (change_rates_history_.size() - start_idx) << " runs: "
+                          << std::fixed << std::setprecision(4) << (average_change_rate * 100.0) << "%." << std::endl;
+                std::cout << "------------------------------------" << std::endl;
+            }
+        }
+    } else {
+        logger_.info(
+            "Partition index stabilization complete. No nodes existed in the previous partition map to compare for change rate (old map was empty).");
+    }
+
+    logger_.info("Router map updated with stabilized indices.");
 }
