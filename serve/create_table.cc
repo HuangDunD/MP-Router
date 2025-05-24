@@ -79,11 +79,11 @@ int main(int argc, char *argv[]) {
             }
         }
         sql_stream << "-- Table: " << i.name << "\n";
-        for (int index = 1; index <= regionsize; ++index) {
+        for (int index = 1; index <= regionsize; index+=regionsize) {
             std::string sql = "CREATE TABLE " + i.name + "_" + std::to_string(index) +
                               " PARTITION OF " + i.name +
                               " FOR VALUES FROM (" + std::to_string(index) +
-                              ") TO (" + std::to_string(index + 1) + ");\n";
+                              ") TO (" + std::to_string(index + regionsize) + ");\n";
             sql_stream << sql;
         }
         sql_stream << "\n";
