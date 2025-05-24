@@ -44,6 +44,7 @@ int main(int argc, char *argv[]) {
     }
     std::vector<std::string> DBConnection;
 
+
     std::string compute_node_config_path = "../../config/compute_node_config.json";
     auto compute_node_config = JsonConfig::load_file(compute_node_config_path);
     auto compute_node_list = compute_node_config.get("remote_compute_nodes");
@@ -60,6 +61,17 @@ int main(int argc, char *argv[]) {
             " user=" + username +
             " password=" + password +
             " dbname=" + dbname);
+    }
+
+    for (size_t i = 0; i < DBConnection.size(); ++i) {
+        std::string conninfo = DBConnection[i];
+        try {
+            // Create a connection for each thread
+            pqxx::connection *conn = nullptr;
+            connections_thread_local.push_back(conn);
+        } catch (const std::exception &e) {
+            std::cerr << "Error while connecting to KingBase: " + std::string(e.what()) << std::endl;
+        }
     }
 
 
@@ -79,7 +91,7 @@ int main(int argc, char *argv[]) {
             }
         }
         sql_stream << "-- Table: " << i.name << "\n";
-        for (int index = 1; index <= regionsize; index+=regionsize) {
+        for (int index = 1; index <= regionsize; index += regionsize) {
             std::string sql = "CREATE TABLE " + i.name + "_" + std::to_string(index) +
                               " PARTITION OF " + i.name +
                               " FOR VALUES FROM (" + std::to_string(index) +
