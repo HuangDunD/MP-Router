@@ -12,42 +12,74 @@ if [ ! -f "${PROPS}" ] ; then
     exit 1
 fi
 
-DB="$(grep '^db=' $PROPS | sed -e 's/^db=//')"
+#DB="$(grep '^db=' $PROPS | sed -e 's/^db=//')"
 
-BEFORE_LOAD="tableCreates extraCommandsBeforeLoad storedProcedureCreates"
+Benchmark_Type="$(grep '^benchmarkType=' $PROPS | sed -e 's/^benchmarkType=//')"
 
-AFTER_LOAD="indexCreates foreignKeys buildFinish"
+if [ "$Benchmark_Type" = "tpcc" ]; then
+    echo "Benchmark Type is tpcc"
 
-for step in ${BEFORE_LOAD} ; do
-    ./runSQL.sh "${PROPS}" $step &
+    BEFORE_LOAD="tableCreates extraCommandsBeforeLoad storedProcedureCreates"
+
+    AFTER_LOAD="indexCreates foreignKeys buildFinish"
+
+    for step in ${BEFORE_LOAD} ; do
+        ./runSQL.sh "${PROPS}" $step &
+        PID=$!
+        while true ; do
+    	kill -0 $PID 2>/dev/null || break
+    	sleep 1
+        done
+        wait $PID
+        rc=$?
+        [ $rc -eq 0 ] || exit $rc
+    done
+
+    ./runLoader.sh "${PROPS}" $* &
     PID=$!
     while true ; do
-	kill -0 $PID 2>/dev/null || break
-	sleep 1
+        kill -0 $PID 2>/dev/null || break
+        sleep 1
     done
     wait $PID
     rc=$?
     [ $rc -eq 0 ] || exit $rc
-done
 
-./runLoader.sh "${PROPS}" $* &
-PID=$!
-while true ; do
-    kill -0 $PID 2>/dev/null || break
-    sleep 1
-done
-wait $PID
-rc=$?
-[ $rc -eq 0 ] || exit $rc
-
-for step in ${AFTER_LOAD} ; do
-    ./runSQL.sh "${PROPS}" $step &
-    PID=$!
-    while true ; do
-	kill -0 $PID 2>/dev/null || break
-	sleep 1
+    for step in ${AFTER_LOAD} ; do
+        ./runSQL.sh "${PROPS}" $step &
+        PID=$!
+        while true ; do
+    	kill -0 $PID 2>/dev/null || break
+    	sleep 1
+        done
+        wait $PID
+        rc=$?
+        [ $rc -eq 0 ] || exit $rc
     done
-    wait $PID
-    rc=$?
-    [ $rc -eq 0 ] || exit $rc
-done
+
+elif [ "$Benchmark_Type" = "smallbank" ]; then
+    echo "Benchmark Type is smallbank"
+    BEFORE_LOAD="./sql.smallbank/tableCreates.sql"
+
+      for step in ${BEFORE_LOAD} ; do
+          ./runSQL.sh "${PROPS}" $step &
+          PID=$!
+          while true ; do
+        kill -0 $PID 2>/dev/null || break
+        sleep 1
+          done
+          wait $PID
+          rc=$?
+          [ $rc -eq 0 ] || exit $rc
+      done
+
+    smallbankOPTS="-Dprop=${PROPS}"
+    smallbankOPTS="${smallbankOPTS} -Djava.security.egd=file:/dev/./urandom"
+
+    java -cp "./:../MockBenchSQL.jar:../lib/*" $smallbankOPTS mock.bench.Tpcc.DataLoad.SmallBankLoader
+    echo "java -cp "./:../MockBenchSQL.jar:../lib/*" $smallbankOPTS mock.bench.Tpcc.DataLoad.SmallBankLoader"
+else
+    echo "Benchmark Type is not tpcc or smallbank, exiting"
+    exit 1
+fi
+
