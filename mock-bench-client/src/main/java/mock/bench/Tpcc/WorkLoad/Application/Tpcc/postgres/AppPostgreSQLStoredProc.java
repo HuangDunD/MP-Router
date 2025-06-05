@@ -1,4 +1,4 @@
-package mock.bench.Tpcc.WorkLoad.Application.postgres;
+package mock.bench.Tpcc.WorkLoad.Application.Tpcc.postgres;
 
 import java.math.BigDecimal;
 import java.sql.Array;

@@ -20,7 +20,7 @@ import mock.bench.Tpcc.Tool.OSCollector;
 import mock.bench.Tpcc.Tool.jTPCCConfig;
 import mock.bench.Tpcc.Tool.jTPCCRandom;
 import mock.bench.Tpcc.WorkLoad.Application.AppGeneric;
-import mock.bench.Tpcc.WorkLoad.Application.postgres.AppPostgreSQLStoredProc;
+import mock.bench.Tpcc.WorkLoad.Application.Tpcc.postgres.AppPostgreSQLStoredProc;
 
 
 
@@ -72,6 +72,7 @@ public class jTPCC {
   public static int sutThreadDelay;
   public static int terminalDelay;
   public static int numTerms;
+  public static String benchmarkType;
 
   public static double newOrderWeight;
   public static double paymentWeight;
@@ -79,6 +80,15 @@ public class jTPCC {
   public static double deliveryWeight;
   public static double stockLevelWeight;
   public static double rollbackPercent;
+
+    //smallbank
+    public static long smallBankNumAccounts;
+    public static double amalgamateWeight;
+    public static double depositCheckingWeight;
+    public static double sendPaymentWeight;
+    public static double transactSavingsWeight;
+    public static double writeCheckWeight;
+
 
   private OSCollector osCollector = null;
   private jTPCCTData terminal_data[];
@@ -167,7 +177,10 @@ public class jTPCC {
       iPassword[i] = getProp(ini, "password[" + i + "]");
     }
 
+    benchmarkType = getProp(ini, "benchmarkType");
+
     crossWarehouseNewOrder = Integer.parseInt(getProp(ini, "crossWarehouseNewOrder", "1"));
+
     crossWarehousePayment = Integer.parseInt(getProp(ini, "crossWarehousePayment", "15"));
     
     loadType = getProp(ini, "loadType");
@@ -203,13 +216,27 @@ public class jTPCC {
 //    thinkTimeMultiplier = Double.parseDouble(getProp(ini, "thinkTimeMultiplier"));
     terminalMultiplier = Integer.parseInt(getProp(ini, "terminalMultiplier", "1"));
     traceTerminalIO = Boolean.parseBoolean(getProp(ini, "traceTerminalIO"));
-    log.info("Main, ");
-    paymentWeight = Double.parseDouble(getProp(ini, "paymentWeight"));
-    orderStatusWeight = Double.parseDouble(getProp(ini, "orderStatusWeight"));
-    deliveryWeight = Double.parseDouble(getProp(ini, "deliveryWeight"));
-    stockLevelWeight = Double.parseDouble(getProp(ini, "stockLevelWeight"));
-    newOrderWeight = 100.0 - paymentWeight - orderStatusWeight - deliveryWeight - stockLevelWeight;
-    if (newOrderWeight < 0.0) {
+
+    if (benchmarkType.equals("tpcc")){
+        paymentWeight = Double.parseDouble(getProp(ini, "paymentWeight"));
+        orderStatusWeight = Double.parseDouble(getProp(ini, "orderStatusWeight"));
+        deliveryWeight = Double.parseDouble(getProp(ini, "deliveryWeight"));
+        stockLevelWeight = Double.parseDouble(getProp(ini, "stockLevelWeight"));
+        newOrderWeight = 100.0 - paymentWeight - orderStatusWeight - deliveryWeight - stockLevelWeight;
+    } else if (benchmarkType.equals("smallbank")) {
+        smallBankNumAccounts = Integer.parseInt(getProp(ini, "smallBankNumAccounts"));
+        depositCheckingWeight = Double.parseDouble(getProp(ini, "depositCheckingWeight"));
+        sendPaymentWeight = Double.parseDouble(getProp(ini, "sendPaymentWeight"));
+        transactSavingsWeight = Double.parseDouble(getProp(ini, "transactSavingsWeight"));
+        writeCheckWeight = Double.parseDouble(getProp(ini, "writeCheckWeight"));
+        amalgamateWeight = 100.0 - depositCheckingWeight - sendPaymentWeight - transactSavingsWeight - writeCheckWeight;
+    } else {
+        log.error("Unknown benchmark type: " + benchmarkType);
+        exit();
+    }
+
+
+      if (newOrderWeight < 0.0) {
       log.error("Main, newOrderWeight is below zero");
       return;
     }

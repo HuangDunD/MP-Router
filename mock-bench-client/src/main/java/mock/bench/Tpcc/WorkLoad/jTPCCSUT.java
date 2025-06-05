@@ -24,9 +24,11 @@ public class jTPCCSUT {
 
     this.queue = new jTPCCTDataList();
 
-    this.deliveryBg = new DeliveryScheduler();
-    this.deliveryBgThread = new Thread(this.deliveryBg);
-    this.deliveryBgThread.start();
+    if (jTPCC.benchmarkType.equals("tpcc")){
+        this.deliveryBg = new DeliveryScheduler();
+        this.deliveryBgThread = new Thread(this.deliveryBg);
+        this.deliveryBgThread.start();
+    }
   }
 
   public void launchSUTThread(jTPCCTData tdata) {
@@ -45,11 +47,15 @@ public class jTPCCSUT {
   }
 
   public void terminate() {
-    try {
-      deliveryBgThread.interrupt();
-      deliveryBgThread.join();
-    } catch (InterruptedException e) {
-    }
+      if (jTPCC.benchmarkType.equals("tpcc")){
+          try {
+              deliveryBgThread.interrupt();
+              deliveryBgThread.join();
+          } catch (InterruptedException e) {
+
+          }
+      }
+
 
     synchronized (queue) {
       queue.truncate();
@@ -155,30 +161,41 @@ public class jTPCCSUT {
             case jTPCCTData.TT_NEW_ORDER:
               processNewOrder(tdata);
               break;
-
             case jTPCCTData.TT_PAYMENT:
               processPayment(tdata);
               break;
-
             case jTPCCTData.TT_ORDER_STATUS:
               processOrderStatus(tdata);
               break;
-
             case jTPCCTData.TT_STOCK_LEVEL:
               processStockLevel(tdata);
               break;
-
             case jTPCCTData.TT_DELIVERY_BG:
               processDeliveryBG(tdata);
               break;
-
             case jTPCCTData.TT_DELIVERY: // 交付
               processDelivery(tdata);
               break;
 
+              case jTPCCTData.TT_AMALGAMATE:
+                  processAmalgamate(tdata);
+                  break;
+              case jTPCCTData.TT_DEPOSIT_CHECKING:
+                  processDepositChecking(tdata);
+                  break;
+              case jTPCCTData.TT_SEND_PAYMENT:
+                  processSendPayment(tdata);
+                  break;
+              case jTPCCTData.TT_TRANSACT_SAVINGS:
+                  processTransactSavings(tdata);
+                  break;
+              case jTPCCTData.TT_WRITE_CHECK:
+                  processWriteCheck(tdata);
+                  break;
+
             default:
-              log.error("sut-{} unhandled Transaction type code {} in SUT", this.t_id, tdata.trans_type);
-              break;
+                log.error("sut-{} unhandled Transaction type code {} in SUT", this.t_id, tdata.trans_type);
+                break;
           }
         } catch (Exception e) {
           log.error("sut-{} Exception: Error3: {} ttype={}", this.t_id, e.getMessage(), tdata.trans_type); //报错
@@ -265,6 +282,26 @@ public class jTPCCSUT {
 
     private void processDeliveryBG(jTPCCTData tdata) throws Exception {
       application.executeDeliveryBG(tdata.delivery_bg);
+    }
+
+    private void processAmalgamate(jTPCCTData tdata) throws Exception {
+        application.executeAmalgamate(tdata.amalgamate);
+    }
+
+    private void processDepositChecking(jTPCCTData tdata) throws Exception {
+        application.executeDepositChecking(tdata.deposit_checking);
+    }
+
+    private void processSendPayment(jTPCCTData tdata) throws Exception {
+        application.executeSendPayment(tdata.send_payment);
+    }
+
+    private void processTransactSavings(jTPCCTData tdata) throws Exception {
+        application.executeTransactSavings(tdata.transact_savings);
+    }
+
+    private void processWriteCheck(jTPCCTData tdata) throws Exception {
+        application.executeWriteCheck(tdata.write_check);
     }
 
 //    private long randomInt(long min, long max) {

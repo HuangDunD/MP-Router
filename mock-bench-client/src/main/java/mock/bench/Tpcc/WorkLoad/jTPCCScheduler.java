@@ -113,10 +113,16 @@ public class jTPCCScheduler implements Runnable {
             case jTPCCTData.TT_ORDER_STATUS:
             case jTPCCTData.TT_STOCK_LEVEL:
             case jTPCCTData.TT_DELIVERY:
-              current_trans_count++;
-              break;
+            case jTPCCTData.TT_AMALGAMATE:
+            case jTPCCTData.TT_DEPOSIT_CHECKING:
+            case jTPCCTData.TT_SEND_PAYMENT:
+            case jTPCCTData.TT_TRANSACT_SAVINGS:
+            case jTPCCTData.TT_WRITE_CHECK:
+                current_trans_count++;
+                break;
+
             default:
-              break;
+                break;
           }
           break;
 

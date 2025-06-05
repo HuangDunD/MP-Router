@@ -77,7 +77,7 @@ elif [ "$Benchmark_Type" = "smallbank" ]; then
     smallbankOPTS="${smallbankOPTS} -Djava.security.egd=file:/dev/./urandom"
 
     java -cp "./:../MockBenchSQL.jar:../lib/*" $smallbankOPTS mock.bench.Tpcc.DataLoad.SmallBankLoader
-    echo "java -cp "./:../MockBenchSQL.jar:../lib/*" $smallbankOPTS mock.bench.Tpcc.DataLoad.SmallBankLoader"
+#    echo "java -cp "./:../MockBenchSQL.jar:../lib/*" $smallbankOPTS mock.bench.Tpcc.DataLoad.SmallBankLoader"
 else
     echo "Benchmark Type is not tpcc or smallbank, exiting"
     exit 1

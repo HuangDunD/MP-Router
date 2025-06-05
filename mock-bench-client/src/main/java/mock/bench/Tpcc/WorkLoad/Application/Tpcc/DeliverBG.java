@@ -1,4 +1,4 @@
-package mock.bench.Tpcc.WorkLoad.Application;
+package mock.bench.Tpcc.WorkLoad.Application.Tpcc;
 
 import mock.bench.Tpcc.Tool.jTPCCRandom;
 import mock.bench.Tpcc.WorkLoad.jTPCCTData;
