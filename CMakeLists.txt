@@ -94,8 +94,6 @@ include_directories(./
 set(CONFIG_SRC config.cc)
 add_library(global STATIC ${CONFIG_SRC})
 
-add_subdirectory(thirdparty)
-
 add_subdirectory(core)
 
 add_subdirectory(serve)

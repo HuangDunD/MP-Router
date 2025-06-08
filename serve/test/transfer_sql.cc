@@ -36,23 +36,26 @@ int main(int argc, char *argv[]) {
 
     // --- Load Database Connection Info ---
     std::cout << "Loading database connection info..." << std::endl;
-    std::string compute_node_config_path = "../../../config/compute_node_config.json";
-    auto compute_node_config = JsonConfig::load_file(compute_node_config_path);
-    auto compute_node_list = compute_node_config.get("remote_compute_nodes");
-    auto compute_node_count = (int) compute_node_list.get("remote_compute_node_count").get_int64();
-    for (int i = 0; i < compute_node_count; i++) {
-        auto ip = compute_node_list.get("remote_compute_node_ips").get(i).get_str();
-        auto port = (int) compute_node_list.get("remote_compute_node_ports").get(i).get_int64();
-        auto username = compute_node_list.get("remote_compute_node_usernames").get(i).get_str();
-        auto password = compute_node_list.get("remote_compute_node_passwords").get(i).get_str();
-        auto dbname = compute_node_list.get("remote_compute_node_dbnames").get(i).get_str();
-        DBConnection.push_back(
-            "host=" + ip +
-            " port=" + std::to_string(port) +
-            " user=" + username +
-            " password=" + password +
-            " dbname=" + dbname);
-    }
+    // std::string compute_node_config_path = "../../../config/compute_node_config.json";
+    // auto compute_node_config = JsonConfig::load_file(compute_node_config_path);
+    // auto compute_node_list = compute_node_config.get("remote_compute_nodes");
+    // auto compute_node_count = (int) compute_node_list.get("remote_compute_node_count").get_int64();
+    // for (int i = 0; i < compute_node_count; i++) {
+    //     auto ip = compute_node_list.get("remote_compute_node_ips").get(i).get_str();
+    //     auto port = (int) compute_node_list.get("remote_compute_node_ports").get(i).get_int64();
+    //     auto username = compute_node_list.get("remote_compute_node_usernames").get(i).get_str();
+    //     auto password = compute_node_list.get("remote_compute_node_passwords").get(i).get_str();
+    //     auto dbname = compute_node_list.get("remote_compute_node_dbnames").get(i).get_str();
+    //     DBConnection.push_back(
+    //         "host=" + ip +
+    //         " port=" + std::to_string(port) +
+    //         " user=" + username +
+    //         " password=" + password +
+    //         " dbname=" + dbname);
+    // }
+
+    DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=test_tpcc");
+    DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=test_tpcc");
     
     pqxx::connection *conn0 = nullptr;
     pqxx::connection *conn1 = nullptr;

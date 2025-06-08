@@ -7,7 +7,7 @@
         "id": 10,
         "name": "c_w_id",
         "is_affinity": true,
-        "REGION_SIZE": 1
+        "REGION_SIZE": 50
       },
       {
         "id": 11,
@@ -31,7 +31,7 @@
         "id": 13,
         "name": "d_w_id",
         "is_affinity": true,
-        "REGION_SIZE": 1
+        "REGION_SIZE": 50
       },
       {
         "id": 14,
@@ -53,7 +53,7 @@
       {
         "id": 15,
         "name": "i_id",
-        "is_affinity": true,
+        "is_affinity": false,
         "REGION_SIZE": 1000
       }
     ]
@@ -66,7 +66,7 @@
         "id": 18,
         "name": "no_w_id",
         "is_affinity": true,
-        "REGION_SIZE": 1
+        "REGION_SIZE": 50
       },
       {
         "id": 19,
@@ -96,7 +96,7 @@
         "id": 22,
         "name": "o_w_id",
         "is_affinity": true,
-        "REGION_SIZE": 1
+        "REGION_SIZE": 50
       },
       {
         "id": 23,
@@ -120,7 +120,7 @@
         "id": 25,
         "name": "ol_w_id",
         "is_affinity": true,
-        "REGION_SIZE": 1
+        "REGION_SIZE": 50
       },
       {
         "id": 26,
@@ -144,7 +144,7 @@
         "id": 16,
         "name": "s_w_id",
         "is_affinity": true,
-        "REGION_SIZE": 1
+        "REGION_SIZE": 50
       },
       {
         "id": 17,
@@ -162,7 +162,7 @@
         "id": 9,
         "name": "w_id",
         "is_affinity": true,
-        "REGION_SIZE": 1
+        "REGION_SIZE": 50
       }
     ]
   }

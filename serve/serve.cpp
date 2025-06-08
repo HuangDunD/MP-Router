@@ -257,6 +257,13 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) 
         assert(perfect_par_id <= TPCC_WAREHOUSE_NUM); // w 从 1 开始
         int w_per_node = TPCC_WAREHOUSE_NUM / ComputeNodeCount;
         router_node = (perfect_par_id-1) / w_per_node;
+    } else if (SYSTEM_MODE == 4) {
+        // debug
+        if((((perfect_par_id -1)) / 10) % 2 == 0) {
+            router_node = 0;
+        } else {
+            router_node = 1;
+        }
     }
     else {
         log_ref.error("Invalid SYSTEM_MODE: " + std::to_string(SYSTEM_MODE));
@@ -367,6 +374,8 @@ int main(int argc, char *argv[]) {
         }
         system_value = 3;
         TPCC_WAREHOUSE_NUM = std::stoi(argv[2]);
+    } else if (system_name.find("debug") != std::string::npos) {
+        system_value = 4;
     } else {
         std::cerr << "Invalid system name." << std::endl;
         return 0;

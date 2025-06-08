@@ -151,7 +151,7 @@ bool RegionProcessor::processTPCH(const std::string &data, const BmSql::Meta &bm
                     logger_.warning("[region] blk=" + std::to_string(i + 1) +
                                     +" no_affinity tableID = " + std::to_string(current_sql_info.tableIDs[0]));
                 } else {
-                    auto inner_key = current_sql_info.keyVector[ser_num] / bmsqlMeta.getRegionSizeByColumnId(
+                    auto inner_key = (current_sql_info.keyVector[ser_num] - 1) / bmsqlMeta.getRegionSizeByColumnId(
                                          current_sql_info.columnIDs[ser_num]);
 
                     Region current_region(current_sql_info.tableIDs[0], inner_key);

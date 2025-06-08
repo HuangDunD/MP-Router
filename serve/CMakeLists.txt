@@ -12,7 +12,7 @@ set(SERVER_SRC
 
 add_executable(serve ${SERVER_SRC})
 add_executable(offline_analyzer offline_analyze.cc)
-add_executable(CREATE_TABLE create_table.cc)
+add_executable(create_table create_table.cc)
 
 # Link libraries to 'serve'
 target_link_libraries(serve PRIVATE # Use PRIVATE or PUBLIC as appropriate
@@ -35,7 +35,7 @@ target_link_libraries(offline_analyzer PRIVATE # Use PRIVATE or PUBLIC
         pgport
 )
 
-target_link_libraries(CREATE_TABLE PRIVATE # Use PRIVATE or PUBLIC
+target_link_libraries(create_table PRIVATE # Use PRIVATE or PUBLIC
         global
         ${PQXX_LIBRARY}
         ${PQ_LIBRARY}
