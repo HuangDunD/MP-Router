@@ -74,13 +74,32 @@
             ]
         },
         {
-            "name": "(gdb)offline_analyze",
+            "name": "(gdb)smallbank_test",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/serve/offline_analyzer",
+            "program": "${workspaceFolder}/build/serve/test/smallbank_test",
             "args": [],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/build/serve/",
+            "cwd": "${workspaceFolder}/build/serve/test/",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "(gdb)btree_test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/serve/test/btree_search",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build/serve/test/",
             "environment": [],
             "externalConsole": false,
             "MIMode": "gdb",

@@ -12,3 +12,6 @@ target_link_libraries(pageinspect_test global ${METIS_LIBRARY} ${GKLIB_LIBRARY} 
 
 add_executable(smallbank_test smallbank.cc)
 target_link_libraries(smallbank_test global ${METIS_LIBRARY} ${GKLIB_LIBRARY} ${PQXX_LIBRARY} ${PQ_LIBRARY} pgcommon pgport)
+
+add_executable(btree_search btree_search.cc)
+target_link_libraries(btree_search global ${METIS_LIBRARY} ${GKLIB_LIBRARY} ${PQXX_LIBRARY} ${PQ_LIBRARY} pgcommon pgport)
