@@ -78,7 +78,15 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/serve/test/smallbank_test",
-            "args": [],
+            "args": [
+                "--access-pattern",
+                "2",
+                "--hotspot-fraction",
+                "0.01",
+                "--account-count",
+                "500000",
+                "--enable-btree-thread"
+            ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/build/serve/test/",
             "environment": [],
