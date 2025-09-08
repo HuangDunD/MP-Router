@@ -35,7 +35,7 @@ int main() {
     BtreeIndex checking_btree_index("idx_checking_id");
     checking_btree_index.read_btree_meta(conn0);
 
-    checking_btree_index.read_btree_node_from_db(checking_btree_index.root_page_id, conn0);
+    checking_btree_index.read_btree_node_from_db(checking_btree_index.get_root_page_id(), conn0);
 
     checking_btree_index.read_all_internal_nodes(conn0);
 

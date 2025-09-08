@@ -29,3 +29,5 @@ using timestamp_t = uint64_t; // Timestamp type
 #define MAX_DB_TABLE_NUM 15      // Max DB tables
 
 #define LOG_FILE_NAME "LOG_FILE"   
+
+#define kInvalidPageId -1

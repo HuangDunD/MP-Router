@@ -11,8 +11,10 @@
 #include <cmath>
 #include <random>
 
+#include "smallbank.h"
 #include "common.h"
 #include "btree_search.h"
+#include "smart_router.h"
 
 std::vector<std::string> DBConnection;
 auto start = std::chrono::high_resolution_clock::now();
@@ -36,6 +38,10 @@ std::unordered_map<itemkey_t, page_id_t> savings_page_map;
 std::unordered_map<itemkey_t, page_id_t> checking_page_map;
 std::atomic<int> change_page_cnt = 0;
 std::atomic<int> page_update_cnt = 0;
+
+SmartRouter* smart_router = nullptr;
+
+thread_local std::vector<pqxx::connection*> thread_conns_vec;
 
 // Zipfian distribution generator
 class ZipfianGenerator {
@@ -269,12 +275,17 @@ void run_smallbank_txns() {
     // You would implement the logic to run transactions against the smallbank database here
     // For example, you could create threads that perform various operations like deposits, withdrawals, etc.
     // Update exe_count as transactions are executed
-    auto run_conn0 = new pqxx::connection(DBConnection[0]);
-    auto run_conn1 = new pqxx::connection(DBConnection[1]);
-    if (!run_conn0->is_open() || !run_conn1->is_open())
-    {
-        std::cerr << "Failed to connect to the database." << std::endl;
-        return;
+
+    // init the thread connections
+    thread_conns_vec.clear();
+    for(auto con_str: DBConnection) {
+        auto con = new pqxx::connection(con_str);
+        if(!con->is_open()) {
+            std::cerr << "Failed to connect to database: " << con_str << std::endl;
+            assert(false);
+            exit(-1);
+        }
+        thread_conns_vec.push_back(con);
     }
     
     for (int i = 0; i < try_count; ++i) {
@@ -303,22 +314,22 @@ void run_smallbank_txns() {
                 node_id = rand() % 2; // Fallback to random node if not found
             }
         }
+        else if(system_mode == 3) {
+            assert(smart_router != nullptr);
+            // 查找第0个表的账户所在的页面
+            auto page_id = smart_router->lookup((table_id_t)SmallBankTableType::kCheckingTable, account1, thread_conns_vec);
+        }
 
+        // Create a new transaction
         pqxx::work* txn = nullptr;
-        // check whether the connection is broken
-        while (!run_conn0->is_open() || !run_conn1->is_open())
-        {
+        auto txn_con = thread_conns_vec[node_id];
+        while (!txn_con->is_open()){
             std::cerr << "Connection is broken, reconnecting..." << std::endl;
-            delete run_conn0;
-            delete run_conn1;
-            run_conn0 = new pqxx::connection(DBConnection[0]);
-            run_conn1 = new pqxx::connection(DBConnection[1]);
+            delete txn_con;
+            txn_con = new pqxx::connection(DBConnection[node_id]);
+            thread_conns_vec[node_id] = txn_con;
         }
-        if (node_id == 0) {
-            txn = new pqxx::work(*run_conn0);
-        } else {
-            txn = new pqxx::work(*run_conn1);
-        }
+        txn = new pqxx::work(*txn_con);
 
         try {  
             switch(txn_type) {
@@ -425,56 +436,6 @@ void run_smallbank_txns() {
     }
     std::cout << "Finished running smallbank transactions." << std::endl;
 
-}
-
-void btree_background_thread(int btree_read_mode = 0, int frequency = 5) {
-    std::cout << "Starting B-tree background thread..." << std::endl;
-    std::cout << "Read mode: " << btree_read_mode << ", Frequency: " << frequency << " seconds" << std::endl;
-    auto run_conn0 = new pqxx::connection(DBConnection[0]);
-    auto run_conn1 = new pqxx::connection(DBConnection[1]);
-    if (!run_conn0->is_open() || !run_conn1->is_open())
-    {
-        std::cerr << "Failed to connect to the database." << std::endl;
-        return;
-    }
-
-    BtreeIndex btree_index_checking("idx_checking_id");
-    BtreeIndex btree_index_savings("idx_savings_id");
-
-    // Read B-tree metadata
-    btree_index_checking.read_btree_meta(run_conn0);
-    btree_index_savings.read_btree_meta(run_conn0);
-
-    // Read B-tree root nodes
-    btree_index_checking.read_btree_node_from_db(btree_index_checking.root_page_id, run_conn0);
-    btree_index_savings.read_btree_node_from_db(btree_index_savings.root_page_id, run_conn0);
-
-    // Read B-tree internal nodes
-    btree_index_checking.read_all_internal_nodes(run_conn0);
-    btree_index_savings.read_all_internal_nodes(run_conn0);
-
-    // 每隔指定秒数检查一次 B-tree 索引
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(frequency));
-        std::cout << "Checking B-tree index for checking..." << std::endl;
-        pqxx::connection* conn = nullptr;
-        if(btree_read_mode == 0) {
-            conn = run_conn0; // Use the first connection for reading
-        } else {
-            conn = rand() % 2 == 0 ? run_conn0 : run_conn1; // Randomly select a connection
-        }
-        // Read B-tree metadata
-        btree_index_checking.read_btree_meta(conn);
-        btree_index_savings.read_btree_meta(conn);
-
-        btree_index_checking.read_btree_node_from_db(btree_index_checking.root_page_id, conn);
-        btree_index_savings.read_btree_node_from_db(btree_index_savings.root_page_id, conn);
-
-        // Read B-tree internal nodes
-        btree_index_checking.read_all_internal_nodes(conn);
-        btree_index_savings.read_all_internal_nodes(conn);
-        std::cout << "B-tree index for checking is up to date." << std::endl;
-    }
 }
 
 void signal_handler(int signum) {
@@ -672,11 +633,11 @@ int main(int argc, char *argv[]) {
     // --- Load Database Connection Info ---
     std::cout << "Loading database connection info..." << std::endl;
 
-    DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
-    DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
     
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
 
     pqxx::connection *conn0 = nullptr;
     pqxx::connection *conn1 = nullptr;
@@ -707,16 +668,12 @@ int main(int argc, char *argv[]) {
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
-    // Create a Background B-tree index reading thread (if enabled)
-    std::thread btree_thread;
-    if (enable_btree_thread) {
-        std::cout << "Creating B-tree background thread..." << std::endl;
-        btree_thread = std::thread(btree_background_thread, read_btree_mode, read_frequency);
-        btree_thread.detach(); // Detach the thread to run in the background
-    } else {
-        std::cout << "B-tree background thread is disabled" << std::endl;
-    }
+    // Create a BtreeService
+    BtreeIndexService *index_service = new BtreeIndexService(DBConnection, {"idx_checking_id", "idx_savings_id"}, read_btree_mode, read_frequency);
 
+    SmartRouter::Config cfg{};
+    smart_router = new SmartRouter(cfg, index_service);
+    
     // Create a performance snapshot
     int start_snapshot_id = create_perf_kwr_snapshot(conn0);
 
@@ -727,7 +684,7 @@ int main(int argc, char *argv[]) {
 
     std::vector<std::thread> threads;
     const int num_threads = 16;  // Number of transaction threads
-    // Start the transaction threads
+    // !Start the transaction threads
     for(int i = 0; i < num_threads; i++) {
         threads.emplace_back(run_smallbank_txns);
     }

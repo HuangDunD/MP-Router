@@ -72,14 +72,22 @@ public:
 }; 
 
 class BtreeIndex {
-public:
+friend class BtreeIndexService;
+private:
     std::mutex index_mutex; // Mutex for thread safety
     std::string index_name; // Name of the B-tree index
     int root_page_id; // Page ID of the root node
     int level = 0; // Level of the B-tree
     std::unordered_map<int, BtreeNode*> nodes; // Map of page IDs to B-tree nodes
+
+public:
     BtreeIndex(const std::string &name) : index_name(name), root_page_id(-1) {}
 
+    page_id_t get_root_page_id() {
+        std::lock_guard<std::mutex> lock(index_mutex);
+        return root_page_id;
+    }
+    
     BtreeNode* add_or_update_node(int page_id, BtreeNodeType node_type) {
         std::lock_guard<std::mutex> lock(index_mutex); // Ensure thread safety
         auto it = nodes.find(page_id);
@@ -238,7 +246,7 @@ public:
         
         // 没有找到键值
         std::cout << "Key " << key << " not found in B+ tree" << std::endl;
-        return -1;
+        return kInvalidPageId;
     }
     
     // 动态查找, 具体来说是指B+树可能会发生变化, 即当前数据库可能会进行UPDATE或INSERT操作,
@@ -322,4 +330,65 @@ private:
         }
         std::cout << "=========================" << std::endl;
     }
+};
+
+class BtreeIndexService {
+public:
+    BtreeIndexService(std::vector<std::string> conn, std::vector<std::string> index_names, int btree_read_mode = 0, int frequency = 5) {
+        for (const auto& index_name : index_names) {
+            std::vector<pqxx::connection*> connections_;
+            // Initialize connections and table name
+            for (const auto& conn_str : conn) {
+                auto run_conn = new pqxx::connection(conn_str);
+                if (!run_conn->is_open()) {
+                    std::cerr << "Failed to connect to the database." << std::endl;
+                    return;
+                }
+                connections_.push_back(run_conn);
+            }
+            auto btree_index = new BtreeIndex(index_name);
+            btree_index_vec.push_back(btree_index);
+            std::cout << "Starting B-tree background thread..." << std::endl;
+            std::cout << "Read mode: " << btree_read_mode << ", Frequency: " << frequency << " seconds" << std::endl;
+
+            // Read B-tree metadata
+            btree_index->read_btree_meta(connections_[0]);
+            // Read B-tree root nodes
+            btree_index->read_btree_node_from_db(btree_index->root_page_id, connections_[0]);
+            // Read B-tree internal nodes
+            btree_index->read_all_internal_nodes(connections_[0]);
+            // Start background thread to periodically read B-tree index
+            std::thread btree_background_thread([this, btree_read_mode, frequency, btree_index, connections_]() {
+                while (true) {
+                    std::this_thread::sleep_for(std::chrono::seconds(frequency));
+                    std::cout << "Checking B-tree index for checking..." << std::endl;
+                    pqxx::connection* conn = nullptr;
+                    if(btree_read_mode == 0) {
+                        conn = connections_[0]; // Use the first connection for reading
+                    } else {
+                        conn = rand() % 2 == 0 ? connections_[0] : connections_[1]; // Randomly select a connection
+                    }
+                    // Read B-tree metadata
+                    btree_index->read_btree_meta(conn);
+                    // Read B-tree root nodes
+                    btree_index->read_btree_node_from_db(btree_index->root_page_id, conn);
+                    // Read B-tree internal nodes
+                    btree_index->read_all_internal_nodes(conn);
+
+                    std::cout << "B-tree index for checking is up to date." << std::endl;
+                } 
+            });
+            std::string thread_name = "BtreeBG_" + index_name;
+            pthread_setname_np(btree_background_thread.native_handle(), thread_name.c_str());
+            btree_background_thread.detach();
+        }
+    }
+
+    page_id_t get_page_id_by_key(table_id_t table_id, itemkey_t key, pqxx::connection* conn) {
+        //! TODO: 这里默认都使用第一个连接
+        return btree_index_vec[table_id]->search_static(key, conn);
+    }
+
+private:
+    std::vector<BtreeIndex*> btree_index_vec{MAX_DB_TABLE_NUM, nullptr};
 };
