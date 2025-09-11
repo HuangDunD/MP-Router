@@ -40,7 +40,7 @@ struct DataItemKeyHash {
 class SmartRouter {
 public:
     struct Config {
-        std::size_t hot_hash_cap_bytes = 64ULL * 1024ULL * 1024ULL; // 默认 64 MiB，作为环从
+        std::size_t hot_hash_cap_bytes = 64ULL * 1024ULL * 1024ULL; // 默认 64 MB, 作为 hot hash 的内存预算
     };
 
     struct Stats {
@@ -89,11 +89,13 @@ public:
             // hot hash 未命中
             stats_.hot_miss++;
             // 在B+树中查找所在的页面
-            page_id_t btree_page = btree_service_->get_page_id_by_key(table_id, key, thread_conns[0]);
+            BtreeNode* return_node = nullptr;
+            page_id_t btree_page = btree_service_->get_page_id_by_key(table_id, key, thread_conns[0], &return_node);
             if (btree_page != kInvalidPageId){
                 // 更新 hot_key_map
                 insert_or_victim_hot(table_id, key, btree_page);
             }
+            insert_batch_bnode(table_id, return_node);
             return btree_page;
         }
     }
@@ -131,7 +133,8 @@ private:
         entry.lru_it = hot_lru_.begin();
         hot_key_map.emplace(DataItemKey{table_id, key}, std::move(entry));
         stats_.hot_hash_bytes += hot_entry_size_model_();
-        // 超预算则驱逐
+        std::cout << "Inserted hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
+        // 检查是否超预算, 超预算则驱逐
         while (stats_.hot_hash_bytes > cfg_.hot_hash_cap_bytes && !hot_lru_.empty()) {
             DataItemKey evict_key = hot_lru_.back();
             auto evict_it = hot_key_map.find(evict_key);
@@ -141,6 +144,30 @@ private:
                 hot_key_map.erase(evict_it);
             }
             hot_lru_.pop_back();
+            std::cout << "Evicted hot key: (table_id=" << evict_key.table_id << ", key=" << evict_key.key << ")" << std::endl;
+        }
+    }
+
+    inline void insert_batch_bnode(table_id_t table_id, BtreeNode* return_node){
+        if(return_node == nullptr) return;
+        if(stats_.hot_hash_bytes > cfg_.hot_hash_cap_bytes * 0.9) return; // 热点缓存快满了就不插入了
+        // 批量插入B+树的非叶子节点
+        for(size_t i = 0; i < return_node->keys.size(); i++) {
+            itemkey_t key = return_node->keys[i];
+            page_id_t page = return_node->values[i];
+            if(key == -1) continue; // 跳过无效键
+            auto it = hot_key_map.find({table_id, key});
+            if(it == hot_key_map.end()) {
+                // 插入新条目
+                hot_lru_.push_front({table_id, key});
+                HotEntry entry;
+                entry.page = page;
+                entry.freq = 1;
+                entry.lru_it = hot_lru_.begin();
+                hot_key_map.emplace(DataItemKey{table_id, key}, std::move(entry));
+                stats_.hot_hash_bytes += hot_entry_size_model_();
+                std::cout << "Inserted hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
+            }
         }
     }
 

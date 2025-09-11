@@ -105,7 +105,7 @@ public:
         return node;
     }
 
-    void read_btree_node_from_db(const int page_id, pqxx::connection* conn) {
+    void read_btree_node_from_db(const int page_id, pqxx::connection* conn, BtreeNode** return_node = nullptr) {
         // Placeholder for reading B-tree node from the database
         // This function should query the database to populate keys and values
         std::cout << "Reading B-tree node with page_id: " << page_id << " from database." << std::endl;
@@ -120,11 +120,16 @@ public:
             if (!stats_result.empty()) {
                 std::string node_type = stats_result[0]["type"].as<std::string>();
                 if (node_type == "l") {
-                    new_node = add_or_update_node(page_id, BtreeNodeType::LEAF);
+                    // for leaf node, always create a new node, but not maintain in memory
+                    // ! this node will be deleted after reading all items
+                    new_node = new BtreeNode(page_id, BtreeNodeType::LEAF);
                 } else if (node_type == "i") {
                     new_node = add_or_update_node(page_id, BtreeNodeType::INTERNAL);
                 } else if (node_type == "r") {
                     new_node = add_or_update_node(page_id, BtreeNodeType::ROOT);
+                }
+                if (return_node) {
+                    *return_node = new_node;
                 }
             }
             pqxx::result result = txn.exec(items_query);
@@ -148,6 +153,7 @@ public:
         catch (const std::exception &e) {
             std::cerr << "Error while reading B-tree node: " << e.what() << std::endl;
         }
+        txn.commit();
     }
 
     void read_btree_meta(pqxx::connection* conn) {
@@ -188,7 +194,7 @@ public:
             for(const auto& node : internal_nodes) {
                 for (const auto& child_page_id : nodes[node]->values) {
                     // 读取子节点
-                    std::cout << "Reading internal node with page_id: " << child_page_id << std::endl;
+                    // std::cout << "Reading internal node with page_id: " << child_page_id << std::endl;
                     read_btree_node_from_db(child_page_id, conn);
                     next_level_nodes.push_back(child_page_id);
                 }
@@ -201,7 +207,7 @@ public:
     // 静态查找, 具体来说是指B+树不变化, 即当前数据库不进行UPDATE或INSERT操作, 且没有vacuum操作
     // 这种情况下, B+树的结构是固定的, 可以直接进行查找
     // 注意: 这种查找方式假设B+树的结构不会变化
-    page_id_t search_static(int key, pqxx::connection* conn) {
+    page_id_t search_static(int key, pqxx::connection* conn, BtreeNode** return_node = nullptr) {
         assert(root_page_id != -1 && "Root page ID is not set.");
         
         int current_page_id = root_page_id;
@@ -211,7 +217,7 @@ public:
             std::cerr << "Root node not found for page ID: " << root_page_id << std::endl;
             return -1;
         }
-        
+
         // 遍历B+树的不同层次，直到找到叶子节点
         while (current_node->node_type != BtreeNodeType::LEAF) {
             // 在当前内部节点中查找合适的子节点
@@ -223,12 +229,16 @@ public:
             }
             
             // 如果子节点还没有被读取，先从数据库读取
+            BtreeNode* child_node = nullptr;
             if (nodes.find(child_page_id) == nodes.end()) {
-                read_btree_node_from_db(child_page_id, conn);
+                read_btree_node_from_db(child_page_id, conn, &child_node);
             }
-            
+            else {
+                child_node = nodes[child_page_id];
+            }
+
+            current_node = child_node;
             current_page_id = child_page_id;
-            current_node = nodes[current_page_id];
             
             if (!current_node) {
                 std::cerr << "Child node not found for page ID: " << child_page_id << std::endl;
@@ -236,6 +246,10 @@ public:
             }
         }
         
+        if(return_node) {
+            *return_node = current_node;
+        }
+
         // 现在在叶子节点中查找确切的键值
         for (size_t i = 0; i < current_node->keys.size(); ++i) {
             if (current_node->keys[i] == key) {
@@ -334,7 +348,8 @@ private:
 
 class BtreeIndexService {
 public:
-    BtreeIndexService(std::vector<std::string> conn, std::vector<std::string> index_names, int btree_read_mode = 0, int frequency = 5) {
+    BtreeIndexService(std::vector<std::string> conn, std::vector<std::string> index_names, int btree_read_mode = 0, int frequency = 100000000) {
+        int index_id = 0;
         for (const auto& index_name : index_names) {
             std::vector<pqxx::connection*> connections_;
             // Initialize connections and table name
@@ -347,7 +362,7 @@ public:
                 connections_.push_back(run_conn);
             }
             auto btree_index = new BtreeIndex(index_name);
-            btree_index_vec.push_back(btree_index);
+            btree_index_vec[index_id++] = btree_index;
             std::cout << "Starting B-tree background thread..." << std::endl;
             std::cout << "Read mode: " << btree_read_mode << ", Frequency: " << frequency << " seconds" << std::endl;
 
@@ -384,9 +399,10 @@ public:
         }
     }
 
-    page_id_t get_page_id_by_key(table_id_t table_id, itemkey_t key, pqxx::connection* conn) {
+    page_id_t get_page_id_by_key(table_id_t table_id, itemkey_t key, pqxx::connection* conn, BtreeNode** return_node = nullptr) {
         //! TODO: 这里默认都使用第一个连接
-        return btree_index_vec[table_id]->search_static(key, conn);
+        std::cout << "Looking up key: " << key << " in table_id: " << table_id << std::endl;
+        return btree_index_vec[table_id]->search_static(key, conn, return_node);
     }
 
 private:

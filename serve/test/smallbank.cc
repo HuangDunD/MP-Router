@@ -17,6 +17,7 @@
 #include "smart_router.h"
 
 std::vector<std::string> DBConnection;
+std::atomic<uint64_t> tx_id_generator;
 auto start = std::chrono::high_resolution_clock::now();
 int try_count = 2000;
 std::atomic<int> exe_count = 0;
@@ -30,7 +31,7 @@ double hotspot_fraction = 0.2; // Fraction of accounts that are hot
 double hotspot_access_prob = 0.8; // Probability of accessing hot accounts
 int read_btree_mode = 0; // 0: read from conn0, 1: read from random conn
 int read_frequency = 5; // seconds
-bool enable_btree_thread = false; // Whether to enable B-tree background thread
+int worker_threads = 16;
 
 std::mutex savings_mutex;
 std::mutex checking_mutex;
@@ -290,6 +291,7 @@ void run_smallbank_txns() {
     
     for (int i = 0; i < try_count; ++i) {
         exe_count++;
+        tx_id_t tx_id = tx_id_generator++; // global atomic transaction ID
         // Simulate some work
         // Randomly select a transaction type and accounts
         int txn_type = rand() % 3;  // 3 types of transactions
@@ -463,7 +465,6 @@ void print_usage(const char* program_name) {
     std::cout << "  --zipfian-theta <theta>     Zipfian distribution parameter (0.0-1.0) [default: 0.99]" << std::endl;
     std::cout << "  --hotspot-fraction <frac>   Fraction of hot accounts (0.0-1.0) [default: 0.1]" << std::endl;
     std::cout << "  --hotspot-prob <prob>       Probability of accessing hot accounts (0.0-1.0) [default: 0.8]" << std::endl;
-    std::cout << "  --enable-btree-thread       Enable B-tree background monitoring thread [default: disabled]" << std::endl;
     std::cout << "  --btree-read-mode <mode>    B-tree read mode (0=conn0, 1=random) [default: 0]" << std::endl;
     std::cout << "  --btree-frequency <seconds> B-tree refresh frequency in seconds [default: 5]" << std::endl;
     std::cout << "  --account-count <number>    Number of accounts to load [default: 300000]" << std::endl;
@@ -472,7 +473,7 @@ void print_usage(const char* program_name) {
     std::cout << "Examples:" << std::endl;
     std::cout << "  " << program_name << " --system-mode 1 --access-pattern 1 --zipfian-theta 0.95" << std::endl;
     std::cout << "  " << program_name << " --access-pattern 2 --hotspot-fraction 0.2 --hotspot-prob 0.9" << std::endl;
-    std::cout << "  " << program_name << " --system-mode 2 --enable-btree-thread --account-count 100000" << std::endl;
+    std::cout << "  " << program_name << " --system-mode 2 --account-count 100000" << std::endl;
 }
 
 int main(int argc, char *argv[]) {
@@ -554,10 +555,6 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
-        else if (arg == "--enable-btree-thread") {
-            enable_btree_thread = true;
-            std::cout << "B-tree background thread enabled" << std::endl;
-        }
         else if (arg == "--btree-read-mode") {
             if (i + 1 < argc) {
                 read_btree_mode = std::stoi(argv[++i]);
@@ -595,6 +592,20 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--worker-threads") {
+            if (i + 1 < argc) {
+                worker_threads = std::stoi(argv[++i]);
+                if (worker_threads <= 0) {
+                    std::cerr << "Error: Worker threads must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Worker threads set to: " << worker_threads << std::endl;
+            } else {
+                std::cerr << "Error: --worker-threads requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else {
             std::cerr << "Error: Unknown argument " << arg << std::endl;
             print_usage(argv[0]);
@@ -604,7 +615,25 @@ int main(int argc, char *argv[]) {
 
     // Display current configuration
     std::cout << "\n=== Configuration ===" << std::endl;
-    std::cout << "System mode: " << system_mode << std::endl;
+    std::cout << "System mode: " << system_mode << " ----> ";
+    switch (system_mode)
+    {
+    case 0:
+        std::cout << "\033[31m  random router \033[0m" << std::endl; // 标注为红色
+        break;
+    case 1:
+        std::cout << "\033[31m  account hashing router \033[0m" << std::endl;
+        break;
+    case 2:
+        std::cout << "\033[31m  page hashing router \033[0m" << std::endl;
+        break;
+    case 3:
+        std::cout << "\033[31m  smart router \033[0m" << std::endl;
+        break;
+    default:
+        std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
+        return -1;
+    }
     std::cout << "Account count: " << smallbank_account << std::endl;
     
     std::string access_pattern_name;
@@ -623,11 +652,7 @@ int main(int argc, char *argv[]) {
         std::cout << "Hotspot access probability: " << hotspot_access_prob << std::endl;
     }
     
-    std::cout << "B-tree thread enabled: " << (enable_btree_thread ? "Yes" : "No") << std::endl;
-    if (enable_btree_thread) {
-        std::cout << "B-tree read mode: " << read_btree_mode << std::endl;
-        std::cout << "B-tree refresh frequency: " << read_frequency << " seconds" << std::endl;
-    }
+    std::cout << "Worker threads: " << worker_threads << std::endl;
     std::cout << "====================" << std::endl;
     
     // --- Load Database Connection Info ---
@@ -668,11 +693,17 @@ int main(int argc, char *argv[]) {
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
-    // Create a BtreeService
-    BtreeIndexService *index_service = new BtreeIndexService(DBConnection, {"idx_checking_id", "idx_savings_id"}, read_btree_mode, read_frequency);
-
-    SmartRouter::Config cfg{};
-    smart_router = new SmartRouter(cfg, index_service);
+    if(system_mode == 3) {
+        std::cout << "Initializing Smart Router..." << std::endl;
+        // Create a BtreeService
+        BtreeIndexService *index_service = new BtreeIndexService(DBConnection, {"idx_checking_id", "idx_savings_id"}, read_btree_mode, read_frequency);
+        SmartRouter::Config cfg{};
+        smart_router = new SmartRouter(cfg, index_service);
+        std::cout << "Smart Router initialized." << std::endl;
+    }
+    else {
+        std::cout << "Smart Router not used in this system mode." << std::endl;
+    }
     
     // Create a performance snapshot
     int start_snapshot_id = create_perf_kwr_snapshot(conn0);
@@ -683,9 +714,8 @@ int main(int argc, char *argv[]) {
     std::cout << "Starting transaction threads..." << std::endl;
 
     std::vector<std::thread> threads;
-    const int num_threads = 16;  // Number of transaction threads
     // !Start the transaction threads
-    for(int i = 0; i < num_threads; i++) {
+    for(int i = 0; i < worker_threads; i++) {
         threads.emplace_back(run_smallbank_txns);
     }
     // Wait for all threads to complete
@@ -705,14 +735,6 @@ int main(int argc, char *argv[]) {
     std::cout << "Throughput: " << exe_count / s << " transactions per second" << std::endl;
     std::cout << "Page ID changes: " << change_page_cnt << std::endl;
     std::cout << "Page updates: " << page_update_cnt << std::endl;
-    
-    if (enable_btree_thread) {
-        std::cout << "B-tree background thread was running with:" << std::endl;
-        std::cout << "  - Read mode: " << read_btree_mode << std::endl;
-        std::cout << "  - Refresh frequency: " << read_frequency << " seconds" << std::endl;
-    } else {
-        std::cout << "B-tree background thread was disabled" << std::endl;
-    }
 
     // Create a performance snapshot after running transactions
     std::this_thread::sleep_for(std::chrono::seconds(2)); // sleep for a while to ensure all operations are completed

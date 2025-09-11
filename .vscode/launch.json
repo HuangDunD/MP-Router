@@ -84,8 +84,11 @@
                 "--hotspot-fraction",
                 "0.01",
                 "--account-count",
-                "500000",
-                "--enable-btree-thread"
+                "20000",
+                "--system-mode",
+                "3", 
+                "--worker-threads",
+                "1"
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/build/serve/test/",
