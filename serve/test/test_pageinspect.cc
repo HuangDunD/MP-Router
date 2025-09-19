@@ -36,11 +36,16 @@ void load_data(pqxx::connection *conn0) {
     }
 
 
-    const int num_threads = 8;  // Number of worker threads
+    const int num_threads = 16;  // Number of worker threads
     std::vector<std::thread> threads;
     const int chunk_size = data_load_num / num_threads;
 
-    auto worker = [conn0](int start, int end) {
+    auto worker = [](int start, int end) {
+        pqxx::connection* conn00 = new pqxx::connection(DBConnection[0]);
+        if (!conn00->is_open()) {
+            std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+            return -1;
+        }
         for(int i = start; i < end; i++) {
             int id = i + 1;
             int score = i % 100;
@@ -50,7 +55,7 @@ void load_data(pqxx::connection *conn0) {
                                         std::to_string(score) + ", '" +
                                         name + "')";
             try {
-                pqxx::work txn_create(*conn0);
+                pqxx::work txn_create(*conn00);
                 txn_create.exec(insert_data_sql);
                 txn_create.commit();
             } catch (const std::exception &e) {
@@ -69,6 +74,15 @@ void load_data(pqxx::connection *conn0) {
     // Wait for all threads to complete
     for(auto& thread : threads) {
         thread.join();
+    }
+
+    std::string create_index_sql = "CREATE INDEX idx_id ON mvcc_test (id)"; 
+    try {
+        pqxx::work txn(*conn0);
+        txn.exec(create_index_sql);
+        txn.commit();
+    } catch (const std::exception &e) {
+        std::cerr << "Error while creating index: " << e.what() << std::endl;
     }
 
 }
@@ -98,9 +112,12 @@ int main(int argc, char *argv[]) {
     // --- Load Database Connection Info ---
     std::cout << "Loading database connection info..." << std::endl;
 
-    DBConnection.push_back("host=10.12.2.125 port=54322 user=system password=123456 dbname=test_mvcc");
-    DBConnection.push_back("host=10.12.2.127 port=54322 user=system password=123456 dbname=test_mvcc");
+    // DBConnection.push_back("host=10.12.2.125 port=54322 user=system password=123456 dbname=test_mvcc");
+    // DBConnection.push_back("host=10.12.2.127 port=54322 user=system password=123456 dbname=test_mvcc");
     
+    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+
     pqxx::connection *conn0 = nullptr;
     pqxx::connection *conn1 = nullptr;
     try {
@@ -125,11 +142,67 @@ int main(int argc, char *argv[]) {
     }
 
     // Load data into the database if needed
-    load_data(conn0);
+    // load_data(conn0);
     std::cout << "Data loaded successfully." << std::endl;
 
-    // --- Start Transaction Threads ---
+    // --- Start Workers Threads ---
+    // test page inspection speed
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    auto start = std::chrono::high_resolution_clock::now();
+    int ii = 0;
+    // while (ii < try_count) {
+    //     ii++;
+    //     int page_id = rand() % 1000 + 1;
+    //     std::string sql = " " ;
+    //     std::string items_query = "SELECT * FROM bt_page_items('idx_id', " + std::to_string(page_id) + ")";
+    //     std::string stats_query = "SELECT * FROM bt_page_stats('idx_id', " + std::to_string(page_id) + ")";
+
+    //     try {
+    //         pqxx::work txn(*conn0);
+    //         pqxx::result r1 = txn.exec(items_query);
+    //         pqxx::result r2 = txn.exec(stats_query);
+    //         txn.commit();
+    //         exe_count++;
+    //     } catch (const std::exception &e) {
+    //         std::cerr << "Error executing query: " << e.what() << std::endl;
+    //     }
+    // }
+    auto end = std::chrono::high_resolution_clock::now();
+    int ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    std::cout << "Elapsed time for " << try_count << " page inspections: " << ms << " milliseconds" << std::endl;
+    double throughput = (double) try_count / (ms / 1000.0);
+    std::cout << "Throughput: " << throughput << " page inspections per second" << std::endl; 
     
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    auto start2 = std::chrono::high_resolution_clock::now();
+    ii = 0;
+    while (ii < try_count) {
+        ii++;
+        int page_id = rand() % 30000 + 1;
+        std::string sql = " " ;
+        // std::string items_query = "SELECT * FROM heap_page_items(get_raw_page('mvcc_test', " + std::to_string(page_id) + "))";
+        std::string items_query = "SELECT * FROM mvcc_test where id = " + std::to_string(page_id) + " ;" ;
+        // std::string items_query = "SELECT ctid FROM mvcc_test where id = " + std::to_string(page_id) + " ;" ;
+        // std::string items_query = "SELECT * FROM bt_page_items('idx_id', 10) WHERE data = '72 0b 00 00 00 00 00 00' ";
+
+        try {
+            pqxx::work txn(*conn0);
+            pqxx::result r1 = txn.exec(items_query);
+            txn.commit();
+            exe_count++;
+        } catch (const std::exception &e) {
+            std::cerr << "Error executing query: " << e.what() << std::endl;
+        }
+    }
+    auto end2 = std::chrono::high_resolution_clock::now();
+    int ms2 = std::chrono::duration_cast<std::chrono::milliseconds>(end2 - start2).count();
+    std::cout << "Elapsed time for " << try_count << " page inspections: " << ms2 << " milliseconds" << std::endl;
+    double throughput2 = (double) try_count / (ms2 / 1000.0);
+    std::cout << "Throughput: " << throughput2 << " page inspections per second" << std::endl; 
+    // 计算平均每次事务耗时
+    double avg_time = (double) ms2 / try_count;
+    std::cout << "Average time per page inspection: " << avg_time << " milliseconds" << std::endl;
+
     // 关闭连接
     delete conn0;
     delete conn1;
