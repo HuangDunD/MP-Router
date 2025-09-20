@@ -77,6 +77,109 @@ public:
 
     ~SmartRouter() = default; // 使用 = default
 
+    // 可能Update SQL执行之后数据页所在的位置, 根据returning ctid 进行更新key-page映射
+    // 如果key不存在, 则不进行任何操作
+    inline void update_key_page(table_id_t table_id, itemkey_t key, page_id_t new_page) {
+        std::lock_guard<std::mutex> lock(hot_mutex_);
+        auto it = hot_key_map.find({table_id, key});
+        if (it != hot_key_map.end()) {
+            // hot hash 命中，更新 page
+            if(it->second.page != new_page){ // 只有在page变化时才更新
+                it->second.page = new_page;
+                std::cout << "Updated hot key: (table_id=" << table_id << ", key=" << key << ") -> new page " << new_page << std::endl;
+            }
+        }
+    }
+
+    // init key-page mapping when load data
+    inline void initial_key_page(table_id_t table_id, itemkey_t key, page_id_t page) {
+        std::lock_guard<std::mutex> lock(hot_mutex_);
+        auto it = hot_key_map.find({table_id, key});
+        if (it == hot_key_map.end()) {
+            // 插入新条目
+            hot_lru_.push_front({table_id, key});
+            HotEntry entry;
+            entry.page = page;
+            entry.freq = 1;
+            entry.lru_it = hot_lru_.begin();
+            hot_key_map.emplace(DataItemKey{table_id, key}, std::move(entry));
+            stats_.hot_hash_bytes += hot_entry_size_model_();
+            std::cout << "Initialized hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
+            // 检查是否超预算, 超预算则驱逐
+            while (stats_.hot_hash_bytes > cfg_.hot_hash_cap_bytes && !hot_lru_.empty()) {
+                DataItemKey evict_key = hot_lru_.back();
+                auto evict_it = hot_key_map.find(evict_key);
+                if (evict_it != hot_key_map.end()) {
+                    stats_.hot_hash_bytes -= hot_entry_size_model_();
+                    stats_.evict_hot_entries++;
+                    hot_key_map.erase(evict_it);
+                }
+                hot_lru_.pop_back();
+                std::cout << "Evicted hot key: (table_id=" << evict_key.table_id << ", key=" << evict_key.key << ")" <<
+                        std::endl;
+            }
+        }
+    }
+
+    // ******************* METIS ******************
+    // 执行分区操作，返回分区结果
+    struct AffinityResult {
+        bool success = false;
+        int affinity_id = -1;
+        std::string error_message;
+        size_t keys_processed = 0;
+    };
+
+    AffinityResult get_route_primary(std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, std::vector<pqxx::connection *> &thread_conns){
+        AffinityResult result;
+        if (table_ids.size() != keys.size() || table_ids.empty()) {
+            result.error_message = "Mismatched or empty table_ids and keys";
+            return result;
+        }
+
+        std::vector<uint64_t> table_page_id; // 高32位存table_id，低32位存page_id
+        table_page_id.reserve(keys.size());
+        for (size_t i = 0; i < keys.size(); ++i) {
+            page_id_t page = lookup(table_ids[i], keys[i], thread_conns);
+            if (page == kInvalidPageId) {
+                result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
+                                       ", key=" + std::to_string(keys[i]) + ")";
+                continue;
+            }
+            table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | page);
+        }
+
+        try {
+            // 去重优化
+            std::sort(table_page_id.begin(), table_page_id.end());
+            table_page_id.erase(std::unique(table_page_id.begin(), table_page_id.end()), table_page_id.end());
+            result.keys_processed = table_page_id.size();
+            result.affinity_id = metis_.build_internal_graph(table_page_id);
+            result.success = (result.affinity_id >= 0);
+
+            if (!result.success) {
+                result.error_message = "METIS partitioning failed";
+            }
+        }
+        catch (const std::exception &e) {
+            result.error_message = std::string("Exception during partitioning: ") + e.what();
+        }
+        return result;
+    }
+
+    // 设置METIS分区数量
+    void set_partition_count(int count) {
+        if (count > 0) {
+            metis_.init_node_nums(count);
+        }
+    }
+
+private:
+    // 大小模型 — 根据实际结构开销调整
+    static std::size_t hot_entry_size_model_() {
+        return sizeof(HotEntry);
+    }
+
     // 查找 key。若在 hot hash 中找到，立即返回 page。
     // 否则可能查 B+tree 提示（在 .cc 实现），未命中返回 std::nullopt。
     inline page_id_t lookup(table_id_t table_id, itemkey_t key, std::vector<pqxx::connection *> &thread_conns) {
@@ -105,98 +208,7 @@ public:
             return btree_page;
         }
     }
-
-    // 可能Update SQL执行之后数据页所在的位置
-    inline void update_key_page(table_id_t table_id, itemkey_t key, page_id_t new_page) {
-        std::lock_guard<std::mutex> lock(hot_mutex_);
-        auto it = hot_key_map.find({table_id, key});
-        if (it != hot_key_map.end()) {
-            // hot hash 命中，更新 page
-            it->second.page = new_page;
-        }
-    }
-    // METIS 分区相关接口
-    void add_key_for_partition(itemkey_t key) {
-        std::lock_guard<std::mutex> lock(metis_mutex_);
-        metis_keys_.push_back(key);
-    }
-
-
-    // 批量添加键到分区候选列表（更高效）
-    void add_keys_batch(const std::vector<itemkey_t> &keys) {
-        if (keys.empty()) return;
-        std::lock_guard<std::mutex> lock(metis_mutex_);
-        metis_keys_.reserve(metis_keys_.size() + keys.size());
-        metis_keys_.insert(metis_keys_.end(), keys.begin(), keys.end());
-    }
-
-    // 执行分区操作，返回分区结果
-    struct PartitionResult {
-        bool success = false;
-        int partition_id = -1;
-        std::string error_message;
-        size_t keys_processed = 0;
-    };
-
-    PartitionResult execute_partition() {
-        PartitionResult result;
-        std::lock_guard<std::mutex> lock(metis_mutex_);
-
-        if (metis_keys_.empty()) {
-            result.error_message = "No keys available for partitioning";
-            return result;
-        }
-
-        try {
-            // 去重优化
-            std::sort(metis_keys_.begin(), metis_keys_.end());
-            metis_keys_.erase(std::unique(metis_keys_.begin(), metis_keys_.end()), metis_keys_.end());
-
-            result.keys_processed = metis_keys_.size();
-            result.partition_id = metis_.build_internal_graph(metis_keys_);
-            result.success = (result.partition_id >= 0);
-
-            if (!result.success) {
-                result.error_message = "METIS partitioning failed";
-            }
-        } catch (const std::exception &e) {
-            result.error_message = std::string("Exception during partitioning: ") + e.what();
-        }
-
-        return result;
-    }
-
-    // 清空分区键列表
-    void clear_partition_keys() {
-        std::lock_guard<std::mutex> lock(metis_mutex_);
-        metis_keys_.clear();
-        metis_keys_.shrink_to_fit(); // 释放内存
-    }
-
-    // 获取当前待分区键的数量
-    size_t get_pending_keys_count() const {
-        std::lock_guard<std::mutex> lock(metis_mutex_);
-        return metis_keys_.size();
-    }
-
-    // 设置METIS分区数量
-    void set_partition_count(int count) {
-        if (count > 0) {
-            metis_.init_node_nums(count);
-        }
-    }
-
-    // 检查是否需要执行分区（基于键数量阈值）
-    bool should_trigger_partition(size_t threshold = 1000) const {
-        return get_pending_keys_count() >= threshold;
-    }
-
-private:
-    // 大小模型 — 根据实际结构开销调整
-    static std::size_t hot_entry_size_model_() {
-        return sizeof(HotEntry);
-    }
-
+    
     // 插入映射。如果存储满了, 会在预算内驱逐。
     inline void insert_or_victim_hot(table_id_t table_id, itemkey_t key, page_id_t page) {
         // 当前的key一定不会在map中存在
@@ -263,8 +275,6 @@ private:
 
     //for metis
     NewMetis metis_;
-    std::vector<itemkey_t> metis_keys_;
-    mutable std::mutex metis_mutex_; // 用于保护METIS相关操作的互斥锁
 
     // 统计数据
     Stats stats_{};

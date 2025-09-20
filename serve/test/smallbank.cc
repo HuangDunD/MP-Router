@@ -15,6 +15,7 @@
 #include "common.h"
 #include "btree_search.h"
 #include "smart_router.h"
+#include "friend_simulate.h"
 
 std::vector<std::string> DBConnection;
 std::atomic<uint64_t> tx_id_generator;
@@ -33,10 +34,6 @@ int read_btree_mode = 0; // 0: read from conn0, 1: read from random conn
 int read_frequency = 5; // seconds
 int worker_threads = 16;
 
-std::mutex savings_mutex;
-std::mutex checking_mutex;
-std::unordered_map<itemkey_t, page_id_t> savings_page_map;
-std::unordered_map<itemkey_t, page_id_t> checking_page_map;
 std::atomic<int> change_page_cnt = 0;
 std::atomic<int> page_update_cnt = 0;
 
@@ -82,18 +79,19 @@ private:
 
 // Global Zipfian generator
 ZipfianGenerator* zipfian_gen = nullptr;
+std::vector<std::vector<std::pair<int, float>>> user_friend_graph; // 每个用户的朋友图 
 
 // Generate account ID based on access pattern
-int generate_account_id() {
+void generate_account_id(itemkey_t &acc1) {
     switch (access_pattern) {
         case 0: // Uniform distribution
-            return rand() % smallbank_account + 1;
+            acc1 = rand() % smallbank_account + 1;
             
         case 1: // Zipfian distribution
             if (!zipfian_gen) {
                 zipfian_gen = new ZipfianGenerator(smallbank_account, zipfian_theta);
             }
-            return zipfian_gen->next();
+            acc1 = zipfian_gen->next();
             
         case 2: // Hotspot distribution
         {
@@ -102,15 +100,50 @@ int generate_account_id() {
             
             if (r < hotspot_access_prob) {
                 // Access hot accounts (first hotspot_fraction of accounts)
-                return rand() % hot_accounts + 1;
+                acc1 = rand() % hot_accounts + 1;
             } else {
                 // Access cold accounts (remaining accounts)
-                return hot_accounts + rand() % (smallbank_account - hot_accounts) + 1;
+                acc1 = hot_accounts + rand() % (smallbank_account - hot_accounts) + 1;
             }
         }
         
         default:
-            return rand() % smallbank_account + 1;
+            acc1 = rand() % smallbank_account + 1;
+    }
+}
+
+void generate_two_account_ids(itemkey_t &acc1, itemkey_t &acc2) {
+    // 先生成第一个账号
+    generate_account_id(acc1);
+    // 再生成第二个亲和性账号
+    // 生成一个随机小数，决定是否使用亲和性账号
+    double r = (double)rand() / RAND_MAX;
+    if (r < AffinityTxnRatio) {
+        // 使用亲和性账号
+        const auto &friends = user_friend_graph[acc1 - 1]; // acc1
+        if (!friends.empty()) {
+            // 根据朋友的权重选择一个朋友账号
+            double p = (double)rand() / RAND_MAX;
+            double cumulative_prob = 0.0;
+            for (const auto &[friend_id, prob] : friends) {
+                cumulative_prob += prob;
+                if (p <= cumulative_prob) {
+                    acc2 = friend_id + 1; // friend_id 是从0开始的，账号从1开始
+                    return;
+                }
+            }
+            // 如果没有选中任何朋友（理论上不应该发生），则随机选择一个
+            acc2 = friends.back().first + 1;
+        } else {
+            // 如果没有朋友，则随机选择一个账号
+            acc2 = rand() % smallbank_account + 1;
+        }
+    } else {
+        // 不使用亲和性账号，随机选择一个账号
+        // 确保两个账号不相同
+        do {
+            generate_account_id(acc2);
+        } while (acc2 == acc1);
     }
 }
 
@@ -185,11 +218,9 @@ void load_data(pqxx::connection *conn0) {
                     // ctid 为 (page_id, tuple_index) 格式, 这里要把ctid转换为page_id
                     auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
                     int inserted_id = checking_result[0]["id"].as<int>();
-                    std::unique_lock<std::mutex> lock(checking_mutex);
-                    checking_page_map[inserted_id] = page_id; // Store the page ID
-                    // std::cout << "Checking table - ID: " << inserted_id 
-                    //           << ", Physical location (ctid): " << ctid 
-                    //           << ", Page ID: " << page_id << std::endl;
+                    if(smart_router != nullptr){
+                        smart_router->initial_key_page((table_id_t)SmallBankTableType::kCheckingTable, inserted_id, page_id);
+                    }
                 }
                 
                 // 执行savings表插入并获取位置信息
@@ -198,11 +229,9 @@ void load_data(pqxx::connection *conn0) {
                     std::string ctid = savings_result[0]["ctid"].as<std::string>();
                     auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
                     int inserted_id = savings_result[0]["id"].as<int>();
-                    std::unique_lock<std::mutex> lock(savings_mutex);
-                    savings_page_map[inserted_id] = page_id; // Store the page ID
-                    // std::cout << "Savings table - ID: " << inserted_id 
-                    //           << ", Physical location (ctid): " << ctid 
-                    //           << ", Page ID: " << page_id << std::endl;
+                    if(smart_router != nullptr){
+                        smart_router->initial_key_page((table_id_t)SmallBankTableType::kSavingsTable, inserted_id, page_id);
+                    }
                 }
                 
                 txn_create.commit();
@@ -212,12 +241,22 @@ void load_data(pqxx::connection *conn0) {
         }
     }; 
 
+    auto friend_worker = [](){
+        // 生成用户朋友关系
+        int num_users = smallbank_account;
+        generate_friend_simulate_graph(user_friend_graph, num_users);
+        std::cout << "Generated friend graph for " << num_users << " users." << std::endl;
+    };
+
     // Create and start threads
     for(int i = 0; i < num_threads; i++) {
         int start = i * chunk_size;
         int end = (i == num_threads - 1) ? smallbank_account : (i + 1) * chunk_size;
         threads.emplace_back(worker, start, end);
     }
+    std::thread friend_thread(friend_worker);
+    // Wait for friend thread to complete
+    friend_thread.join();
     // Wait for all threads to complete
     for(auto& thread : threads) {
         thread.join();
@@ -270,6 +309,85 @@ void generate_perf_kwr_report(pqxx::connection *conn0, int start_snapshot_id, in
     }
 }
 
+void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int &node_id) {
+    if(system_mode == 0) {
+        node_id = rand() % 2; // Randomly select node ID for system mode 0
+    }
+    else if(system_mode == 1){
+        if(txn_type == 0 || txn_type == 1) {
+            int node1 = account1 / (smallbank_account / ComputeNodeCount); // Range partitioning
+            int node2 = account2 / (smallbank_account / ComputeNodeCount); // Range partitioning
+            if(node1 == node2) {
+                node_id = node1;
+            }
+            else {
+                // randomly pick one
+                node_id = (rand() % 2 == 0) ? node1 : node2;
+            }
+        }
+        else {
+            node_id = account1 / (smallbank_account / ComputeNodeCount); // Range partitioning
+        }
+    }
+    else if(system_mode == 2) {
+        // get page_id from checking_page_map
+        node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
+    }
+    else if(system_mode == 3) {
+        assert(smart_router != nullptr);
+        // 查找第0个表的账户所在的页面
+        static const std::vector<table_id_t> table_ids_arr[] = {
+            // txn_type == 0
+            {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable, (table_id_t)SmallBankTableType::kCheckingTable},
+            // txn_type == 1
+            {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kCheckingTable},
+            // txn_type == 2
+            {(table_id_t)SmallBankTableType::kCheckingTable},
+            // txn_type == 3
+            {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable},
+            // txn_type == 4
+            {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable},
+            // txn_type == 5
+            {(table_id_t)SmallBankTableType::kSavingsTable}
+        };
+
+        // keys 只和 account1/account2有关，不能静态化，但可以用局部变量，每次只构造一份
+        std::vector<itemkey_t> keys;
+        switch(txn_type) {
+            case 0:
+                keys = {account1, account1, account2};
+                break;
+            case 1:
+                keys = {account1, account2};
+                break;
+            case 2:
+                keys = {account1};
+                break;
+            case 3:
+            case 4:
+                keys = {account1, account1};
+                break;
+            case 5:
+                keys = {account1};
+                break;
+            default:
+                break;
+        }
+        // table_ids 静态化后只需引用
+        const std::vector<table_id_t>& table_ids = table_ids_arr[txn_type < 6 ? txn_type : 0];
+        SmartRouter::AffinityResult result = smart_router->get_route_primary(const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
+        if(result.success) {
+            assert(result.affinity_id >= 0 && result.affinity_id < ComputeNodeCount);
+            node_id = result.affinity_id; 
+        }
+        else {
+            // fallback to random
+            node_id = rand() % ComputeNodeCount;
+            std::cerr << "Warning: SmartRouter get_route_primary failed: " << result.error_message << std::endl;
+        }
+    }
+}
+
 void run_smallbank_txns() {
     std::cout << "Running smallbank transactions..." << std::endl;
     // This is a placeholder for actual transaction logic
@@ -294,33 +412,17 @@ void run_smallbank_txns() {
         tx_id_t tx_id = tx_id_generator++; // global atomic transaction ID
         // Simulate some work
         // Randomly select a transaction type and accounts
-        int txn_type = rand() % 3;  // 3 types of transactions
-        int account1 = generate_account_id();
-        int account2 = generate_account_id();
+        int txn_type = rand() % 6;  // 6 types of transactions
+        
+        itemkey_t account1, account2;
+        if(txn_type == 0 || txn_type == 1) { // TxAmagamate or TxSendPayment
+            generate_two_account_ids(account1, account2);
+        } else {
+            generate_account_id(account1);
+        }
         int node_id = 0; // Default node ID
-        if(system_mode == 0) {
-            node_id = rand() % 2; // Randomly select node ID for system mode 0
-        }
-        else if(system_mode == 1){
-            node_id = account1 <= (smallbank_account / 2) ? 0 : 1; // Even accounts go to node 0, odd accounts go to node 1
-        }
-        else if(system_mode == 2) {
-            // get page_id from checking_page_map
-            std::unique_lock<std::mutex> lock(checking_mutex);
-            auto it = checking_page_map.find(account1);
-            if (it != checking_page_map.end()) {
-                page_id_t page_id = it->second;
-                node_id = (page_id % 2 == 0) ? 0 : 1; // Even page_id goes to node 0, odd page_id goes to node 1
-            } 
-            else {
-                node_id = rand() % 2; // Fallback to random node if not found
-            }
-        }
-        else if(system_mode == 3) {
-            assert(smart_router != nullptr);
-            // 查找第0个表的账户所在的页面
-            auto page_id = smart_router->lookup((table_id_t)SmallBankTableType::kCheckingTable, account1, thread_conns_vec);
-        }
+        
+        decide_route_node(account1, account2, txn_type, node_id);
 
         // Create a new transaction
         pqxx::work* txn = nullptr;
@@ -335,7 +437,47 @@ void run_smallbank_txns() {
 
         try {  
             switch(txn_type) {
-                case 0: {  // Balance transfer
+                case 0: { // TxAmagamate
+                    int checking_balance, savings_balance;
+                    pqxx::result result1 = txn->exec("UPDATE checking SET balance = 0 WHERE id = " + 
+                            std::to_string(account1) + " RETURNING ctid, id, balance");
+                    if (!result1.empty()) {
+                        std::string ctid = result1[0]["ctid"].as<std::string>();
+                        int id = result1[0]["id"].as<int>();
+                        assert(id == account1);
+                        checking_balance = result1[0]["balance"].as<int>();
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                        if(system_mode == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
+                        }
+                    }
+                    pqxx::result result2 = txn->exec("UPDATE savings SET balance = 0 WHERE id = " + 
+                            std::to_string(account1) + " RETURNING ctid, id, balance");
+                    if (!result2.empty()) {
+                        std::string ctid = result2[0]["ctid"].as<std::string>();
+                        int id = result2[0]["id"].as<int>();
+                        int balance = result2[0]["balance"].as<int>();
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                        savings_balance = result2[0]["balance"].as<int>();
+                        if(system_mode == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id);
+                        }
+                    }
+                    int total = checking_balance + savings_balance;
+                    pqxx::result result3 = txn->exec("UPDATE checking SET balance = " + 
+                            std::to_string(total) + " WHERE id = " + std::to_string(account2) + 
+                            " RETURNING ctid, id, balance");
+                    if (!result3.empty()) {
+                        std::string ctid = result3[0]["ctid"].as<std::string>();
+                        int id = result3[0]["id"].as<int>();
+                        int balance = result3[0]["balance"].as<int>();
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                        if(system_mode == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
+                        }
+                    }
+                }
+                case 1: {  // TxSendPayment
                     // 第一次更新：减少余额并获取位置信息
                     pqxx::result result1 = txn->exec("UPDATE checking SET balance = balance - 10 WHERE id = " + 
                             std::to_string(account1) + " RETURNING ctid, id, balance");
@@ -345,18 +487,9 @@ void run_smallbank_txns() {
                         int balance = result1[0]["balance"].as<int>();
                         // get and update page_id
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        std::unique_lock<std::mutex> lock(checking_mutex);
-                        // 检查page_id 是否变化
-                        page_id_t old_page_id = checking_page_map[id];
-                        if(old_page_id != page_id) {
-                            // 如果page_id发生变化，记录变化
-                            change_page_cnt++;
-                            checking_page_map[id] = page_id; // Update the page ID
-                            std::cout << "Page ID changed for ID: " << id 
-                                      << ", Old Page ID: " << old_page_id 
-                                      << ", New Page ID: " << page_id << std::endl;
+                        if(system_mode == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
                         }
-                        page_update_cnt++;
                     }
                     
                     // 第二次更新：增加余额并获取位置信息
@@ -367,22 +500,13 @@ void run_smallbank_txns() {
                         int id = result2[0]["id"].as<int>();
                         int balance = result2[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        std::unique_lock<std::mutex> lock(checking_mutex);
-                        // 检查page_id 是否变化
-                        page_id_t old_page_id = checking_page_map[id];
-                        if(old_page_id != page_id) {
-                            // 如果page_id发生变化，记录变化
-                            change_page_cnt++;
-                            checking_page_map[id] = page_id; // Update the page ID
-                            std::cout << "Page ID changed for ID: " << id 
-                                      << ", Old Page ID: " << old_page_id 
-                                      << ", New Page ID: " << page_id << std::endl;
+                        if(system_mode == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
                         }
-                        page_update_cnt++;
                     }
                     break;
                 }
-                case 1: {  // Deposit check
+                case 2: {  // TxDepositChecking
                     pqxx::result result = txn->exec("UPDATE checking SET balance = balance + 100 WHERE id = " + 
                             std::to_string(account1) + " RETURNING ctid, id, balance");
                     if (!result.empty()) {
@@ -390,41 +514,72 @@ void run_smallbank_txns() {
                         int id = result[0]["id"].as<int>();
                         int balance = result[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        std::unique_lock<std::mutex> lock(checking_mutex);
-                        // 检查page_id 是否变化
-                        page_id_t old_page_id = checking_page_map[id];
-                        if(old_page_id != page_id) {
-                            // 如果page_id发生变化，记录变化
-                            change_page_cnt++;
-                            checking_page_map[id] = page_id; // Update the page ID
-                            std::cout << "Page ID changed for ID: " << id 
-                                      << ", Old Page ID: " << old_page_id 
-                                      << ", New Page ID: " << page_id << std::endl;
+                        if(system_mode == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
                         }
-                        page_update_cnt++;
                     }
                     break;
                 }
-                case 2: {  // Write check
-                    pqxx::result result = txn->exec("UPDATE savings SET balance = balance - 50 WHERE id = " + 
+                case 3: {  // TxWriteCheck
+                    pqxx::result result = txn->exec("Select balance, ctid, id FROM savings WHERE id = " + 
+                            std::to_string(account1));
+                    pqxx::result result2 = txn->exec("Update checking SET balance = balance - 50 WHERE id = " + 
+                            std::to_string(account1) + " RETURNING ctid, id, balance");
+                    if (!result.empty()) {
+                        int balance = result[0]["balance"].as<int>();
+                        std::string ctid = result[0]["ctid"].as<std::string>();
+                        int id = result[0]["id"].as<int>();
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                        if(system_mode == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id);
+                        }
+                    }
+                    if (!result2.empty()) {
+                        std::string ctid = result2[0]["ctid"].as<std::string>();
+                        int id = result2[0]["id"].as<int>();
+                        int balance = result2[0]["balance"].as<int>();
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                        if(system_mode == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id);
+                        }
+                    }
+                    break;
+                }
+                case 4: { // TxBalance 
+                    pqxx::result result = txn->exec("SELECT balance FROM checking WHERE id = " + 
+                            std::to_string(account1) + " RETURNING ctid, id, balance");
+                    pqxx::result result2 = txn->exec("SELECT balance FROM savings WHERE id = " + 
                             std::to_string(account1) + " RETURNING ctid, id, balance");
                     if (!result.empty()) {
                         std::string ctid = result[0]["ctid"].as<std::string>();
                         int id = result[0]["id"].as<int>();
                         int balance = result[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        std::unique_lock<std::mutex> lock(savings_mutex);
-                        // 检查page_id 是否变化
-                        page_id_t old_page_id = savings_page_map[id];
-                        if(old_page_id != page_id) {
-                            // 如果page_id发生变化，记录变化
-                            change_page_cnt++;
-                            savings_page_map[id] = page_id; // Update the page ID
-                            std::cout << "Page ID changed for ID: " << id 
-                                      << ", Old Page ID: " << old_page_id 
-                                      << ", New Page ID: " << page_id << std::endl;
+                        if(system_mode == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
                         }
-                        page_update_cnt++;
+                    } 
+                    if (!result2.empty()) {
+                        std::string ctid = result2[0]["ctid"].as<std::string>();
+                        int id = result2[0]["id"].as<int>();
+                        int balance = result2[0]["balance"].as<int>();
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                        if(system_mode == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id);
+                        }
+                    }
+                }
+                case 5: { // TxTransactSavings
+                    pqxx::result result = txn->exec("UPDATE savings SET balance = balance + 20 WHERE id = " + 
+                            std::to_string(account1) + " RETURNING ctid, id, balance");
+                    if (!result.empty()) {
+                        std::string ctid = result[0]["ctid"].as<std::string>();
+                        int id = result[0]["id"].as<int>();
+                        int balance = result[0]["balance"].as<int>();
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                        if(system_mode == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id);
+                        }
                     }
                     break;
                 }
@@ -437,6 +592,10 @@ void run_smallbank_txns() {
         // std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     std::cout << "Finished running smallbank transactions." << std::endl;
+
+}
+
+void dtx_exe(){
 
 }
 
@@ -663,6 +822,8 @@ int main(int argc, char *argv[]) {
     
     DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
     DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    ComputeNodeCount = DBConnection.size();
+    std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
 
     pqxx::connection *conn0 = nullptr;
     pqxx::connection *conn1 = nullptr;
