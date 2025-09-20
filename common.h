@@ -9,7 +9,7 @@
 extern int ComputeNodeCount;
 extern uint64_t ATTEMPTED_NUM;
 extern double CrossNodeAccessRatio;
-
+using region_id_t=int32_t;
 using page_id_t = int32_t;    // page id type
 using frame_id_t = int32_t;  // frame id type
 using table_id_t = int32_t;         // table id type

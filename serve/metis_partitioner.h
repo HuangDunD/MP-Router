@@ -21,10 +21,9 @@
 #include <random>
 
 #include "region/region.h" // Assuming this path is correct
+#include "log/Logger.h"
 #include "config.h"
-
-// Forward declarations
-class ThreadPool; // Assume ThreadPool class is defined elsewhere
+#include "threadpool.h"
 
 // Include metis.h (ensure it's available in your include paths)
 #include <metis.h>
@@ -286,6 +285,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
 inline void NewMetis::partition_internal_graph(const std::string &output_partition_file,
                                                const std::string &log_file_path,
                                                uint64_t ComputeNodeCount) {
+    std::cout<<"[Partition] Starting internal graph partitioning task (using DENSE ID snapshot)..." << std::endl;
     std::ofstream log_stream(log_file_path, std::ios::app);
     if (!log_stream.is_open()) {
         std::cerr << "[Partition Error] Failed to open log file: " << log_file_path << std::endl;
@@ -932,3 +932,5 @@ void NewMetis::stabilize_partition_indices(
 
     logger_.info("Router map updated with stabilized indices.");
 }
+
+
