@@ -7,3 +7,4 @@ double CrossNodeAccessRatio = 0.2;
 int REGION_SIZE = 1000;
 double AffinitySampleRate = 0.1;
 int TPCC_WAREHOUSE_NUM = -1;
+double AffinityTxnRatio = 0.75;

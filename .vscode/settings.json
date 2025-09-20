@@ -98,7 +98,8 @@
         "slist": "cpp",
         "scoped_allocator": "cpp",
         "typeindex": "cpp",
-        "cassert": "cpp"
+        "cassert": "cpp",
+        "*.inc": "cpp"
     },
     "java.configuration.updateBuildConfiguration": "automatic"
 }

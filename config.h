@@ -28,6 +28,7 @@ extern uint64_t ATTEMPTED_NUM;
 extern double CrossNodeAccessRatio;
 extern int REGION_SIZE;
 extern double AffinitySampleRate;
+extern double AffinityTxnRatio;
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;
