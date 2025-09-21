@@ -546,10 +546,10 @@ void run_smallbank_txns() {
                     break;
                 }
                 case 4: { // TxBalance 
-                    pqxx::result result = txn->exec("SELECT balance FROM checking WHERE id = " + 
-                            std::to_string(account1) + " RETURNING ctid, id, balance");
-                    pqxx::result result2 = txn->exec("SELECT balance FROM savings WHERE id = " + 
-                            std::to_string(account1) + " RETURNING ctid, id, balance");
+                    pqxx::result result = txn->exec("SELECT id, balance, ctid FROM checking WHERE id = " + 
+                            std::to_string(account1));
+                    pqxx::result result2 = txn->exec("SELECT id, balance, ctid FROM savings WHERE id = " + 
+                            std::to_string(account1));
                     if (!result.empty()) {
                         std::string ctid = result[0]["ctid"].as<std::string>();
                         int id = result[0]["id"].as<int>();
@@ -848,12 +848,6 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    // Load data into the database if needed
-    load_data(conn0);
-    std::cout << "Data loaded successfully." << std::endl;
-
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-
     if(system_mode == 3) {
         std::cout << "Initializing Smart Router..." << std::endl;
         // Create a BtreeService
@@ -865,6 +859,12 @@ int main(int argc, char *argv[]) {
     else {
         std::cout << "Smart Router not used in this system mode." << std::endl;
     }
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    // Load data into the database if needed
+    load_data(conn0);
+    std::cout << "Data loaded successfully." << std::endl;
     
     // Create a performance snapshot
     int start_snapshot_id = create_perf_kwr_snapshot(conn0);

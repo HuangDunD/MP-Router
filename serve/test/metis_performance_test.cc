@@ -65,15 +65,17 @@ public:
         adjncy.clear();
         xadj.resize(node_count + 1);
 
-        std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
+        std::uniform_real_distribution<double> prob_dist(0.0, 0.01);
         std::vector<std::vector<int>> adj_list(node_count);
 
         // 生成随机边
         for (int i = 0; i < node_count; i++) {
-            for (int j = i + 1; j < node_count; j++) {
-                if (prob_dist(gen) < edge_probability) {
-                    adj_list[i].push_back(j);
-                    adj_list[j].push_back(i);
+            auto friendly_neighbors = prob_dist(gen) * node_count;
+            for (int j = 0; j < friendly_neighbors; j++) {
+                int neighbor = gen() % node_count;
+                if (neighbor != i) {
+                    adj_list[i].push_back(neighbor);
+                    adj_list[neighbor].push_back(i);
                 }
             }
         }
@@ -295,7 +297,7 @@ public:
 
         const std::vector<int> node_counts = {1000, 10000, 20000, 50000,100000,300000,500000,1000000};
         const int tests_per_size = 2;
-        const int partition_count = 4;
+        const int partition_count = 64;
         const double edge_probability = 0.01;
 
         std::cout << std::setw(8) << "节点数"

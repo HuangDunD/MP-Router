@@ -2,17 +2,22 @@ include_directories(log)
 include_directories(region)
 # --- MODIFICATION START ---
 # List all source files needed for the 'serve' executable
+set(LOG_SRC
+        log/Logger.cpp
+)
+
 set(SERVER_SRC
         serve.cpp
         region/region_generator.cpp
-        log/Logger.cpp
         # Add any other .cpp files needed directly by 'serve' here
 )
 # --- MODIFICATION END ---
 
-add_executable(serve ${SERVER_SRC})
+add_executable(serve ${SERVER_SRC} ${LOG_SRC})
 add_executable(offline_analyzer offline_analyze.cc)
 add_executable(create_table create_table.cc)
+
+add_library(logger STATIC ${LOG_SRC})
 
 # Link libraries to 'serve'
 target_link_libraries(serve PRIVATE # Use PRIVATE or PUBLIC as appropriate

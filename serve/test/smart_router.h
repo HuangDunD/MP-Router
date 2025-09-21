@@ -85,8 +85,9 @@ public:
         if (it != hot_key_map.end()) {
             // hot hash 命中，更新 page
             if(it->second.page != new_page){ // 只有在page变化时才更新
+                // std::cout << "Updated hot key: (table_id=" << table_id << ", key=" << key << ") from page " 
+                //           << it->second.page << " to page " << new_page << std::endl;
                 it->second.page = new_page;
-                std::cout << "Updated hot key: (table_id=" << table_id << ", key=" << key << ") -> new page " << new_page << std::endl;
             }
         }
     }
@@ -104,7 +105,7 @@ public:
             entry.lru_it = hot_lru_.begin();
             hot_key_map.emplace(DataItemKey{table_id, key}, std::move(entry));
             stats_.hot_hash_bytes += hot_entry_size_model_();
-            std::cout << "Initialized hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
+            // std::cout << "Initialized hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
             // 检查是否超预算, 超预算则驱逐
             while (stats_.hot_hash_bytes > cfg_.hot_hash_cap_bytes && !hot_lru_.empty()) {
                 DataItemKey evict_key = hot_lru_.back();

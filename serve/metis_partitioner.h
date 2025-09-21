@@ -108,6 +108,7 @@ private:
 // MODIFIED build_internal_graph FUNCTION
 // ========================================================================
 inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group) {
+    // std::cout << "build internal graph called with " << unique_mapped_ids_in_group.size() << " unique IDs." << std::endl;
     if (unique_mapped_ids_in_group.empty()) {
         return -1; // Sentinel for empty input or no decision
     }
