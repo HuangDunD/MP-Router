@@ -106,6 +106,7 @@ public:
     }
 
     void read_btree_node_from_db(const int page_id, pqxx::connection* conn, BtreeNode** return_node = nullptr) {
+        if(page_id <= 0) return;
         // Placeholder for reading B-tree node from the database
         // This function should query the database to populate keys and values
         std::cout << "Reading B-tree node with page_id: " << page_id << " from database." << std::endl;

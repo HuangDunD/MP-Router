@@ -147,9 +147,8 @@ void generate_two_account_ids(itemkey_t &acc1, itemkey_t &acc2) {
     }
 }
 
-void load_data(pqxx::connection *conn0) {
-    std::cout << "Loading data..." << std::endl;
-    std::cout << "Will load " << smallbank_account << " accounts into checking and savings tables" << std::endl;
+void create_table(pqxx::connection *conn0) {
+    std::cout << "Create table..." << std::endl;
     // Load data into the database if needed
     // This is a placeholder for actual data loading logic
     std::string drop_table_sql = "DROP TABLE IF EXISTS checking";
@@ -183,7 +182,12 @@ void load_data(pqxx::connection *conn0) {
     } catch (const std::exception &e) {
         std::cerr << "Error while creating table: " << e.what() << std::endl;
     }   
-    
+}
+
+void load_data(pqxx::connection *conn0) {
+    std::cout << "Loading data..." << std::endl;
+    std::cout << "Will load " << smallbank_account << " accounts into checking and savings tables" << std::endl;
+    // Load data into the database if needed
     // Insert data into checking and savings tables
     const int num_threads = 16;  // Number of worker threads
     std::vector<std::thread> threads;
@@ -848,6 +852,9 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+    // Create table and indexes
+    create_table(conn0);
+
     if(system_mode == 3) {
         std::cout << "Initializing Smart Router..." << std::endl;
         // Create a BtreeService
@@ -860,11 +867,11 @@ int main(int argc, char *argv[]) {
         std::cout << "Smart Router not used in this system mode." << std::endl;
     }
 
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-
     // Load data into the database if needed
     load_data(conn0);
     std::cout << "Data loaded successfully." << std::endl;
+    
+    std::this_thread::sleep_for(std::chrono::seconds(2));
     
     // Create a performance snapshot
     int start_snapshot_id = create_perf_kwr_snapshot(conn0);
