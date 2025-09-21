@@ -13,7 +13,9 @@
 #include <string>
 #include "common.h"
 #include "btree_search.h"
-#include "../metis_partitioner.h"
+#include "metis_partitioner.h"
+#include "threadpool.h"
+#include "log/Logger.h"
 
 // SmartRouter: 一个针对 hot-key hash cache 设有严格内存预算的事务路由器。
 // 它维护：
@@ -45,7 +47,11 @@ struct DataItemKeyHash {
 class SmartRouter {
 public:
     struct Config {
+        std::size_t partition_nums = 2;
+
         std::size_t hot_hash_cap_bytes = 64ULL * 1024ULL * 1024ULL; // 默认 64 MB, 作为 hot hash 的内存预算
+        int thread_pool_size = 16; // 线程池大小
+        std::string log_file = "smart_router_metis.log"; // 日志文件
     };
 
     struct Stats {
@@ -70,9 +76,14 @@ public:
     };
 
 public:
-    explicit SmartRouter(const Config &cfg, BtreeIndexService *btree_service) {
-        cfg_ = cfg;
-        btree_service_ = btree_service;
+    explicit SmartRouter(const Config &cfg, BtreeIndexService *btree_service)
+        : cfg_(cfg),
+          logger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::INFO, cfg.log_file.c_str(), 1024),
+          btree_service_(btree_service),
+          pool(cfg.thread_pool_size, logger)
+    {
+        metis_.set_thread_pool(&pool);
+        metis_.init_node_nums(cfg.partition_nums);
     }
 
     ~SmartRouter() = default; // 使用 = default
@@ -265,6 +276,7 @@ private:
 private:
     // 配置
     Config cfg_{};
+    Logger logger;
 
     // 一级缓存: hot hash (key -> HotEntry)
     std::unordered_map<DataItemKey, HotEntry, DataItemKeyHash> hot_key_map;
@@ -275,6 +287,7 @@ private:
     BtreeIndexService *btree_service_;
 
     //for metis
+    ThreadPool pool;
     NewMetis metis_;
 
     // 统计数据

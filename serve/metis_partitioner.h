@@ -120,6 +120,10 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
     if (associated_thread_pool_ != nullptr) {
         current_call_count = ++build_call_counter_;
         uint64_t current_milestone = (current_call_count / PARTITION_INTERVAL) * PARTITION_INTERVAL;
+        // std::cout<<"Build call count: " << current_call_count
+        //          << ", Current milestone: " << current_milestone
+        //          << ", Last partition milestone: " << last_partition_milestone_.load(std::memory_order_acquire)
+        //          << std::endl;
 
         if (current_milestone > 0) {
             uint64_t expected_last = last_partition_milestone_.load(std::memory_order_acquire);

@@ -19,6 +19,7 @@ thread_local std::vector<pqxx::connection*> connections_thread_local;
 class ThreadPool {
 public:
     ThreadPool(size_t threads, std::vector<std::string> &connections, Logger &lg);
+    ThreadPool(size_t threads, Logger &lg);
 
     ~ThreadPool();
 
@@ -33,6 +34,23 @@ private:
     std::condition_variable condition;
     bool stop;
 };
+
+inline ThreadPool::ThreadPool(size_t threads, Logger &lg) : stop(false) {
+    for (size_t i = 0; i < threads; ++i) {
+        workers.emplace_back([this] {
+            while (true) {
+                std::function<void()> task; {
+                    std::unique_lock<std::mutex> lock(this->queue_mutex);
+                    this->condition.wait(lock, [this] { return this->stop || !this->tasks.empty(); });
+                    if (this->stop && this->tasks.empty()) return;
+                    task = std::move(this->tasks.front());
+                    this->tasks.pop();
+                }
+                task();
+            }
+        });
+    }
+}
 
 inline ThreadPool::ThreadPool(size_t threads, std::vector<std::string> &connections, Logger &lg) : stop(false) {
     for (size_t i = 0; i < threads; ++i) {

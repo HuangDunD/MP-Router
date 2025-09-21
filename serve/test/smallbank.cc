@@ -193,10 +193,10 @@ void load_data(pqxx::connection *conn0) {
     std::vector<std::thread> threads;
     const int chunk_size = smallbank_account / num_threads;
     auto worker = [](int start, int end) {
-        pqxx::connection* conn00 = new pqxx::connection(DBConnection[0]);
-        if (!conn00->is_open()) {
+        pqxx::connection conn00(DBConnection[0]);
+        if (!conn00.is_open()) {
             std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
-            return -1;
+            return;
         }
         for(int i = start; i < end; i++) {
             int id = i + 1;
@@ -213,8 +213,7 @@ void load_data(pqxx::connection *conn0) {
                                         name + "') RETURNING ctid, id";
 
             try {
-                pqxx::work txn_create(*conn00);
-                
+                pqxx::work txn_create(conn00);
                 // 执行checking表插入并获取位置信息
                 pqxx::result checking_result = txn_create.exec(insert_checking_sql);                
                 if (!checking_result.empty()) {
@@ -381,8 +380,7 @@ void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int
         const std::vector<table_id_t>& table_ids = table_ids_arr[txn_type < 6 ? txn_type : 0];
         SmartRouter::AffinityResult result = smart_router->get_route_primary(const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
         if(result.success) {
-            assert(result.affinity_id >= 0 && result.affinity_id < ComputeNodeCount);
-            node_id = result.affinity_id; 
+            node_id = result.affinity_id;
         }
         else {
             // fallback to random
@@ -817,13 +815,13 @@ int main(int argc, char *argv[]) {
     
     std::cout << "Worker threads: " << worker_threads << std::endl;
     std::cout << "====================" << std::endl;
-    
+
     // --- Load Database Connection Info ---
     std::cout << "Loading database connection info..." << std::endl;
 
     // DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
-    
+
     DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
     DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
     ComputeNodeCount = DBConnection.size();
@@ -870,7 +868,7 @@ int main(int argc, char *argv[]) {
     // Load data into the database if needed
     load_data(conn0);
     std::cout << "Data loaded successfully." << std::endl;
-    
+
     std::this_thread::sleep_for(std::chrono::seconds(2));
     
     // Create a performance snapshot
@@ -926,7 +924,7 @@ int main(int argc, char *argv[]) {
     // 关闭连接
     delete conn0;
     delete conn1;
-    
+
     // 清理Zipfian生成器
     if (zipfian_gen) {
         delete zipfian_gen;
