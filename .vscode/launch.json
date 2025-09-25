@@ -80,9 +80,9 @@
             "program": "${workspaceFolder}/build/serve/test/smallbank_test",
             "args": [
                 "--access-pattern",
-                "2",
-                "--hotspot-fraction",
-                "0.01",
+                "1",
+                "--zipfian-theta",
+                "0.95",
                 "--account-count",
                 "20000",
                 "--system-mode",

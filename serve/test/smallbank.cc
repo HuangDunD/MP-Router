@@ -16,11 +16,12 @@
 #include "btree_search.h"
 #include "smart_router.h"
 #include "friend_simulate.h"
+#include "util/zipf.h"
 
 std::vector<std::string> DBConnection;
 std::atomic<uint64_t> tx_id_generator;
 auto start = std::chrono::high_resolution_clock::now();
-int try_count = 2000;
+int try_count = 10000;
 std::atomic<int> exe_count = 0;
 
 int smallbank_account = 300000;
@@ -33,52 +34,19 @@ double hotspot_access_prob = 0.8; // Probability of accessing hot accounts
 int read_btree_mode = 0; // 0: read from conn0, 1: read from random conn
 int read_frequency = 5; // seconds
 int worker_threads = 16;
+std::mutex log_mutex;
+std::string access_log_file_name = "access_key.log"; // 日志文件路径
+std::string friend_graph_export_file = "friend_graph.csv"; // 导出社交图 CSV 文件
+std::ofstream access_key_log_file;
 
-std::atomic<int> change_page_cnt = 0;
-std::atomic<int> page_update_cnt = 0;
+std::unordered_map<int, long long> key_freq;
 
 SmartRouter* smart_router = nullptr;
 
 thread_local std::vector<pqxx::connection*> thread_conns_vec;
-
-// Zipfian distribution generator
-class ZipfianGenerator {
-private:
-    int num_items;
-    double theta;
-    double alpha;
-    double zetan;
-    double eta;
-    
-public:
-    ZipfianGenerator(int n, double theta) : num_items(n), theta(theta) {
-        alpha = 1.0 / (1.0 - theta);
-        zetan = zeta(num_items, theta);
-        eta = (1.0 - std::pow(2.0 / num_items, 1.0 - theta)) / (1.0 - zeta(2, theta) / zetan);
-    }
-    
-    int next() {
-        double u = (double)rand() / RAND_MAX;
-        double uz = u * zetan;
-        
-        if (uz < 1.0) return 1;
-        if (uz < 1.0 + std::pow(0.5, theta)) return 2;
-        
-        return 1 + (int)(num_items * std::pow(eta * u - eta + 1.0, alpha));
-    }
-    
-private:
-    double zeta(int n, double theta) {
-        double sum = 0.0;
-        for (int i = 1; i <= n; i++) {
-            sum += 1.0 / std::pow(i, theta);
-        }
-        return sum;
-    }
-};
-
+thread_local uint64_t thread_gid;
 // Global Zipfian generator
-ZipfianGenerator* zipfian_gen = nullptr;
+thread_local ZipfGen* zipfian_gen = nullptr;
 std::vector<std::vector<std::pair<int, float>>> user_friend_graph; // 每个用户的朋友图 
 
 // Generate account ID based on access pattern
@@ -86,13 +54,10 @@ void generate_account_id(itemkey_t &acc1) {
     switch (access_pattern) {
         case 0: // Uniform distribution
             acc1 = rand() % smallbank_account + 1;
-            
+            break;
         case 1: // Zipfian distribution
-            if (!zipfian_gen) {
-                zipfian_gen = new ZipfianGenerator(smallbank_account, zipfian_theta);
-            }
-            acc1 = zipfian_gen->next();
-            
+            acc1 = zipfian_gen->next() + 1; // ZipfGen is 0-based, account IDs are 1-based
+            break;
         case 2: // Hotspot distribution
         {
             double r = (double)rand() / RAND_MAX;
@@ -105,10 +70,11 @@ void generate_account_id(itemkey_t &acc1) {
                 // Access cold accounts (remaining accounts)
                 acc1 = hot_accounts + rand() % (smallbank_account - hot_accounts) + 1;
             }
+            break;
         }
-        
         default:
             acc1 = rand() % smallbank_account + 1;
+            break;
     }
 }
 
@@ -249,6 +215,15 @@ void load_data(pqxx::connection *conn0) {
         int num_users = smallbank_account;
         generate_friend_simulate_graph(user_friend_graph, num_users);
         std::cout << "Generated friend graph for " << num_users << " users." << std::endl;
+#if LOG_FRIEND_GRAPH
+        if(!friend_graph_export_file.empty()){
+            if(dump_friend_graph_csv(user_friend_graph, friend_graph_export_file)){
+                std::cout << "Friend graph exported to: " << friend_graph_export_file << std::endl;
+            } else {
+                std::cerr << "Failed to export friend graph to: " << friend_graph_export_file << std::endl;
+            }
+        }
+#endif
     };
 
     // Create and start threads
@@ -388,9 +363,18 @@ void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int
             std::cerr << "Warning: SmartRouter get_route_primary failed: " << result.error_message << std::endl;
         }
     }
+    else if(system_mode == 4) {
+        node_id = 0; // All to node 0 for single
+    }
 }
 
-void run_smallbank_txns() {
+struct thread_params
+{
+    int thread_id;
+    int thread_count;
+};
+
+void run_smallbank_txns(thread_params* params) {
     std::cout << "Running smallbank transactions..." << std::endl;
     // This is a placeholder for actual transaction logic
     // You would implement the logic to run transactions against the smallbank database here
@@ -408,7 +392,15 @@ void run_smallbank_txns() {
         }
         thread_conns_vec.push_back(con);
     }
-    
+    // init the thread id
+    thread_gid = params->thread_id;
+    if (!zipfian_gen) {
+        uint64_t zipf_seed = 2 * thread_gid * GetCPUCycle();
+        uint64_t zipf_seed_mask = (uint64_t(1) << 48) - 1;
+        zipfian_gen = new ZipfGen(smallbank_account, zipfian_theta, zipf_seed & zipf_seed_mask);
+    }
+
+    // run smallbank transactions
     for (int i = 0; i < try_count; ++i) {
         exe_count++;
         tx_id_t tx_id = tx_id_generator++; // global atomic transaction ID
@@ -419,8 +411,27 @@ void run_smallbank_txns() {
         itemkey_t account1, account2;
         if(txn_type == 0 || txn_type == 1) { // TxAmagamate or TxSendPayment
             generate_two_account_ids(account1, account2);
+#if LOG_ACCESS_KEY
+            // 写日志记录一下
+            std::unique_lock<std::mutex> lock(log_mutex);
+            if(access_key_log_file.is_open()) {
+                access_key_log_file << account1 << "," << account2 << std::endl;
+                access_key_log_file.flush();
+            }
+            key_freq[account1]++;
+            key_freq[account2]++;
+#endif
         } else {
             generate_account_id(account1);
+#if LOG_ACCESS_KEY
+            // 写日志记录一下
+            std::unique_lock<std::mutex> lock(log_mutex);
+            if(access_key_log_file.is_open()) {
+                access_key_log_file << account1 << std::endl;
+                access_key_log_file.flush();
+            }
+            key_freq[account1]++;
+#endif
         }
         int node_id = 0; // Default node ID
         
@@ -767,6 +778,20 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--partition-interval") {
+            if (i + 1 < argc) {
+                PARTITION_INTERVAL = std::stoi(argv[++i]);
+                if (PARTITION_INTERVAL <= 0) {
+                    std::cerr << "Error: Partition interval must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Partition interval set to: " << PARTITION_INTERVAL << std::endl;
+            } else {
+                std::cerr << "Error: --partition-interval requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else {
             std::cerr << "Error: Unknown argument " << arg << std::endl;
             print_usage(argv[0]);
@@ -791,6 +816,9 @@ int main(int argc, char *argv[]) {
     case 3:
         std::cout << "\033[31m  smart router \033[0m" << std::endl;
         break;
+    case 4:
+        std::cout << "\033[31m  single node \033[0m" << std::endl;
+        break; 
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
         return -1;
@@ -819,13 +847,23 @@ int main(int argc, char *argv[]) {
     // --- Load Database Connection Info ---
     std::cout << "Loading database connection info..." << std::endl;
 
-    // DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
+    // !!! need to update when changing the cluster environment
+    DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
 
-    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
-    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
     ComputeNodeCount = DBConnection.size();
     std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
+
+#if LOG_ACCESS_KEY
+    // open the access key log file
+    access_key_log_file.open(access_log_file_name, std::ios::out | std::ios::trunc);
+    if (!access_key_log_file.is_open()) {
+        std::cerr << "Failed to open access key log file." << std::endl;
+        return -1;
+    }
+#endif
 
     pqxx::connection *conn0 = nullptr;
     pqxx::connection *conn1 = nullptr;
@@ -882,7 +920,10 @@ int main(int argc, char *argv[]) {
     std::vector<std::thread> threads;
     // !Start the transaction threads
     for(int i = 0; i < worker_threads; i++) {
-        threads.emplace_back(run_smallbank_txns);
+        thread_params* params = new thread_params();
+        params->thread_id = i;
+        params->thread_count = worker_threads;
+        threads.emplace_back(run_smallbank_txns, params);
     }
     // Wait for all threads to complete
     for(auto& thread : threads) {
@@ -891,7 +932,24 @@ int main(int argc, char *argv[]) {
 
     auto end = std::chrono::high_resolution_clock::now();
     double ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    // Create a performance snapshot after running transactions
+    std::this_thread::sleep_for(std::chrono::seconds(2)); // sleep for a while to ensure all operations are completed
+    int end_snapshot_id = create_perf_kwr_snapshot(conn0);
+    std::cout << "Performance snapshots created: Start ID = " << start_snapshot_id 
+              << ", End ID = " << end_snapshot_id << std::endl;
     
+    if(smart_router){
+        std::cout << "Smart Router page stats: " << std::endl;
+        int change_page_cnt = smart_router->get_stats().change_page_cnt;
+        int page_update_cnt = smart_router->get_stats().page_update_cnt;
+        int hit_cnt = smart_router->get_stats().hot_hit;
+        int miss_cnt = smart_router->get_stats().hot_miss;
+        std::cout << "Hot page hit: " << hit_cnt << ", miss: " << miss_cnt 
+                  << ", hit ratio: " << (hit_cnt + miss_cnt > 0 ? (double)hit_cnt / (hit_cnt + miss_cnt) * 100.0 : 0.0) << "%" << std::endl;
+        std::cout << "Page ID changes: " << change_page_cnt << std::endl;
+        std::cout << "Page updates: " << page_update_cnt << std::endl;
+    }
     std::cout << "All transaction threads completed." << std::endl;
     std::cout << "Total accounts loaded: " << smallbank_account << std::endl;
     std::cout << "Access pattern used: " << access_pattern_name << std::endl;
@@ -899,16 +957,6 @@ int main(int argc, char *argv[]) {
     std::cout << "Elapsed time: " << ms << " milliseconds" << std::endl;
     double s = ms / 1000.0; // Convert milliseconds to seconds
     std::cout << "Throughput: " << exe_count / s << " transactions per second" << std::endl;
-    std::cout << "Page ID changes: " << change_page_cnt << std::endl;
-    std::cout << "Page updates: " << page_update_cnt << std::endl;
-
-    // Create a performance snapshot after running transactions
-    std::this_thread::sleep_for(std::chrono::seconds(2)); // sleep for a while to ensure all operations are completed
-    int end_snapshot_id = create_perf_kwr_snapshot(conn0);
-    std::cout << "Performance snapshots created: Start ID = " << start_snapshot_id 
-              << ", End ID = " << end_snapshot_id << std::endl;
-
-    std::this_thread::sleep_for(std::chrono::seconds(2)); // sleep for a while to ensure all operations are completed
 
     // Generate performance report, file name inluding the timestamp
     // get the current time as a string
@@ -930,6 +978,42 @@ int main(int argc, char *argv[]) {
         delete zipfian_gen;
         zipfian_gen = nullptr;
     }
+
+#if LOG_ACCESS_KEY
+    // 转到 vector 便于排序
+    std::vector<std::pair<int, long long>> vec(key_freq.begin(), key_freq.end());
+
+    // 按 value 从大到小排序
+    std::sort(vec.begin(), vec.end(),
+              [](auto &a, auto &b) { return a.second > b.second; });
+
+    // 输出前 50 个
+    int topN = 50;
+    if (vec.size() < topN) topN = vec.size();
+    for (int i = 0; i < topN; i++) {
+        std::cout << "Key: " << vec[i].first
+                  << "  Count: " << vec[i].second << "\n";
+    }
+    
+    // 计算总访问次数
+    long long total = 0;
+    for (auto &p : vec) total += p.second;
+
+    auto calc_ratio = [&](double percent) {
+        size_t topN = std::max<size_t>(1, size_t(vec.size() * percent));
+        long long sum = 0;
+        for (size_t i = 0; i < topN && i < vec.size(); i++) sum += vec[i].second;
+        return double(sum) / total * 100.0;
+    };
+
+    double r1  = calc_ratio(0.01);
+    double r10 = calc_ratio(0.10);
+    double r50 = calc_ratio(0.50);
+
+    std::cout << "前 1% key 占总访问比例:  " << r1  << "%\n";
+    std::cout << "前10% key 占总访问比例:  " << r10 << "%\n";
+    std::cout << "前50% key 占总访问比例:  " << r50 << "%\n";
+#endif
 
     return 0;
 }

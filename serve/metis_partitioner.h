@@ -84,7 +84,6 @@ private:
     std::string partition_output_file_ = "graph_partitions.csv";
     std::string partition_log_file_ = "partitioning_log.log";
     uint64_t num_partitions_;
-    static const uint64_t PARTITION_INTERVAL = 1000;
 
     // Dense ID Mapping
     std::unordered_map<uint64_t, idx_t> regionid_to_denseid_map_;

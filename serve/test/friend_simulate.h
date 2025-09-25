@@ -82,6 +82,21 @@ void generate_friend_simulate_graph(std::vector<std::vector<std::pair<int, float
 	}
 }
 
+// 导出社交网络图到 CSV: src,dst,prob
+inline bool dump_friend_graph_csv(const std::vector<std::vector<std::pair<int,float>>> &adj_list, const std::string &path, size_t limit_nodes = 0){
+	std::ofstream ofs(path, std::ios::out | std::ios::trunc);
+	if(!ofs.is_open()) return false;
+	ofs << "src,dst,prob\n";
+	size_t n = adj_list.size();
+	if(limit_nodes>0) n = std::min(limit_nodes, n);
+	for(size_t u=0; u<n; ++u){
+		for(const auto &p : adj_list[u]){
+			ofs << u << ',' << p.first << ',' << p.second << '\n';
+		}
+	}
+	return true;
+}
+
 // int main(){
 //     std::vector<std::vector<std::pair<int, float>>> adj_list;
 //     int num_users = 1000000; // Example number of users

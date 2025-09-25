@@ -22,6 +22,8 @@ extern int SYSTEM_MODE;
 
 // 定义所跑的workload 0:smallbank 1:tpcc
 #define WORKLOAD_MODE 1 // 0: ycsb 1: tpcc
+#define LOG_ACCESS_KEY 0 // 0: no log 1: log
+#define LOG_FRIEND_GRAPH 0 // 0: no log 1: log
 
 extern int ComputeNodeCount; // 计算节点数量
 extern uint64_t ATTEMPTED_NUM;
@@ -29,6 +31,7 @@ extern double CrossNodeAccessRatio;
 extern int REGION_SIZE;
 extern double AffinitySampleRate;
 extern double AffinityTxnRatio;
+extern uint64_t PARTITION_INTERVAL;
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;

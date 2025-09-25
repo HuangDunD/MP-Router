@@ -377,7 +377,7 @@ public:
             std::thread btree_background_thread([this, btree_read_mode, frequency, btree_index, connections_]() {
                 while (true) {
                     std::this_thread::sleep_for(std::chrono::seconds(frequency));
-                    std::cout << "Checking B-tree index for checking..." << std::endl;
+                    std::cout << "Checking B-tree index for " << btree_index->index_name << "..." << std::endl;
                     pqxx::connection* conn = nullptr;
                     if(btree_read_mode == 0) {
                         conn = connections_[0]; // Use the first connection for reading

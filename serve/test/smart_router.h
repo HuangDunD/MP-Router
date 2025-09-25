@@ -65,6 +65,9 @@ public:
         std::uint64_t btree_miss = 0; // 无提示，需访问
         // 驱逐计数
         std::uint64_t evict_hot_entries = 0;
+        // 页面更新计数
+        std::atomic<int> change_page_cnt = 0;
+        std::atomic<int> page_update_cnt = 0;
     };
 
     // hot hash 层的热键条目
@@ -99,7 +102,9 @@ public:
                 // std::cout << "Updated hot key: (table_id=" << table_id << ", key=" << key << ") from page " 
                 //           << it->second.page << " to page " << new_page << std::endl;
                 it->second.page = new_page;
+                stats_.change_page_cnt++;
             }
+            else stats_.page_update_cnt++;
         }
     }
 
@@ -184,6 +189,10 @@ public:
         if (count > 0) {
             metis_.init_node_nums(count);
         }
+    }
+
+    Stats& get_stats() {
+        return stats_;
     }
 
 private:
