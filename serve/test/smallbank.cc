@@ -26,7 +26,7 @@ std::atomic<int> exe_count = 0;
 
 int smallbank_account = 300000;
 
-int system_mode = 0;
+// int system_mode = 0;
 int access_pattern = 0; // 0: uniform, 1: zipfian, 2: hotspot
 double zipfian_theta = 0.99; // Zipfian distribution parameter
 double hotspot_fraction = 0.2; // Fraction of accounts that are hot
@@ -47,7 +47,9 @@ thread_local std::vector<pqxx::connection*> thread_conns_vec;
 thread_local uint64_t thread_gid;
 // Global Zipfian generator
 thread_local ZipfGen* zipfian_gen = nullptr;
-std::vector<std::vector<std::pair<int, float>>> user_friend_graph; // 每个用户的朋友图 
+
+std::vector<std::vector<std::pair<int, float>>> user_friend_graph; // 每个用户的朋友图, 模拟亲和性
+std::vector<std::atomic<int>> routed_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
 
 // Generate account ID based on access pattern
 void generate_account_id(itemkey_t &acc1) {
@@ -288,10 +290,10 @@ void generate_perf_kwr_report(pqxx::connection *conn0, int start_snapshot_id, in
 }
 
 void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int &node_id) {
-    if(system_mode == 0) {
+    if(SYSTEM_MODE == 0) {
         node_id = rand() % 2; // Randomly select node ID for system mode 0
     }
-    else if(system_mode == 1){
+    else if(SYSTEM_MODE == 1){
         if(txn_type == 0 || txn_type == 1) {
             int node1 = account1 / (smallbank_account / ComputeNodeCount); // Range partitioning
             int node2 = account2 / (smallbank_account / ComputeNodeCount); // Range partitioning
@@ -307,11 +309,11 @@ void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int
             node_id = account1 / (smallbank_account / ComputeNodeCount); // Range partitioning
         }
     }
-    else if(system_mode == 2) {
+    else if(SYSTEM_MODE == 2) {
         // get page_id from checking_page_map
         node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
     }
-    else if(system_mode == 3) {
+    else if(SYSTEM_MODE == 3) {
         assert(smart_router != nullptr);
         // 查找第0个表的账户所在的页面
         static const std::vector<table_id_t> table_ids_arr[] = {
@@ -363,9 +365,10 @@ void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int
             std::cerr << "Warning: SmartRouter get_route_primary failed: " << result.error_message << std::endl;
         }
     }
-    else if(system_mode == 4) {
+    else if(SYSTEM_MODE == 4) {
         node_id = 0; // All to node 0 for single
     }
+    routed_txn_cnt_per_node[node_id]++;
 }
 
 struct thread_params
@@ -433,18 +436,18 @@ void run_smallbank_txns(thread_params* params) {
             key_freq[account1]++;
 #endif
         }
-        int node_id = 0; // Default node ID
+        int routed_node_id = 0; // Default node ID
         
-        decide_route_node(account1, account2, txn_type, node_id);
+        decide_route_node(account1, account2, txn_type, routed_node_id);
 
         // Create a new transaction
         pqxx::work* txn = nullptr;
-        auto txn_con = thread_conns_vec[node_id];
+        auto txn_con = thread_conns_vec[routed_node_id];
         while (!txn_con->is_open()){
             std::cerr << "Connection is broken, reconnecting..." << std::endl;
             delete txn_con;
-            txn_con = new pqxx::connection(DBConnection[node_id]);
-            thread_conns_vec[node_id] = txn_con;
+            txn_con = new pqxx::connection(DBConnection[routed_node_id]);
+            thread_conns_vec[routed_node_id] = txn_con;
         }
         txn = new pqxx::work(*txn_con);
 
@@ -460,8 +463,8 @@ void run_smallbank_txns(thread_params* params) {
                         assert(id == account1);
                         checking_balance = result1[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(system_mode == 3 && smart_router != nullptr) {
-                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
+                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     }
                     pqxx::result result2 = txn->exec("UPDATE savings SET balance = 0 WHERE id = " + 
@@ -472,8 +475,8 @@ void run_smallbank_txns(thread_params* params) {
                         int balance = result2[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
                         savings_balance = result2[0]["balance"].as<int>();
-                        if(system_mode == 3 && smart_router != nullptr) {
-                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id);
+                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id, routed_node_id);
                         }
                     }
                     int total = checking_balance + savings_balance;
@@ -485,8 +488,8 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result3[0]["id"].as<int>();
                         int balance = result3[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(system_mode == 3 && smart_router != nullptr) {
-                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
+                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     }
                 }
@@ -500,8 +503,8 @@ void run_smallbank_txns(thread_params* params) {
                         int balance = result1[0]["balance"].as<int>();
                         // get and update page_id
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(system_mode == 3 && smart_router != nullptr) {
-                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
+                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     }
                     
@@ -513,8 +516,8 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result2[0]["id"].as<int>();
                         int balance = result2[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(system_mode == 3 && smart_router != nullptr) {
-                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
+                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     }
                     break;
@@ -527,8 +530,8 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result[0]["id"].as<int>();
                         int balance = result[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(system_mode == 3 && smart_router != nullptr) {
-                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
+                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     }
                     break;
@@ -543,8 +546,8 @@ void run_smallbank_txns(thread_params* params) {
                         std::string ctid = result[0]["ctid"].as<std::string>();
                         int id = result[0]["id"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(system_mode == 3 && smart_router != nullptr) {
-                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id);
+                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id, routed_node_id);
                         }
                     }
                     if (!result2.empty()) {
@@ -552,8 +555,8 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result2[0]["id"].as<int>();
                         int balance = result2[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(system_mode == 3 && smart_router != nullptr) {
-                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id);
+                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id, routed_node_id);
                         }
                     }
                     break;
@@ -568,8 +571,8 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result[0]["id"].as<int>();
                         int balance = result[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(system_mode == 3 && smart_router != nullptr) {
-                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id);
+                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     } 
                     if (!result2.empty()) {
@@ -577,8 +580,8 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result2[0]["id"].as<int>();
                         int balance = result2[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(system_mode == 3 && smart_router != nullptr) {
-                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id);
+                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id, routed_node_id);
                         }
                     }
                 }
@@ -590,8 +593,8 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result[0]["id"].as<int>();
                         int balance = result[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(system_mode == 3 && smart_router != nullptr) {
-                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id);
+                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                            smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id, routed_node_id);
                         }
                     }
                     break;
@@ -653,6 +656,7 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGPIPE, SIG_IGN);
 
+    int system_mode = 0; // Default system mode
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -664,6 +668,7 @@ int main(int argc, char *argv[]) {
         else if (arg == "--system-mode") {
             if (i + 1 < argc) {
                 system_mode = std::stoi(argv[++i]);
+                SYSTEM_MODE = system_mode;
                 std::cout << "System mode set to: " << system_mode << std::endl;
             } else {
                 std::cerr << "Error: --system-mode requires a value" << std::endl;
@@ -801,8 +806,8 @@ int main(int argc, char *argv[]) {
 
     // Display current configuration
     std::cout << "\n=== Configuration ===" << std::endl;
-    std::cout << "System mode: " << system_mode << " ----> ";
-    switch (system_mode)
+    std::cout << "System mode: " << SYSTEM_MODE << " ----> ";
+    switch (SYSTEM_MODE)
     {
     case 0:
         std::cout << "\033[31m  random router \033[0m" << std::endl; // 标注为红色
@@ -819,6 +824,9 @@ int main(int argc, char *argv[]) {
     case 4:
         std::cout << "\033[31m  single node \033[0m" << std::endl;
         break; 
+    case 5:
+        std::cout << "\033[31m  ontime router \033[0m" << std::endl;
+        break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
         return -1;
@@ -891,7 +899,7 @@ int main(int argc, char *argv[]) {
     // Create table and indexes
     create_table(conn0);
 
-    if(system_mode == 3) {
+    if(SYSTEM_MODE == 3) {
         std::cout << "Initializing Smart Router..." << std::endl;
         // Create a BtreeService
         BtreeIndexService *index_service = new BtreeIndexService(DBConnection, {"idx_checking_id", "idx_savings_id"}, read_btree_mode, read_frequency);
@@ -951,6 +959,9 @@ int main(int argc, char *argv[]) {
         std::cout << "Page updates: " << page_update_cnt << std::endl;
     }
     std::cout << "All transaction threads completed." << std::endl;
+    for(int i =0; i<DBConnection.size(); i++){
+        std::cout << "node " << i << " routed txn count: " << routed_txn_cnt_per_node[i] << std::endl;
+    }
     std::cout << "Total accounts loaded: " << smallbank_account << std::endl;
     std::cout << "Access pattern used: " << access_pattern_name << std::endl;
     std::cout << "Total transactions executed: " << exe_count << std::endl;

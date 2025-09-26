@@ -71,11 +71,18 @@ public:
     };
 
     // hot hash 层的热键条目
-    struct HotEntry {
+    class HotEntry {
+    public:
         page_id_t page = 0; // 初始化page字段
         std::uint64_t freq = 0;
+        node_id_t last_node = -1; // 最近访问的节点ID，-1表示未设置
+        uint64_t last_access_time = 0; // 最近访问时间（毫秒级）
         // LRU 列表迭代器
         std::list<DataItemKey>::iterator lru_it;
+
+        HotEntry(){};
+        HotEntry(page_id_t p, std::uint64_t f, std::list<DataItemKey>::iterator it)
+        : page(p), freq(f), lru_it(it) {}
     };
 
 public:
@@ -93,15 +100,20 @@ public:
 
     // 可能Update SQL执行之后数据页所在的位置, 根据returning ctid 进行更新key-page映射
     // 如果key不存在, 则不进行任何操作
-    inline void update_key_page(table_id_t table_id, itemkey_t key, page_id_t new_page) {
+    inline void update_key_page(table_id_t table_id, itemkey_t key, page_id_t new_page, node_id_t routed_node_id) {
         std::lock_guard<std::mutex> lock(hot_mutex_);
         auto it = hot_key_map.find({table_id, key});
         if (it != hot_key_map.end()) {
             // hot hash 命中，更新 page
             if(it->second.page != new_page){ // 只有在page变化时才更新
-                // std::cout << "Updated hot key: (table_id=" << table_id << ", key=" << key << ") from page " 
-                //           << it->second.page << " to page " << new_page << std::endl;
                 it->second.page = new_page;
+                it->second.last_node = routed_node_id;
+                // 毫秒级时间戳
+                it->second.last_access_time = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()
+                    ).count()
+                );
                 stats_.change_page_cnt++;
             }
             else stats_.page_update_cnt++;
@@ -155,15 +167,22 @@ public:
         }
 
         std::vector<uint64_t> table_page_id; // 高32位存table_id，低32位存page_id
+        std::unordered_map<node_id_t, int> node_count_basedon_last; // 基于last_node的计数
         table_page_id.reserve(keys.size());
         for (size_t i = 0; i < keys.size(); ++i) {
-            page_id_t page = lookup(table_ids[i], keys[i], thread_conns);
-            if (page == kInvalidPageId) {
+            auto entry = lookup(table_ids[i], keys[i], thread_conns);
+            if(SYSTEM_MODE == 5) {
+                // !如果是模式5，则统计last_node出现的次数
+                if (entry.last_node != -1) {
+                    node_count_basedon_last[entry.last_node]++;
+                }
+            }
+            if (entry.page == kInvalidPageId) {
                 result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
                                        ", key=" + std::to_string(keys[i]) + ")";
                 continue;
             }
-            table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | page);
+            table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | entry.page);
         }
 
         try {
@@ -172,6 +191,33 @@ public:
             table_page_id.erase(std::unique(table_page_id.begin(), table_page_id.end()), table_page_id.end());
             result.keys_processed = table_page_id.size();
             result.affinity_id = metis_.build_internal_graph(table_page_id);
+            if(SYSTEM_MODE == 5) {
+                // !如果是模式5，则结合last_node的计数结果进行调整
+                int max_count = 0;
+                node_id_t candidate_node = -1;
+                for (const auto& [node, count] : node_count_basedon_last) {
+                    if (count > max_count) {
+                        max_count = count;
+                        candidate_node = node;
+                    }
+                }
+                if (candidate_node != -1) {
+                    // 如果last_node中出现次数最多的节点与METIS结果不同，则以一定概率选择它
+                    if (candidate_node != result.affinity_id) {
+                        // // 计算选择概率，简单起见，这里设为出现次数占比
+                        // double probability = static_cast<double>(max_count) / keys.size();
+                        // double rand_val = static_cast<double>(rand()) / RAND_MAX;
+                        // if (rand_val < probability) {
+                        //     result.affinity_id = candidate_node;
+                        //     logger.log(Logger::LogLevel::INFO, "SmartRouter", "Adjusted affinity to node " +
+                        //                                                std::to_string(candidate_node) +
+                        //                                                " based on last_node frequency.");
+                        // }
+                        // !直接选择出现次数最多的节点
+                        result.affinity_id = candidate_node;
+                    }
+                }
+            }
             result.success = (result.affinity_id >= 0);
 
             if (!result.success) {
@@ -203,7 +249,7 @@ private:
 
     // 查找 key。若在 hot hash 中找到，立即返回 page。
     // 否则可能查 B+tree 提示（在 .cc 实现），未命中返回 std::nullopt。
-    inline page_id_t lookup(table_id_t table_id, itemkey_t key, std::vector<pqxx::connection *> &thread_conns) {
+    inline HotEntry lookup(table_id_t table_id, itemkey_t key, std::vector<pqxx::connection *> &thread_conns) {
         std::lock_guard<std::mutex> lock(hot_mutex_);
         auto it = hot_key_map.find({table_id, key});
         if (it != hot_key_map.end()) {
@@ -214,38 +260,40 @@ private:
             if (it->second.lru_it != hot_lru_.begin()) {
                 hot_lru_.splice(hot_lru_.begin(), hot_lru_, it->second.lru_it);
             }
-            return it->second.page;
+            return it->second;
         } else {
             // hot hash 未命中
             stats_.hot_miss++;
             // 在B+树中查找所在的页面
             BtreeNode *return_node = nullptr;
             page_id_t btree_page = btree_service_->get_page_id_by_key(table_id, key, thread_conns[0], &return_node);
+            HotEntry entry;
             if (btree_page != kInvalidPageId) {
                 // 更新 hot_key_map
-                insert_or_victim_hot(table_id, key, btree_page);
+                entry = insert_or_victim_hot(table_id, key, btree_page);
             }
             insert_batch_bnode(table_id, return_node);
-            return btree_page;
+            return entry;
         }
     }
     
     // 插入映射。如果存储满了, 会在预算内驱逐。
-    inline void insert_or_victim_hot(table_id_t table_id, itemkey_t key, page_id_t page) {
+    inline HotEntry insert_or_victim_hot(table_id_t table_id, itemkey_t key, page_id_t page) {
         // 当前的key一定不会在map中存在
         assert(hot_key_map.find({table_id, key}) == hot_key_map.end());
         // 插入新条目
         hot_lru_.push_front({table_id, key});
-        HotEntry entry;
-        entry.page = page;
-        entry.freq = 1;
-        entry.lru_it = hot_lru_.begin();
-        hot_key_map.emplace(DataItemKey{table_id, key}, std::move(entry));
+        auto [it, ok] = hot_key_map.emplace(
+            DataItemKey{table_id, key},
+            HotEntry{page, 1, hot_lru_.begin()}
+        );
+        if (!ok) assert(false); // 不应该发生
+
         stats_.hot_hash_bytes += hot_entry_size_model_();
         std::cout << "Inserted hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
         // 检查是否超预算, 超预算则驱逐
         while (stats_.hot_hash_bytes > cfg_.hot_hash_cap_bytes && !hot_lru_.empty()) {
-            DataItemKey evict_key = hot_lru_.back();
+            const auto & evict_key = hot_lru_.back();
             auto evict_it = hot_key_map.find(evict_key);
             if (evict_it != hot_key_map.end()) {
                 stats_.hot_hash_bytes -= hot_entry_size_model_();
@@ -256,6 +304,7 @@ private:
             std::cout << "Evicted hot key: (table_id=" << evict_key.table_id << ", key=" << evict_key.key << ")" <<
                     std::endl;
         }
+        return hot_key_map.at({table_id, key});
     }
 
     inline void insert_batch_bnode(table_id_t table_id, BtreeNode *return_node) {
