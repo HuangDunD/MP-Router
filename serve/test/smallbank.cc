@@ -140,8 +140,8 @@ void create_table(pqxx::connection *conn0) {
     // Create a new table and insert data
     try {
         pqxx::work txn(*conn0);
-        txn.exec("CREATE TABLE checking (id INT PRIMARY KEY, balance INT, name CHAR(500)) WITH (FILLFACTOR = 70)");
-        txn.exec("CREATE TABLE savings (id INT PRIMARY KEY, balance INT, name CHAR(500)) WITH (FILLFACTOR = 70)");
+        txn.exec("CREATE unlogged TABLE checking (id INT PRIMARY KEY, balance INT, name CHAR(500)) WITH (FILLFACTOR = 70)");
+        txn.exec("CREATE unlogged TABLE savings (id INT PRIMARY KEY, balance INT, name CHAR(500)) WITH (FILLFACTOR = 70)");
         std::cout << "Tables created successfully." << std::endl;
         // create index
         txn.exec("CREATE INDEX idx_checking_id ON checking (id)");
@@ -150,6 +150,26 @@ void create_table(pqxx::connection *conn0) {
     } catch (const std::exception &e) {
         std::cerr << "Error while creating table: " << e.what() << std::endl;
     }   
+    try{
+        // pg not support
+        pqxx::work txn(*conn0);
+        // pre-extend table to avoid frequent page extend during txn processing
+        txn.exec("SELECT sys_extend('checking', 1000000)");
+        txn.commit();
+    }
+    catch (const std::exception &e) {
+        std::cerr << "Error while pre-extending table: " << e.what() << std::endl;
+    }
+    try{
+        // pg not support
+        pqxx::work txn(*conn0);
+        // pre-extend table to avoid frequent page extend during txn processing
+        txn.exec("SELECT sys_extend('savings', 1000000)");
+        txn.commit();
+    }
+    catch (const std::exception &e) {
+        std::cerr << "Error while pre-extending table: " << e.what() << std::endl;
+    }
 }
 
 void load_data(pqxx::connection *conn0) {
@@ -225,6 +245,9 @@ void load_data(pqxx::connection *conn0) {
                 std::cerr << "Failed to export friend graph to: " << friend_graph_export_file << std::endl;
             }
         }
+#else
+        // delete existing friend graph file if any
+        std::remove(friend_graph_export_file.c_str());
 #endif
     };
 
@@ -242,6 +265,22 @@ void load_data(pqxx::connection *conn0) {
         thread.join();
     }
     std::cout << "Data loaded successfully." << std::endl;
+
+    // 输出一些导入数据的统计信息
+    try{
+        auto txn = pqxx::work(*conn0);
+        pqxx::result checking_size = txn.exec("select sys_size_pretty(sys_relation_size('checking')) ");
+        pqxx::result savings_size = txn.exec("select sys_size_pretty(sys_relation_size('savings')) ");
+        if(!checking_size.empty()){
+            std::cout << "Checking table size: " << checking_size[0][0].as<std::string>() << std::endl;
+        }
+        if(!savings_size.empty()){
+            std::cout << "Savings table size: " << savings_size[0][0].as<std::string>() << std::endl;
+        }
+        txn.commit();
+    }catch(const std::exception &e) {
+        std::cerr << "Error while getting table size: " << e.what() << std::endl;
+    }
 }
 
 int create_perf_kwr_snapshot(pqxx::connection *conn0){
@@ -289,6 +328,51 @@ void generate_perf_kwr_report(pqxx::connection *conn0, int start_snapshot_id, in
     }
 }
 
+static const std::vector<table_id_t> TABLE_IDS_ARR[] = {
+    // txn_type == 0
+    {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable, (table_id_t)SmallBankTableType::kCheckingTable},
+    // txn_type == 1
+    {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kCheckingTable},
+    // txn_type == 2
+    {(table_id_t)SmallBankTableType::kCheckingTable},
+    // txn_type == 3
+    {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable},
+    // txn_type == 4
+    {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable},
+    // txn_type == 5
+    {(table_id_t)SmallBankTableType::kSavingsTable}
+};
+
+std::vector<table_id_t>& get_table_ids_by_txn_type(int txn_type) {
+    assert(txn_type >= 0 && txn_type < sizeof(TABLE_IDS_ARR)/sizeof(TABLE_IDS_ARR[0]));
+    return const_cast<std::vector<table_id_t>&>(TABLE_IDS_ARR[txn_type]);
+}
+
+void get_keys_by_txn_type(int txn_type, itemkey_t account1, itemkey_t account2, std::vector<itemkey_t> &keys) {
+    keys.clear();
+    switch(txn_type) {
+        case 0:
+            keys = {account1, account1, account2};
+            break;
+        case 1:
+            keys = {account1, account2};
+            break;
+        case 2:
+            keys = {account1};
+            break;
+        case 3:
+        case 4:
+            keys = {account1, account1};
+            break;
+        case 5:
+            keys = {account1};
+            break;
+        default:
+            break;
+    }
+    return; 
+}
+
 void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int &node_id) {
     if(SYSTEM_MODE == 0) {
         node_id = rand() % 2; // Randomly select node ID for system mode 0
@@ -313,24 +397,8 @@ void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int
         // get page_id from checking_page_map
         node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
     }
-    else if(SYSTEM_MODE == 3) {
+    else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6) {
         assert(smart_router != nullptr);
-        // 查找第0个表的账户所在的页面
-        static const std::vector<table_id_t> table_ids_arr[] = {
-            // txn_type == 0
-            {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable, (table_id_t)SmallBankTableType::kCheckingTable},
-            // txn_type == 1
-            {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kCheckingTable},
-            // txn_type == 2
-            {(table_id_t)SmallBankTableType::kCheckingTable},
-            // txn_type == 3
-            {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable},
-            // txn_type == 4
-            {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable},
-            // txn_type == 5
-            {(table_id_t)SmallBankTableType::kSavingsTable}
-        };
-
         // keys 只和 account1/account2有关，不能静态化，但可以用局部变量，每次只构造一份
         std::vector<itemkey_t> keys;
         switch(txn_type) {
@@ -354,10 +422,23 @@ void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int
                 break;
         }
         // table_ids 静态化后只需引用
-        const std::vector<table_id_t>& table_ids = table_ids_arr[txn_type < 6 ? txn_type : 0];
-        SmartRouter::AffinityResult result = smart_router->get_route_primary(const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
+        const std::vector<table_id_t>& table_ids = TABLE_IDS_ARR[txn_type < 6 ? txn_type : 0];
+
+#if LOG_ACCESS_KEY
+        // 写日志记录一下
+        std::unique_lock<std::mutex> lock(log_mutex);
+        if(access_key_log_file.is_open()) {
+            int i=0;
+            for(i=0; i<table_ids.size()-1; i++) access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "},";
+            access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "}" << std::endl;
+            access_key_log_file.flush();
+        }
+        for (auto key: keys) key_freq[key]++;
+#endif
+
+        SmartRouter::SmartRouterResult result = smart_router->get_route_primary(const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
         if(result.success) {
-            node_id = result.affinity_id;
+            node_id = result.smart_router_id;
         }
         else {
             // fallback to random
@@ -414,27 +495,8 @@ void run_smallbank_txns(thread_params* params) {
         itemkey_t account1, account2;
         if(txn_type == 0 || txn_type == 1) { // TxAmagamate or TxSendPayment
             generate_two_account_ids(account1, account2);
-#if LOG_ACCESS_KEY
-            // 写日志记录一下
-            std::unique_lock<std::mutex> lock(log_mutex);
-            if(access_key_log_file.is_open()) {
-                access_key_log_file << account1 << "," << account2 << std::endl;
-                access_key_log_file.flush();
-            }
-            key_freq[account1]++;
-            key_freq[account2]++;
-#endif
         } else {
             generate_account_id(account1);
-#if LOG_ACCESS_KEY
-            // 写日志记录一下
-            std::unique_lock<std::mutex> lock(log_mutex);
-            if(access_key_log_file.is_open()) {
-                access_key_log_file << account1 << std::endl;
-                access_key_log_file.flush();
-            }
-            key_freq[account1]++;
-#endif
         }
         int routed_node_id = 0; // Default node ID
         
@@ -463,7 +525,7 @@ void run_smallbank_txns(thread_params* params) {
                         assert(id == account1);
                         checking_balance = result1[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                        if(smart_router) {
                             smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     }
@@ -475,7 +537,7 @@ void run_smallbank_txns(thread_params* params) {
                         int balance = result2[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
                         savings_balance = result2[0]["balance"].as<int>();
-                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                        if(smart_router) {
                             smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id, routed_node_id);
                         }
                     }
@@ -488,7 +550,7 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result3[0]["id"].as<int>();
                         int balance = result3[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                        if(smart_router) {
                             smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     }
@@ -503,7 +565,7 @@ void run_smallbank_txns(thread_params* params) {
                         int balance = result1[0]["balance"].as<int>();
                         // get and update page_id
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                        if(smart_router) {
                             smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     }
@@ -516,7 +578,7 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result2[0]["id"].as<int>();
                         int balance = result2[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                        if(smart_router) {
                             smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     }
@@ -530,7 +592,7 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result[0]["id"].as<int>();
                         int balance = result[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                        if(smart_router) {
                             smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     }
@@ -546,7 +608,7 @@ void run_smallbank_txns(thread_params* params) {
                         std::string ctid = result[0]["ctid"].as<std::string>();
                         int id = result[0]["id"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                        if(smart_router) {
                             smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id, routed_node_id);
                         }
                     }
@@ -555,7 +617,7 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result2[0]["id"].as<int>();
                         int balance = result2[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                        if(smart_router) {
                             smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id, routed_node_id);
                         }
                     }
@@ -571,7 +633,7 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result[0]["id"].as<int>();
                         int balance = result[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                        if(smart_router) {
                             smart_router->update_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page_id, routed_node_id);
                         }
                     } 
@@ -580,7 +642,7 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result2[0]["id"].as<int>();
                         int balance = result2[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                        if(smart_router) {
                             smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id, routed_node_id);
                         }
                     }
@@ -593,7 +655,7 @@ void run_smallbank_txns(thread_params* params) {
                         int id = result[0]["id"].as<int>();
                         int balance = result[0]["balance"].as<int>();
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        if(SYSTEM_MODE == 3 && smart_router != nullptr) {
+                        if(smart_router) {
                             smart_router->update_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page_id, routed_node_id);
                         }
                     }
@@ -797,6 +859,20 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--try-count") {
+            if (i + 1 < argc) {
+                try_count = std::stoi(argv[++i]);
+                if (try_count <= 0) {
+                    std::cerr << "Error: Try count must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Try count set to: " << try_count << std::endl;
+            } else {
+                std::cerr << "Error: --try-count requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else {
             std::cerr << "Error: Unknown argument " << arg << std::endl;
             print_usage(argv[0]);
@@ -819,13 +895,16 @@ int main(int argc, char *argv[]) {
         std::cout << "\033[31m  page hashing router \033[0m" << std::endl;
         break;
     case 3:
-        std::cout << "\033[31m  smart router \033[0m" << std::endl;
+        std::cout << "\033[31m  page affinity router \033[0m" << std::endl;
         break;
     case 4:
         std::cout << "\033[31m  single node \033[0m" << std::endl;
         break; 
     case 5:
         std::cout << "\033[31m  ontime router \033[0m" << std::endl;
+        break;
+    case 6:
+        std::cout << "\033[31m  key affinity router \033[0m" << std::endl;
         break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
@@ -871,6 +950,9 @@ int main(int argc, char *argv[]) {
         std::cerr << "Failed to open access key log file." << std::endl;
         return -1;
     }
+#else 
+    // delete existing log file if any
+    std::remove(access_log_file_name.c_str());
 #endif
 
     pqxx::connection *conn0 = nullptr;
@@ -899,7 +981,7 @@ int main(int argc, char *argv[]) {
     // Create table and indexes
     create_table(conn0);
 
-    if(SYSTEM_MODE == 3) {
+    if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6) {
         std::cout << "Initializing Smart Router..." << std::endl;
         // Create a BtreeService
         BtreeIndexService *index_service = new BtreeIndexService(DBConnection, {"idx_checking_id", "idx_savings_id"}, read_btree_mode, read_frequency);
@@ -948,7 +1030,7 @@ int main(int argc, char *argv[]) {
               << ", End ID = " << end_snapshot_id << std::endl;
     
     if(smart_router){
-        std::cout << "Smart Router page stats: " << std::endl;
+        std::cout << "********** Smart Router page stats **********" << std::endl;
         int change_page_cnt = smart_router->get_stats().change_page_cnt;
         int page_update_cnt = smart_router->get_stats().page_update_cnt;
         int hit_cnt = smart_router->get_stats().hot_hit;
@@ -956,7 +1038,18 @@ int main(int argc, char *argv[]) {
         std::cout << "Hot page hit: " << hit_cnt << ", miss: " << miss_cnt 
                   << ", hit ratio: " << (hit_cnt + miss_cnt > 0 ? (double)hit_cnt / (hit_cnt + miss_cnt) * 100.0 : 0.0) << "%" << std::endl;
         std::cout << "Page ID changes: " << change_page_cnt << std::endl;
-        std::cout << "Page updates: " << page_update_cnt << std::endl;
+        std::cout << "Page updates: " << page_update_cnt << std::endl; 
+        const NewMetis::Stats& metis_stats = smart_router->get_metis_stats();
+        std::cout << "Metis total nodes in graph: " << metis_stats.total_nodes_in_graph << std::endl;
+        std::cout << "Metis total edges in graph: " << metis_stats.total_edges_in_graph << std::endl;
+        std::cout << "Metis total edges weight: " << metis_stats.total_edges_weight << std::endl;
+        std::cout << "Metis edge weight cut: " << metis_stats.cut_edges_weight << std::endl;
+        std::cout << "Metis edge cut ratio: " << 1.0 * metis_stats.cut_edges_weight / metis_stats.total_edges_weight << std::endl;
+        std::cout << "Metis cross node decisions: " << metis_stats.total_cross_partition_decisions << std::endl;
+        std::cout << "Metis partial affinity decisions: " << metis_stats.partial_affinity_decisions << std::endl;
+        std::cout << "Metis full affinity decisions: " << metis_stats.entire_affinity_decisions << std::endl;
+        std::cout << "Metis missing decisions: " << metis_stats.missing_node_decisions << std::endl; 
+        std::cout << "*********************************************" << std::endl;
     }
     std::cout << "All transaction threads completed." << std::endl;
     for(int i =0; i<DBConnection.size(); i++){
@@ -977,7 +1070,7 @@ int main(int argc, char *argv[]) {
     char buffer[100];
     std::strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", now_tm);
     std::string timestamp(buffer);  
-    std::string report_file = "smallbank_report_" + timestamp + ".html";
+    std::string report_file = "smallbank_report_" + timestamp + "_mode" + std::to_string(SYSTEM_MODE) + ".html";
     generate_perf_kwr_report(conn0, start_snapshot_id, end_snapshot_id, report_file);
 
     // 关闭连接

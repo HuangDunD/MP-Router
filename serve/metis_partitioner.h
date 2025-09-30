@@ -63,6 +63,22 @@ public:
         std::unordered_map<uint64_t, idx_t> &current_partition_node_map_ref // 传入引用以修改
     );
 
+    struct Stats {
+        int total_nodes_in_graph = 0;
+        int total_edges_in_graph = 0;
+        int total_edges_weight = 0;
+        int cut_edges_weight = 0;
+        std::atomic<uint64_t> total_partition_calls = 0;
+        std::atomic<uint64_t> missing_node_decisions = 0;
+        std::atomic<uint64_t> entire_affinity_decisions = 0;
+        std::atomic<uint64_t> partial_affinity_decisions = 0;
+        std::atomic<uint64_t> total_cross_partition_decisions = 0;
+    };
+
+    const Stats& get_stats() const {
+        return stats_;
+    }
+
 private:
     // Internal Graph Representation
     std::set<uint64_t> active_nodes_;
@@ -84,6 +100,9 @@ private:
     std::string partition_output_file_ = "graph_partitions.csv";
     std::string partition_log_file_ = "partitioning_log.log";
     uint64_t num_partitions_;
+
+    // statistics for monitoring
+    Stats stats_;
 
     // Dense ID Mapping
     std::unordered_map<uint64_t, idx_t> regionid_to_denseid_map_;
@@ -157,7 +176,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
         for (const uint64_t &regionid: unique_mapped_ids_in_group) {
             active_nodes_.insert(regionid);
             partition_graph_.try_emplace(regionid);
-            partition_weight_.try_emplace(regionid, 1);
+            partition_weight_.try_emplace(regionid, 1); // 点的权重就是1
 
             auto map_it = regionid_to_denseid_map_.find(regionid);
             if (map_it == regionid_to_denseid_map_.end()) {
@@ -198,7 +217,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
 #endif
     // --- End Submit Partition Task ---
 
-    idx_t final_partition_index_result = 0; // Default: no specific partition index determined
+    idx_t final_partition_index_result = -1; // Default: no specific partition index determined
     bool decision_made = false;
     std::string cross_partition_log_message_str; {
         std::shared_lock<std::shared_mutex> lock(partition_map_mutex_);
@@ -217,7 +236,16 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                 }
             }
 
-            if (partition_counts.size() > 1) {
+            std::stringstream group_ss;
+            group_ss << "[";
+            for (size_t i = 0; i < unique_mapped_ids_in_group.size(); ++i) {
+                group_ss << unique_mapped_ids_in_group[i] << (
+                    i == unique_mapped_ids_in_group.size() - 1 ? "" : ", ");
+            }
+            group_ss << "]"; 
+
+            if (partition_counts.size() > 1) { 
+                // 匹配到的图上的节点大于1, 取最大分布的亲和性作为路由节点
                 decision_made = true;
                 idx_t dominant_partition_idx = -1;
                 uint64_t max_count = 0;
@@ -235,15 +263,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                 counts_ss << "}";
                 final_partition_index_result = dominant_partition_idx;
 
-                std::stringstream group_ss;
-                group_ss << "[";
-                for (size_t i = 0; i < unique_mapped_ids_in_group.size(); ++i) {
-                    group_ss << unique_mapped_ids_in_group[i] << (
-                        i == unique_mapped_ids_in_group.size() - 1 ? "" : ", ");
-                }
-                group_ss << "]";
-
-                cross_partition_log_message_str = "Cross-partition detected in " + group_ss.str() +
+                cross_partition_log_message_str = "[Route Decision] Cross-partition detected in " + group_ss.str() +
                                                   ". Counts per PartitionIndex: " + counts_ss.str() +
                                                   ". Choosing dominant PartitionIndex: " + std::to_string(
                                                       dominant_partition_idx) +
@@ -252,13 +272,31 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                     cross_partition_log_message_str += " Note: " + std::to_string(unmapped_count) +
                             " node(s) in the group were not found in the current partition map.";
                 }
+
+                // for statistics
+                stats_.total_cross_partition_decisions++;
             } else if (partition_counts.size() == 1 && unmapped_count == 0) {
+                // 等于1且没有unmapped, 直接使用该PartitionIndex
                 decision_made = true;
                 final_partition_index_result = partition_counts.begin()->first; // The only PartitionIndex present
-                cross_partition_log_message_str = "Group maps entirely to PartitionIndex: " + std::to_string(
-                                                      final_partition_index_result);
+                cross_partition_log_message_str = "[Route Decision] Group maps entirely to PartitionIndex: " + std::to_string(
+                                                      final_partition_index_result) + "<---" + group_ss.str();
+
+                // for statistics
+                stats_.entire_affinity_decisions++;
+            } else if (partition_counts.size() == 1 && unmapped_count > 0) {
+                // 等于1但有unmapped, 直接使用该PartitionIndex (部分匹配到)
+                decision_made = true;
+                final_partition_index_result = partition_counts.begin()->first; // The only PartitionIndex present
+                cross_partition_log_message_str = "[Route Decision] Group partially maps to PartitionIndex: " + std::to_string(
+                                                      final_partition_index_result)  + "<---" + group_ss.str() + 
+                                                  ". Note: " + std::to_string(unmapped_count) +
+                                                  " node(s) in the group were not found in the current partition map.";
+                // for statistics
+                stats_.partial_affinity_decisions++;
             } else if (partition_counts.empty() && unmapped_count > 0) {
-                decision_made = true; // A decision that no mapping exists
+                // 都没有匹配到, 那么返回-1
+                decision_made = false; // A decision that no mapping exists
                 // final_partition_index_result remains -1
                 std::stringstream group_ss;
                 group_ss << "[";
@@ -267,11 +305,13 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                         i == unique_mapped_ids_in_group.size() - 1 ? "" : ", ");
                 }
                 group_ss << "]";
-                cross_partition_log_message_str = "Missing: None of the nodes in group " + group_ss.str() +
+                cross_partition_log_message_str = "[Route Decision] Missing: None of the nodes in group " + group_ss.str() +
                                                   " found in the current partition map. Cannot determine dominant PartitionIndex.";
+                // for statistics
+                stats_.missing_node_decisions++;
+            } else {
+                assert(false && "Unexpected state in partition_counts analysis.");
             }
-            // If partition_node_map was not empty, but the group didn't match any of the above (e.g. all unmapped, but partition_counts empty),
-            // decision_made might still be false, and final_partition_index_result will be -1.
         }
     } // partition_map_mutex_ (SHARED lock) is released here
 
@@ -290,6 +330,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
                                                const std::string &log_file_path,
                                                uint64_t ComputeNodeCount) {
     std::cout<<"[Partition] Starting internal graph partitioning task (using DENSE ID snapshot)..." << std::endl;
+    this->stats_.total_partition_calls++;
     std::ofstream log_stream(log_file_path, std::ios::app);
     if (!log_stream.is_open()) {
         std::cerr << "[Partition Error] Failed to open log file: " << log_file_path << std::endl;
@@ -301,7 +342,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
     std::vector<idx_t> vwgt_csr;
     std::vector<idx_t> adjwgt_csr;
     std::vector<idx_t> part_csr;
-
+    uint64_t total_edge_weight_sum = 0;
     idx_t nvtx_for_metis = 0;
     const idx_t ncon_for_metis = 1;
     bool conversion_to_csr_successful = true;
@@ -363,7 +404,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
         logger_.info("Graph snapshot created. Releasing graph_data_mutex_.");
     }
 
-    size_t total_degree_sum_csr = 0;
+    size_t total_degree_sum_csr = 0; // Total number of edges (sum of degrees)
     if (nvtx_for_metis > 0) {
         // Only proceed if there are vertices
         for (idx_t dense_i = 0; dense_i < nvtx_for_metis; ++dense_i) {
@@ -393,7 +434,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
     }
 
     logger_.info("Snapshot state (dense): nvtx_for_metis = " + std::to_string(nvtx_for_metis) +
-                 ", Total degree sum = " + std::to_string(total_degree_sum_csr));
+                 ", Total edges sum = " + std::to_string(total_degree_sum_csr));
 
     if (nvtx_for_metis == 0) {
         // Double check, could have been set to 0 if snapshot was inconsistent
@@ -449,6 +490,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
                     auto dense_id_it = original_to_dense_snapshot.find(neighbor_original_id);
                     if (dense_id_it != original_to_dense_snapshot.end()) {
                         sorted_dense_neighbors[dense_id_it->second] = edge_weight;
+                        total_edge_weight_sum += edge_weight;
                     } else {
                         logger_.info(
                             "Warning: Neighbor " + std::to_string(neighbor_original_id) + " of node " + std::to_string(
@@ -484,12 +526,16 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
             xadj_csr[nvtx_for_metis] = current_edge_ptr;
             if (current_edge_ptr != total_degree_sum_csr) {
                 logger_.info("Warning: CSR edge pointer count (" + std::to_string(current_edge_ptr) +
-                             ") does not match calculated total degree sum (" + std::to_string(total_degree_sum_csr) +
+                             ") does not match calculated total edges sum (" + std::to_string(total_degree_sum_csr) +
                              "). Mismatch in dense graph structure from snapshot.");
             } else {
+                //  输出边的数量
                 logger_.info(
                     "CSR conversion of snapshot successful. Total entries in adjncy/adjwgt: " + std::to_string(
-                        current_edge_ptr));
+                        current_edge_ptr / 2) +
+                    ". Total weight sum: " + std::to_string(total_edge_weight_sum / 2) + ".");
+                this->stats_.total_edges_in_graph = current_edge_ptr / 2; 
+                this->stats_.total_edges_weight = total_edge_weight_sum / 2;
             }
         }
     }
@@ -615,13 +661,15 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
         return;
     }
     logger_.info("METIS partitioning successful! Objective value (edge cut/volume): " + std::to_string(objval_metis));
-
-    this->stabilize_partition_indices(
-        nvtx_for_metis,
-        part_csr, // Raw METIS output (dense ID -> new_idx)
-        dense_to_original_snapshot, // Mapping from dense ID to original ID
-        this->partition_node_map // The member map that will be updated with stabilized indices
-    );
+    this->stats_.cut_edges_weight = objval_metis;
+    this->stats_.total_nodes_in_graph = nvtx_for_metis;
+    
+    // this->stabilize_partition_indices(
+    //     nvtx_for_metis,
+    //     part_csr, // Raw METIS output (dense ID -> new_idx)
+    //     dense_to_original_snapshot, // Mapping from dense ID to original ID
+    //     this->partition_node_map // The member map that will be updated with stabilized indices
+    // );
 
     // 调用稳定化函数，它会修改 this->partition_node_map
     // 在调用前，this->partition_node_map 存储的是旧的分区结果

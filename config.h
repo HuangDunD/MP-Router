@@ -22,8 +22,8 @@ extern int SYSTEM_MODE;
 
 // 定义所跑的workload 0:smallbank 1:tpcc
 #define WORKLOAD_MODE 1 // 0: ycsb 1: tpcc
-#define LOG_ACCESS_KEY 0 // 0: no log 1: log
-#define LOG_FRIEND_GRAPH 0 // 0: no log 1: log
+#define LOG_ACCESS_KEY 1 // 0: no log 1: log
+#define LOG_FRIEND_GRAPH 1 // 0: no log 1: log
 
 extern int ComputeNodeCount; // 计算节点数量
 extern uint64_t ATTEMPTED_NUM;

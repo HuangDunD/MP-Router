@@ -11,11 +11,13 @@
 #include <mutex>
 #include <iostream>
 #include <string>
+
 #include "common.h"
 #include "btree_search.h"
 #include "metis_partitioner.h"
 #include "threadpool.h"
 #include "log/Logger.h"
+#include "ownership_table.h"
 
 // SmartRouter: 一个针对 hot-key hash cache 设有严格内存预算的事务路由器。
 // 它维护：
@@ -47,7 +49,7 @@ struct DataItemKeyHash {
 class SmartRouter {
 public:
     struct Config {
-        std::size_t partition_nums = 2;
+        std::size_t partition_nums = ComputeNodeCount; // 分区数量，通常等于计算节点数量
 
         std::size_t hot_hash_cap_bytes = 64ULL * 1024ULL * 1024ULL; // 默认 64 MB, 作为 hot hash 的内存预算
         int thread_pool_size = 16; // 线程池大小
@@ -75,7 +77,7 @@ public:
     public:
         page_id_t page = 0; // 初始化page字段
         std::uint64_t freq = 0;
-        node_id_t last_node = -1; // 最近访问的节点ID，-1表示未设置
+        node_id_t key_access_last_node = -1; // 最近访问的节点ID，-1表示未设置
         uint64_t last_access_time = 0; // 最近访问时间（毫秒级）
         // LRU 列表迭代器
         std::list<DataItemKey>::iterator lru_it;
@@ -100,14 +102,13 @@ public:
 
     // 可能Update SQL执行之后数据页所在的位置, 根据returning ctid 进行更新key-page映射
     // 如果key不存在, 则不进行任何操作
-    inline void update_key_page(table_id_t table_id, itemkey_t key, page_id_t new_page, node_id_t routed_node_id) {
+    inline void update_key_page(table_id_t table_id, itemkey_t key, page_id_t ctid_ret_page, node_id_t routed_node_id) {
         std::lock_guard<std::mutex> lock(hot_mutex_);
         auto it = hot_key_map.find({table_id, key});
         if (it != hot_key_map.end()) {
             // hot hash 命中，更新 page
-            if(it->second.page != new_page){ // 只有在page变化时才更新
-                it->second.page = new_page;
-                it->second.last_node = routed_node_id;
+            if(it->second.page != ctid_ret_page){ // 只有在page变化时才更新
+                it->second.page = ctid_ret_page;
                 // 毫秒级时间戳
                 it->second.last_access_time = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -117,6 +118,16 @@ public:
                 stats_.change_page_cnt++;
             }
             else stats_.page_update_cnt++;
+
+            // 判断 key_access_last_node 是否变化
+            node_id_t last_node = it->second.key_access_last_node;
+            if(last_node != routed_node_id) {
+                logger.info("Key (table_id=" + std::to_string(table_id) + ", key=" + std::to_string(key) +
+                            ") page changed from " + std::to_string(it->second.page) + " to " + std::to_string(ctid_ret_page) +
+                            ", last_node changed from " + std::to_string(last_node) + " to " + std::to_string(routed_node_id));
+            }
+            // 更新 last_node
+            it->second.key_access_last_node = routed_node_id;
         }
     }
 
@@ -152,46 +163,61 @@ public:
 
     // ******************* METIS ******************
     // 执行分区操作，返回分区结果
-    struct AffinityResult {
+    struct SmartRouterResult {
         bool success = false;
-        int affinity_id = -1;
+        int smart_router_id = -1;
         std::string error_message;
         size_t keys_processed = 0;
     };
 
-    AffinityResult get_route_primary(std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, std::vector<pqxx::connection *> &thread_conns){
-        AffinityResult result;
+    SmartRouterResult get_route_primary(std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, std::vector<pqxx::connection *> &thread_conns){
+        SmartRouterResult result;
         if (table_ids.size() != keys.size() || table_ids.empty()) {
             result.error_message = "Mismatched or empty table_ids and keys";
             return result;
         }
 
-        std::vector<uint64_t> table_page_id; // 高32位存table_id，低32位存page_id
-        std::unordered_map<node_id_t, int> node_count_basedon_last; // 基于last_node的计数
+        std::vector<uint64_t> table_page_id; // 高32位存table_id，低32位存page_id, for SYSTEM_MODE 3
+        std::unordered_map<node_id_t, int> node_count_basedon_last; // 基于last_node的计数, for SYSTEM_MODE 5
+        std::vector<uint64_t> table_key_id;  // 高32位存table_id，低32位存key, for SYSTEM_MODE 6
         table_page_id.reserve(keys.size());
         for (size_t i = 0; i < keys.size(); ++i) {
-            auto entry = lookup(table_ids[i], keys[i], thread_conns);
-            if(SYSTEM_MODE == 5) {
-                // !如果是模式5，则统计last_node出现的次数
-                if (entry.last_node != -1) {
-                    node_count_basedon_last[entry.last_node]++;
+            if(SYSTEM_MODE == 3) {
+                auto entry = lookup(table_ids[i], keys[i], thread_conns);
+                // 计算page id
+                if (entry.page == kInvalidPageId) {
+                    result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
+                                        ", key=" + std::to_string(keys[i]) + ")";
+                    continue;
+                }
+                table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | entry.page);
+            }
+            else if(SYSTEM_MODE == 5) {
+                auto entry = lookup(table_ids[i], keys[i], thread_conns);
+                // 如果是模式5，则统计key_access_last_node出现的次数
+                if (entry.key_access_last_node != -1) {
+                    node_count_basedon_last[entry.key_access_last_node]++;
                 }
             }
-            if (entry.page == kInvalidPageId) {
-                result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
-                                       ", key=" + std::to_string(keys[i]) + ")";
-                continue;
+            else if(SYSTEM_MODE == 6) {
+                // 计算key id
+                table_key_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | keys[i]); 
             }
-            table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | entry.page);
+            else { 
+                assert(false); // unknown mode
+            }
         }
 
         try {
-            // 去重优化
-            std::sort(table_page_id.begin(), table_page_id.end());
-            table_page_id.erase(std::unique(table_page_id.begin(), table_page_id.end()), table_page_id.end());
-            result.keys_processed = table_page_id.size();
-            result.affinity_id = metis_.build_internal_graph(table_page_id);
-            if(SYSTEM_MODE == 5) {
+            if (SYSTEM_MODE == 3) {
+                // 基于page Metis的结果进行分区
+                // 去重优化
+                std::sort(table_page_id.begin(), table_page_id.end());
+                table_page_id.erase(std::unique(table_page_id.begin(), table_page_id.end()), table_page_id.end());
+                result.keys_processed = table_page_id.size();
+                result.smart_router_id = metis_.build_internal_graph(table_page_id);
+            }
+            else if (SYSTEM_MODE == 5) {
                 // !如果是模式5，则结合last_node的计数结果进行调整
                 int max_count = 0;
                 node_id_t candidate_node = -1;
@@ -202,27 +228,31 @@ public:
                     }
                 }
                 if (candidate_node != -1) {
-                    // 如果last_node中出现次数最多的节点与METIS结果不同，则以一定概率选择它
-                    if (candidate_node != result.affinity_id) {
-                        // // 计算选择概率，简单起见，这里设为出现次数占比
-                        // double probability = static_cast<double>(max_count) / keys.size();
-                        // double rand_val = static_cast<double>(rand()) / RAND_MAX;
-                        // if (rand_val < probability) {
-                        //     result.affinity_id = candidate_node;
-                        //     logger.log(Logger::LogLevel::INFO, "SmartRouter", "Adjusted affinity to node " +
-                        //                                                std::to_string(candidate_node) +
-                        //                                                " based on last_node frequency.");
-                        // }
+                    if (candidate_node != result.smart_router_id) {
                         // !直接选择出现次数最多的节点
-                        result.affinity_id = candidate_node;
+                        result.smart_router_id = candidate_node;
                     }
                 }
+                else {
+                    // 在运行前面一段时间, 因为初始化时没有last_node, 导致这里没有任何候选节点
+                    // 那就随机选择一个
+                    result.smart_router_id = rand() % cfg_.partition_nums;
+                }
             }
-            result.success = (result.affinity_id >= 0);
+            else if (SYSTEM_MODE == 6) {
+                // SYSTEM_MODE 6: 按照key做亲和性划分
+                // 去重优化
+                std::sort(table_key_id.begin(), table_key_id.end());
+                table_key_id.erase(std::unique(table_key_id.begin(), table_key_id.end()), table_key_id.end());
+                result.keys_processed = table_key_id.size();
+                result.smart_router_id = metis_.build_internal_graph(table_key_id);
+            }
 
-            if (!result.success) {
-                result.error_message = "METIS partitioning failed";
+            if(result.smart_router_id == -1) {
+                // 如果没有决定, 则随机选择一个节点
+                result.smart_router_id = rand() % cfg_.partition_nums; // 随机选择一个节点
             }
+            result.success = true;
         }
         catch (const std::exception &e) {
             result.error_message = std::string("Exception during partitioning: ") + e.what();
@@ -239,6 +269,10 @@ public:
 
     Stats& get_stats() {
         return stats_;
+    }
+
+    const NewMetis::Stats& get_metis_stats() const {
+        return metis_.get_stats();
     }
 
 private:
@@ -343,6 +377,9 @@ private:
 
     // 二级缓存: B+ 树的非叶子节点, 在路由层通过维护B+树的中间节点，通过pageinspect插件访问B+树的叶子节点获取key->page的映射
     BtreeIndexService *btree_service_;
+
+    // 页面所有权表
+    OwnershipTable ownership_table_;
 
     //for metis
     ThreadPool pool;

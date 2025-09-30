@@ -27,6 +27,7 @@ using offset_t = int64_t;     // Offset type.
 using timestamp_t = uint64_t; // Timestamp type
 
 #define MAX_DB_TABLE_NUM 15      // Max DB tables
+#define MAX_DB_PAGE_NUM  5000000    // Max pages per table
 
 #define LOG_FILE_NAME "LOG_FILE"   
 

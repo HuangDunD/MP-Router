@@ -109,7 +109,7 @@ public:
         if(page_id <= 0) return;
         // Placeholder for reading B-tree node from the database
         // This function should query the database to populate keys and values
-        std::cout << "Reading B-tree node with page_id: " << page_id << " from database." << std::endl;
+        // std::cout << "Reading B-tree node with page_id: " << page_id << " from database." << std::endl;
         std::string items_query = "SELECT * FROM bt_page_items('" + index_name + "', " + std::to_string(page_id) + ")";
         std::string stats_query = "SELECT * FROM bt_page_stats('" + index_name + "', " + std::to_string(page_id) + ")";
 
@@ -168,9 +168,9 @@ public:
             if (!result.empty()) {
                 std::lock_guard<std::mutex> lock(index_mutex); // Ensure thread safety
                 root_page_id = result[0]["root"].as<int>();
-                std::cout << "Root page ID: " << root_page_id << std::endl;
+                // std::cout << "Root page ID: " << root_page_id << std::endl;
                 level = result[0]["level"].as<int>();
-                std::cout << "B-tree level: " << level << std::endl;
+                // std::cout << "B-tree level: " << level << std::endl;
             } else {
                 std::cerr << "No metadata found for index: " << index_name << std::endl;
             }
@@ -191,7 +191,7 @@ public:
         std::vector<int> next_level_nodes;
         internal_nodes.push_back(root_page_id);
         for(int l = 0; l < level-1; l++) {
-            std::cout << "Reading internal nodes at level " << l + 1 << std::endl;
+            // std::cout << "Reading internal nodes at level " << l + 1 << std::endl;
             for(const auto& node : internal_nodes) {
                 for (const auto& child_page_id : nodes[node]->values) {
                     // 读取子节点
