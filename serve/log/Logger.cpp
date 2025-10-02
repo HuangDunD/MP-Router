@@ -7,10 +7,11 @@ Logger::Logger()
     : target(LogTarget::TERMINAL_ONLY),
       min_level(LogLevel::DEBUG),
       buffer_capacity_bytes(DEFAULT_BUFFER_CAPACITY) {
-    char time_buffer[64];
-    formatCurrentTime(time_buffer, sizeof(time_buffer));
-    std::cout << "[WELCOME] " << __FILE__ << " " << time_buffer << " : === Start logging ===\n";
-    std::cout.flush(); // Flush welcome message for terminal
+        std::lock_guard<std::mutex> lk(mutex_);
+        char time_buffer[64];
+        formatCurrentTime(time_buffer, sizeof(time_buffer));
+        std::cout << "[WELCOME] " << __FILE__ << " " << time_buffer << " : === Start logging ===\n";
+        std::cout.flush(); // Flush welcome message for terminal
 }
 
 Logger::Logger(LogTarget target, LogLevel min_level, const std::string& file_path, size_t buffer_cap_bytes)
@@ -31,12 +32,13 @@ Logger::Logger(LogTarget target, LogLevel min_level, const std::string& file_pat
             std::cerr.flush();
             this->target = LogTarget::TERMINAL_ONLY; // Fallback
         } else {
+            std::lock_guard<std::mutex> lk(mutex_);
             // 如果日志文件已存在则先删除
-            // std::ifstream test_exist(this->path);
-            // if (test_exist.good()) {
-            //     test_exist.close();
-            //     std::remove(this->path.c_str());
-            // }
+            std::ifstream test_exist(this->path);
+            if (test_exist.good()) {
+                test_exist.close();
+                std::remove(this->path.c_str());
+            }
             outfile.open(this->path, std::ios::out | std::ios::app);
             if (!outfile.is_open()) {
                 std::cerr << welcome_prefix << __FILE__ << " " << time_buffer
@@ -60,6 +62,8 @@ Logger::Logger(LogTarget target, LogLevel min_level, const std::string& file_pat
 }
 
 Logger::~Logger() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    shutting_down_.store(true, std::memory_order_relaxed);
     bool terminal_goodbye_needed = (target == LogTarget::TERMINAL_ONLY || target == LogTarget::FILE_AND_TERMINAL);
 
     if (outfile.is_open()) {
@@ -86,6 +90,10 @@ void Logger::setMinLevel(LogLevel new_level) {
 }
 
 void Logger::output(const std::string& text, LogLevel current_message_level) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (shutting_down_.load(std::memory_order_relaxed)) {
+        return;
+    }
     if (current_message_level < this->min_level) {
         return;
     }
@@ -111,9 +119,12 @@ void Logger::output(const std::string& text, LogLevel current_message_level) {
             // Check conditions for flushing
             if (current_message_level == LogLevel::ERROR) {
                 flush_file_buffer(); // Immediate flush for errors
-            } else if (static_cast<size_t>(file_log_buffer.tellp()) >= buffer_capacity_bytes) {
-                // Using tellp() to get current size of stringstream buffer
-                flush_file_buffer(); // Flush if buffer is full
+            } else {
+                // Prefer checking buffer string size to avoid tellp() returning -1 when state is bad
+                const std::string& buf_ref = file_log_buffer.str();
+                if (buf_ref.size() >= buffer_capacity_bytes) {
+                    flush_file_buffer();
+                }
             }
         }
     }
@@ -145,9 +156,7 @@ void Logger::warning(const std::string& text) {
 }
 
 void Logger::error(const std::string& text) {
-    target=LogTarget::FILE_AND_TERMINAL;
     output(text, LogLevel::ERROR);
-    target=LogTarget::FILE_ONLY;
 }
 
 /*

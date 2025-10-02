@@ -10,6 +10,8 @@
 #include <iomanip>
 #include <ctime>
 #include <sstream> // For std::stringstream (our buffer)
+#include <mutex>
+#include <atomic>
 
 inline void formatCurrentTime(char* buffer, size_t buffer_size) {
     using namespace std::chrono;
@@ -44,6 +46,9 @@ private:
     LogTarget target;
     std::string path;
     LogLevel min_level;
+    // Synchronization for multi-threaded logging
+    mutable std::mutex mutex_;
+    std::atomic<bool> shutting_down_{false};
 
     // Buffering members for file output
     std::stringstream file_log_buffer;
@@ -61,7 +66,7 @@ private:
         }
     }
 
-    // Helper to flush the file buffer
+    // Helper to flush the file buffer. Caller MUST hold mutex_.
     void flush_file_buffer() {
         if (!outfile.is_open() || file_log_buffer.tellp() == 0) { // No file or buffer empty
             return;
