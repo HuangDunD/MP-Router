@@ -31,6 +31,12 @@ Logger::Logger(LogTarget target, LogLevel min_level, const std::string& file_pat
             std::cerr.flush();
             this->target = LogTarget::TERMINAL_ONLY; // Fallback
         } else {
+            // 如果日志文件已存在则先删除
+            // std::ifstream test_exist(this->path);
+            // if (test_exist.good()) {
+            //     test_exist.close();
+            //     std::remove(this->path.c_str());
+            // }
             outfile.open(this->path, std::ios::out | std::ios::app);
             if (!outfile.is_open()) {
                 std::cerr << welcome_prefix << __FILE__ << " " << time_buffer

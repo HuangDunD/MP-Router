@@ -78,7 +78,7 @@ void test_partition_latency() {
                     std::string graph_file = "/tmp/test_graph_" + std::to_string(node_count) + "_" + std::to_string(i) + ".graph";
                     std::string part_file = "/tmp/test_part_" + std::to_string(node_count) + "_" + std::to_string(i) + ".part";
 
-                    metis_partitioner.partition_internal_graph(graph_file, part_file, 4);
+                    metis_partitioner.partition_internal_graph(graph_file, 4);
 
                     auto end_time = std::chrono::high_resolution_clock::now();
 
@@ -195,7 +195,7 @@ void test_partition_count_impact() {
                     std::string graph_file = "/tmp/test_parts_" + std::to_string(part_count) + "_" + std::to_string(i) + ".graph";
                     std::string part_file = "/tmp/test_parts_" + std::to_string(part_count) + "_" + std::to_string(i) + ".part";
 
-                    metis_partitioner.partition_internal_graph(graph_file, part_file, part_count);
+                    metis_partitioner.partition_internal_graph(graph_file, part_count);
 
                     auto end_time = std::chrono::high_resolution_clock::now();
 

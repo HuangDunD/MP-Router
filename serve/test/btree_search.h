@@ -12,35 +12,7 @@
 #include <sstream>
 #include <cassert>
 #include "common.h"
-
-// 解析ctid字符串，提取page_id
-// ctid格式为 "(page_id,tuple_index)"，例如 "(0,1)"
-std::pair<int, int> parse_page_id_from_ctid(const std::string& ctid) {
-    int block = -1, offset = -1;
-    sscanf(ctid.c_str(), "(%d,%d)", &block, &offset);
-    return {block, offset};
-}
-
-int64_t decode_hex_key(const std::string &hex_str) {
-    std::stringstream ss;
-    std::string clean_hex;
-
-    for (char c : hex_str) {
-        if (std::isxdigit(c)) clean_hex += c;
-    }
-
-    // 解析为 64-bit 小端整数
-    if (clean_hex.size() < 16) return -1;
-
-    int64_t value = 0;
-    for (int i = 0; i < 8; i++) {
-        std::string byte_str = clean_hex.substr(i * 2, 2);
-        uint8_t byte_val = std::stoi(byte_str, nullptr, 16);
-        value |= (static_cast<int64_t>(byte_val) << (8 * i));  // Little-endian shift
-    }
-
-    return value;
-}
+#include "parse.h"
 
 enum class BtreeNodeType {
     LEAF,
@@ -160,7 +132,7 @@ public:
     void read_btree_meta(pqxx::connection* conn) {
         // Placeholder for reading B-tree metadata from the database
         // This function should query the database to get the root page ID and other metadata
-        std::cout << "Reading B-tree metadata for index: " << index_name << std::endl;
+        // std::cout << "Reading B-tree metadata for index: " << index_name << std::endl;
         std::string meta_query = "SELECT * FROM bt_metap ('" + index_name + "')";
         try {
             pqxx::work txn(*conn);
@@ -375,9 +347,12 @@ public:
             btree_index->read_all_internal_nodes(connections_[0]);
             // Start background thread to periodically read B-tree index
             std::thread btree_background_thread([this, btree_read_mode, frequency, btree_index, connections_]() {
+                // 设置线程名称
+                std::string index_name = btree_index->index_name;
+                pthread_setname_np(pthread_self(), ("BtreeBG_" + index_name).c_str());
                 while (true) {
                     std::this_thread::sleep_for(std::chrono::seconds(frequency));
-                    std::cout << "Checking B-tree index for " << btree_index->index_name << "..." << std::endl;
+                    // std::cout << "Checking B-tree index for " << btree_index->index_name << "..." << std::endl;
                     pqxx::connection* conn = nullptr;
                     if(btree_read_mode == 0) {
                         conn = connections_[0]; // Use the first connection for reading

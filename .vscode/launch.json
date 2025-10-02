@@ -80,7 +80,7 @@
             "program": "${workspaceFolder}/build/serve/test/smallbank_test",
             "args": [
                 "--system-mode",
-                "6", 
+                "3", 
                 "--access-pattern",
                 "1",
                 "--zipfian-theta",
@@ -88,7 +88,7 @@
                 "--account-count",
                 "300000",
                 "--worker-threads",
-                "16"
+                "1"
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/build/serve/test/",
