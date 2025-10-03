@@ -688,6 +688,22 @@ void print_usage(const char* program_name) {
     std::cout << "  " << program_name << " --system-mode 2 --account-count 100000" << std::endl;
 }
 
+void print_tps_loop() {
+    using namespace std::chrono;
+    uint64_t last_count = 0;
+    auto last_time = steady_clock::now();
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        auto now = steady_clock::now();
+        uint64_t cur_count = exe_count.load(std::memory_order_relaxed);
+        double seconds = duration_cast<duration<double>>(now - last_time).count();
+        double tps = (cur_count - last_count) / seconds;
+        printf("[TPS] %.2f txn/sec (total: %lu)\n", tps, cur_count);
+        last_count = cur_count;
+        last_time = now;
+    }
+}
+
 int main(int argc, char *argv[]) {
     Logger* logger_ = new Logger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::INFO, partition_log_file_, 4096);
     // Register signal handler for SIGINT (Ctrl+C)
@@ -911,11 +927,11 @@ int main(int argc, char *argv[]) {
     std::cout << "Loading database connection info..." << std::endl;
 
     // !!! need to update when changing the cluster environment
-    // DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
 
-    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
-    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
     ComputeNodeCount = DBConnection.size();
     std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
 
@@ -993,6 +1009,11 @@ int main(int argc, char *argv[]) {
         params->thread_count = worker_threads;
         threads.emplace_back(run_smallbank_txns, params);
     }
+
+    // Start a separate thread to print TPS periodically
+    std::thread tps_thread(print_tps_loop);
+    tps_thread.detach(); // Detach the thread to run independently
+
     // Wait for all threads to complete
     for(auto& thread : threads) {
         thread.join();

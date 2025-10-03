@@ -115,8 +115,8 @@ public:
             auto original_page = it->second.page;
             if(it->second.page != ctid_ret_pages[i]){ // 只有在page变化时才更新
                 // 这个地方应该是访问了原来的页面和新的页面, 都变成了这个节点的所有权
-                ownership_table_->set_owner(table_ids[i], ctid_ret_pages[i], routed_node_id);
-                ownership_table_->set_owner(table_ids[i], original_page, routed_node_id); 
+                ownership_table_->set_owner(table_ids[i], keys[i], ctid_ret_pages[i], routed_node_id);
+                ownership_table_->set_owner(table_ids[i], keys[i], original_page, routed_node_id); 
                 it->second.page = ctid_ret_pages[i];
                 // 毫秒级时间戳
                 it->second.last_access_time = static_cast<uint64_t>(
@@ -128,7 +128,7 @@ public:
             }
             else{
                 // 仅访问了原来的页面, 仍然是这个节点的所有权
-                ownership_table_->set_owner(table_ids[i], original_page, routed_node_id); 
+                ownership_table_->set_owner(table_ids[i], keys[i], original_page, routed_node_id); 
                 stats_.page_update_cnt++;
             }
             // 更新 last_node
@@ -212,7 +212,7 @@ public:
                                         ", key=" + std::to_string(keys[i]) + ")";
                     assert(false); // 这里不应该失败
                 }
-                table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | entry.page);
+                table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | (entry.page / 1000));
             }
             else if(SYSTEM_MODE == 5) {
                 auto entry = lookup(table_ids[i], keys[i], thread_conns);

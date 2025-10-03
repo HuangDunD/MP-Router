@@ -40,17 +40,24 @@ public:
     }
 
     // 设置页面所有权, 如果所有权发生变化返回true，否则返回false
-    bool set_owner(table_id_t table_id, page_id_t page_id, node_id_t owner) {
+    bool set_owner(table_id_t table_id, itemkey_t access_key, page_id_t page_id, node_id_t owner) {
         if (table_id < 0 || table_id >= MAX_DB_TABLE_NUM) assert(false);
         if (page_id < 0 || page_id >= MAX_DB_PAGE_NUM) assert(false);
         auto& entry = table_[table_id][page_id];
         std::unique_lock lock(entry->mutex);
-        if (entry->owner == owner) return false;
+        if (entry->owner == owner) {
+        #if LOG_OWNERSHIP_CHANGE
+            uint64_t table_page_id = (static_cast<uint64_t>(table_id) << 32) | static_cast<uint64_t>(page_id);
+            logger->info("# Ownership not change: (table_id=" + std::to_string(table_id) + ", access_key=" + std::to_string(access_key) + ", page_id=" + std::to_string(page_id) + 
+                     ") --> " + std::to_string(table_page_id) + " owner remains: " + std::to_string(entry->owner));
+        #endif
+            return false;
+        }
         if(entry->owner != -1) {
             ownership_changes++;
         #if LOG_OWNERSHIP_CHANGE
             uint64_t table_page_id = (static_cast<uint64_t>(table_id) << 32) | static_cast<uint64_t>(page_id);
-            logger->info("Ownership changed: (table_id=" + std::to_string(table_id) + ", page_id=" + std::to_string(page_id) +
+            logger->info("! Ownership changed: (table_id=" + std::to_string(table_id) + ", access_key=" + std::to_string(access_key) + ", page_id=" + std::to_string(page_id) + 
                      ") --> " + std::to_string(table_page_id) + " original owner: " + std::to_string(entry->owner) + ", new owner: " + std::to_string(owner));
         #endif
         }

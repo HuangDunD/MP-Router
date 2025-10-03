@@ -366,7 +366,7 @@ public:
                     // Read B-tree internal nodes
                     btree_index->read_all_internal_nodes(conn);
 
-                    std::cout << "B-tree index for checking is up to date." << std::endl;
+                    // std::cout << "B-tree index for checking is up to date." << std::endl;
                 } 
             });
             std::string thread_name = "BtreeBG_" + index_name;

@@ -37,12 +37,16 @@ std::atomic<int> change_times;
 
 class NewMetis {
 public:
-    NewMetis(Logger* logger) : num_partitions_(0),
+    NewMetis(Logger* logger = nullptr) : num_partitions_(0),
                  logger_(logger),
                  gen_(rd()) {
-        // if(logger_ == nullptr) {
-        //     logger_ = new Logger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::INFO, partition_log_file_, 4096);
-        // }
+        if(logger_ == nullptr) {
+            logger_ = new Logger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::INFO, partition_log_file_, 4096);
+        }
+        // remove the output_partition_file
+        std::remove(partition_output_file_.c_str());
+        // remove the change_rate_report_file_
+        std::remove(change_rate_report_file_.c_str());
     }
 
     void set_thread_pool(ThreadPool *pool) {
@@ -100,6 +104,7 @@ private:
     std::atomic<uint64_t> last_partition_milestone_{0};
     ThreadPool *associated_thread_pool_ = nullptr;
     std::string partition_output_file_ = "graph_partitions.csv";
+    std::string change_rate_report_file_ = "partition_change_rate_report.txt";
     uint64_t num_partitions_;
 
     // statistics for monitoring
@@ -262,7 +267,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                 final_partition_index_result = dominant_partition_idx;
 
             #if LOG_METIS_DECISION
-                cross_partition_log_message_str = "[Route Decision] Cross-partition detected in " + group_str +
+                cross_partition_log_message_str = "[Route Decision] Epoch: " + std::to_string(stats_.total_partition_calls) + " Cross-partition detected in " + group_str +
                                                   ". Counts per PartitionIndex: " + counts_str +
                                                   ". Choosing dominant PartitionIndex: " + std::to_string(
                                                       dominant_partition_idx) +
@@ -279,7 +284,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                 decision_made = true;
                 final_partition_index_result = partition_counts.begin()->first; // The only PartitionIndex present
             #if LOG_METIS_DECISION
-                cross_partition_log_message_str = "[Route Decision] Group maps entirely to PartitionIndex: " + std::to_string(
+                cross_partition_log_message_str = "[Route Decision] Epoch: " + std::to_string(stats_.total_partition_calls) + " Group maps entirely to PartitionIndex: " + std::to_string(
                                                       final_partition_index_result) + "<---" + group_str;
             #endif
                 // for statistics
@@ -289,7 +294,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                 decision_made = true;
                 final_partition_index_result = partition_counts.begin()->first; // The only PartitionIndex present
             #if LOG_METIS_DECISION
-                cross_partition_log_message_str = "[Route Decision] Group partially maps to PartitionIndex: " + std::to_string(
+                cross_partition_log_message_str = "[Route Decision] Epoch: " + std::to_string(stats_.total_partition_calls) + " Group partially maps to PartitionIndex: " + std::to_string(
                                                       final_partition_index_result)  + "<---" + group_str + 
                                                   ". Note: " + std::to_string(unmapped_count) +
                                                   " node(s) in the group were not found in the current partition map.";
@@ -301,7 +306,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                 decision_made = false; // A decision that no mapping exists
                 // final_partition_index_result remains -1
             #if LOG_METIS_DECISION
-                cross_partition_log_message_str = "[Route Decision] Missing: None of the nodes in group " + group_str +
+                cross_partition_log_message_str = "[Route Decision] Epoch: " + std::to_string(stats_.total_partition_calls) + " Missing: None of the nodes in group " + group_str +
                                                   " found in the current partition map. Cannot determine dominant PartitionIndex.";
             #endif
                 // for statistics
@@ -327,7 +332,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
 // ========================================================================
 inline void NewMetis::partition_internal_graph(const std::string &output_partition_file,
                                                uint64_t ComputeNodeCount) {
-    std::cout<<"[Partition] Starting internal graph partitioning task (using DENSE ID snapshot)..." << std::endl;
+    // std::cout<<"[Partition] Starting internal graph partitioning task (using DENSE ID snapshot)..." << std::endl;
     this->stats_.total_partition_calls++;
     logger_->info("Starting internal graph partitioning task (using DENSE ID snapshot).");
 
@@ -675,7 +680,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
         this->partition_node_map // 将被修改的路由映射
     );
 
-    std::ofstream out_part_final(output_partition_file);
+    std::ofstream out_part_final(output_partition_file, std::ios::out | std::ios::app);
     if (!out_part_final.is_open()) {
         logger_->error("Cannot open partition output file " + output_partition_file); {
             std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
@@ -683,14 +688,14 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
         }
         return;
     }
-    out_part_final << "RegionID,TableID,InnerRegionID,PartitionIndex\n"; {
+    out_part_final << "Epoch,RegionID,TableID,InnerRegionID,PartitionIndex\n"; {
         std::shared_lock<std::shared_mutex> lock(partition_map_mutex_); // 只需要读锁
         for (const auto &pair: partition_node_map) {
             uint64_t original_id = pair.first;
             idx_t assigned_partition_index = pair.second;
             Region region(original_id);
-            out_part_final << original_id << "," << region.getTableId() << "," << region.getInnerRegionId() << "," <<
-                    assigned_partition_index << "\n";
+            out_part_final << stats_.total_partition_calls << "," << original_id << "," << region.getTableId() 
+                << "," << region.getInnerRegionId() << "," << assigned_partition_index << "\n";
         }
     }
     out_part_final.close();
@@ -938,7 +943,7 @@ void NewMetis::stabilize_partition_indices(
                       nodes_existing_in_old_map;
         change_rates_history_.push_back(change_rate);
         change_times++;
-        if (change_times % 10 == 0) {
+        // if (change_times % 10 == 0) {
             double sum_change_rates = 0.0;
             // Sum the last 10 rates, or all if fewer than 10
             size_t start_idx = 0;
@@ -950,7 +955,6 @@ void NewMetis::stabilize_partition_indices(
             }
             double average_change_rate = sum_change_rates / (change_rates_history_.size() - start_idx);
 
-            std::string change_rate_report_file_ = "partition_change_rate_report.txt";
             std::ofstream report_file(change_rate_report_file_, std::ios::app); // 以追加模式打开文件
             if (report_file.is_open()) {
                 report_file << "--- Partition Change Rate Report ---\n";
@@ -970,7 +974,7 @@ void NewMetis::stabilize_partition_indices(
                           << std::fixed << std::setprecision(4) << (average_change_rate * 100.0) << "%." << std::endl;
                 std::cout << "------------------------------------" << std::endl;
             }
-        }
+        // }
     } else {
         logger_->info(
             "Partition index stabilization complete. No nodes existed in the previous partition map to compare for change rate (old map was empty).");
