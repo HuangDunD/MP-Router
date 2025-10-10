@@ -101,5 +101,6 @@
         "cassert": "cpp",
         "*.inc": "cpp"
     },
-    "java.configuration.updateBuildConfiguration": "automatic"
+    "java.configuration.updateBuildConfiguration": "automatic",
+    "C_Cpp.errorSquiggles": "enabled"
 }

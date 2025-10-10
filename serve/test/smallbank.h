@@ -38,3 +38,20 @@ enum class SmallBankTableType : uint64_t {
   kSavingsTable = 0,
   kCheckingTable,
 };
+
+// Table id
+enum class SmallBankCityType : uint64_t {
+  kBeijing = 0,
+  kShanghai,
+  kGuangzhou,
+  kShenzhen,
+  kChengdu,
+  kWuhan,
+  kNanjing,
+  kHangzhou,
+  kChongqing,
+  kTianjin,
+  kXiAn,
+  // 在最后添加一个计数成员
+  Count 
+};

@@ -8,5 +8,5 @@ int REGION_SIZE = 1000;
 double AffinitySampleRate = 1;
 int TPCC_WAREHOUSE_NUM = -1;
 double AffinityTxnRatio = 1;
-uint64_t PARTITION_INTERVAL = 10000;
+uint64_t PARTITION_INTERVAL = 300000;
 std::string partition_log_file_ = "partitioning_log.log";

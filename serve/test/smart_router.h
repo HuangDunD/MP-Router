@@ -51,7 +51,7 @@ public:
     struct Config {
         std::size_t partition_nums = ComputeNodeCount; // 分区数量，通常等于计算节点数量
 
-        std::size_t hot_hash_cap_bytes = 64ULL * 1024ULL * 1024ULL; // 默认 64 MB, 作为 hot hash 的内存预算
+        std::size_t hot_hash_cap_bytes = 640ULL * 1024ULL * 1024ULL; // 默认 64 MB, 作为 hot hash 的内存预算
         int thread_pool_size = 16; // 线程池大小
         std::string log_file = "smart_router_metis.log"; // 日志文件
     };
@@ -70,6 +70,10 @@ public:
         // 页面更新计数
         std::atomic<int> change_page_cnt = 0;
         std::atomic<int> page_update_cnt = 0;
+        // Ownership 事务计数
+        std::atomic<int> ownership_random_txns = 0;
+        std::atomic<int> ownership_entirely_txns = 0;
+        std::atomic<int> ownership_cross_txns = 0;
     };
 
     // hot hash 层的热键条目
@@ -109,31 +113,36 @@ public:
             std::vector<page_id_t> ctid_ret_pages, node_id_t routed_node_id) {
         assert(table_ids.size() == keys.size() && keys.size() == ctid_ret_pages.size());
         for(size_t i=0; i<table_ids.size(); i++) {
-        std::lock_guard<std::mutex> lock(hot_mutex_);
-        auto it = hot_key_map.find({table_ids[i], keys[i]});
-        if (it != hot_key_map.end()) {
-            auto original_page = it->second.page;
-            if(it->second.page != ctid_ret_pages[i]){ // 只有在page变化时才更新
-                // 这个地方应该是访问了原来的页面和新的页面, 都变成了这个节点的所有权
-                ownership_table_->set_owner(table_ids[i], keys[i], ctid_ret_pages[i], routed_node_id);
-                ownership_table_->set_owner(table_ids[i], keys[i], original_page, routed_node_id); 
-                it->second.page = ctid_ret_pages[i];
-                // 毫秒级时间戳
-                it->second.last_access_time = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()
-                    ).count()
-                );
-                stats_.change_page_cnt++;
+            std::lock_guard<std::mutex> lock(hot_mutex_);
+            auto it = hot_key_map.find({table_ids[i], keys[i]});
+            if (it != hot_key_map.end()) {
+                auto original_page = it->second.page;
+                if(it->second.page != ctid_ret_pages[i]){ // 只有在page变化时才更新
+                    // 这个地方应该是访问了原来的页面和新的页面, 都变成了这个节点的所有                    
+                    ownership_table_->set_owner(table_ids[i], keys[i], ctid_ret_pages[i], routed_node_id);
+                    ownership_table_->set_owner(table_ids[i], keys[i], original_page, routed_node_id); 
+                    it->second.page = ctid_ret_pages[i];
+                    // 毫秒级时间戳
+                    it->second.last_access_time = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()
+                        ).count()
+                    );
+                    stats_.change_page_cnt++;
+                #if LOG_PAGE_UPDATE
+                    logger->info("Key (table_id=" + std::to_string(table_ids[i]) + ", key=" + std::to_string(keys[i]) + 
+                                    ") page changed from " + std::to_string(original_page) + " to " + std::to_string(ctid_ret_pages[i]) + 
+                                    " at node " + std::to_string(routed_node_id));
+                #endif 
+                }
+                else{
+                    // 仅访问了原来的页面, 仍然是这个节点的所有权
+                    ownership_table_->set_owner(table_ids[i], keys[i], original_page, routed_node_id); 
+                    stats_.page_update_cnt++;
+                }
+                // 更新 last_node
+                it->second.key_access_last_node = routed_node_id;
             }
-            else{
-                // 仅访问了原来的页面, 仍然是这个节点的所有权
-                ownership_table_->set_owner(table_ids[i], keys[i], original_page, routed_node_id); 
-                stats_.page_update_cnt++;
-            }
-            // 更新 last_node
-            it->second.key_access_last_node = routed_node_id;
-        }
         }
     };
 
@@ -165,6 +174,11 @@ public:
                         std::endl;
             }
         }
+    }
+
+    void reset_stats() {
+        std::lock_guard<std::mutex> lock(hot_mutex_);
+
     }
 
     // ******************* METIS ******************
@@ -202,6 +216,8 @@ public:
         std::vector<uint64_t> table_page_id; // 高32位存table_id，低32位存page_id, for SYSTEM_MODE 3
         std::unordered_map<node_id_t, int> node_count_basedon_key_access_last; // 基于key_access_last的计数, for SYSTEM_MODE 5
         std::vector<uint64_t> table_key_id;  // 高32位存table_id，低32位存key, for SYSTEM_MODE 6
+        std::unordered_map<node_id_t, int> node_count_basedon_page_access_last; // 基于page_access_last的计数, for SYSTEM_MODE 7
+        std::string debug_info;
         table_page_id.reserve(keys.size());
         for (size_t i = 0; i < keys.size(); ++i) {
             if(SYSTEM_MODE == 3) {
@@ -212,7 +228,14 @@ public:
                                         ", key=" + std::to_string(keys[i]) + ")";
                     assert(false); // 这里不应该失败
                 }
-                table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | (entry.page / 1000));
+                // 方法1: 直接使用page_id
+                table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | entry.page);
+                // 方法2: 每GroupPageAffinitySize个页面作为一个region, 这样可以减少图分区的大小
+                // table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | (entry.page / GroupPageAffinitySize));
+                // 方法3: 直接对page_id做hash, 这样可以减少图分区的大小, 这会使得负载变得更加均衡
+                // std::hash<page_id_t> h;
+                // int region_id = h(entry.page) % (cfg_.partition_nums * 1000); // 10倍分区数的region
+                // table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | region_id);
             }
             else if(SYSTEM_MODE == 5) {
                 auto entry = lookup(table_ids[i], keys[i], thread_conns);
@@ -224,6 +247,21 @@ public:
             else if(SYSTEM_MODE == 6) {
                 // 计算key id
                 table_key_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | keys[i]); 
+            }
+            else if(SYSTEM_MODE == 7) {
+                auto entry = lookup(table_ids[i], keys[i], thread_conns);
+                // 计算page id
+                if (entry.page == kInvalidPageId) {
+                    result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
+                                        ", key=" + std::to_string(keys[i]) + ")";
+                    assert(false); // 这里不应该失败
+                }
+                auto last_node = ownership_table_->get_owner(table_ids[i], entry.page);
+                if (last_node != -1) {
+                    node_count_basedon_page_access_last[last_node]++;
+                }
+                debug_info += "(table_id=" + std::to_string(table_ids[i]) + ", key=" + std::to_string(keys[i]) + 
+                              ", page=" + std::to_string(entry.page) + ", last_node=" + std::to_string(last_node) + "); ";
             }
             else { 
                 assert(false); // unknown mode
@@ -269,6 +307,42 @@ public:
                 table_key_id.erase(std::unique(table_key_id.begin(), table_key_id.end()), table_key_id.end());
                 result.keys_processed = table_key_id.size();
                 result.smart_router_id = metis_->build_internal_graph(table_key_id);
+            }
+            else if (SYSTEM_MODE == 7) {
+                // SYSTEM_MODE 7: 按照page做亲和性划分, 结合page_access_last_node
+                if(node_count_basedon_page_access_last.empty()) {
+                    this->stats_.ownership_random_txns++;
+                    result.smart_router_id = rand() % cfg_.partition_nums;
+                    logger->info("[SmartRouter Random] found no candidate node based on page access last node, randomly selected node " + 
+                                std::to_string(result.smart_router_id));
+                }
+                else if (node_count_basedon_page_access_last.size() == 1) {
+                    this->stats_.ownership_entirely_txns++;
+                    // 只有一个候选节点, 直接选择
+                    result.smart_router_id = node_count_basedon_page_access_last.begin()->first;
+                    logger->info("[SmartRouter Entirely] " + debug_info + " based on page access last node directly to node " + 
+                                std::to_string(result.smart_router_id));
+                }
+                else if (node_count_basedon_page_access_last.size() > 1) {
+                    this->stats_.ownership_cross_txns++;
+                    int max_count = 0;
+                    node_id_t candidate_node = -1;
+                    std::vector<node_id_t> candidates;
+                    for (const auto& [node, count] : node_count_basedon_page_access_last) {
+                        if (count > max_count) {
+                            max_count = count;
+                            candidates.clear();
+                            candidates.push_back(node);
+                        } else if (count == max_count) {
+                            candidates.push_back(node);
+                        }
+                    }
+                    assert(!candidates.empty());
+                    // 随机选择出现次数最多的节点
+                    result.smart_router_id = candidates[rand() % candidates.size()];
+                    logger->info("[SmartRouter Cross] " + debug_info + " based on page access last node with count (" 
+                                + std::to_string(max_count) + ") to node " + std::to_string(result.smart_router_id));
+                }
             }
             else {
                 assert(false);

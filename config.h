@@ -16,17 +16,19 @@
 #define BufferFusionSize ComputeNodeBufferPageSize
 #define PartitionDataSize (ComputeNodeBufferPageSize / ComputeNodeCount)
 #define MaxComputeNodeCount 128
+#define GroupPageAffinitySize 100
 
 // 定义算法版本 0: random 1: affinity 2: single 3: perfect
 extern int SYSTEM_MODE; 
 
 // 定义所跑的workload 0:smallbank 1:tpcc
 #define WORKLOAD_MODE 1 // 0: ycsb 1: tpcc
-#define LOG_ACCESS_KEY 0 // 0: no log 1: log
+#define LOG_ACCESS_KEY 1 // 0: no log 1: log
 #define LOG_FRIEND_GRAPH 1 // 0: no log 1: log
 #define LOG_METIS_DECISION 0 // 0: no log 1: log
 #define LOG_OWNERSHIP_CHANGE 0 // 0: no log 1: log
-
+#define LOG_PAGE_UPDATE 1 // 0: no log 1: log
+#define WORKLOAD_AFFINITY_MODE 1 // 0: key affinity 1: city-key affinity
 // for log
 extern std::string partition_log_file_; 
     
@@ -37,6 +39,7 @@ extern int REGION_SIZE;
 extern double AffinitySampleRate;
 extern double AffinityTxnRatio;
 extern uint64_t PARTITION_INTERVAL;
+extern int MetisWarmupRound; // 这里表示初始情况下首先要先经过多少轮的metis分区，之后分区就不动了
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;

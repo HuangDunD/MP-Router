@@ -117,6 +117,9 @@ private:
 
     Logger* logger_ = nullptr;
 
+    // enable partition, 这里引入一个允许分区的控制函数
+    bool enable_partition = true;
+
     // random seed
     std::random_device rd;
     std::mt19937 gen_; // Mersenne Twister RNG
@@ -143,7 +146,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
     uint64_t current_call_count = 0;
     bool should_trigger_partition = false;
 #ifdef ENABLE_AUTO_PARTITION
-    if (associated_thread_pool_ != nullptr) {
+    if (enable_partition && associated_thread_pool_ != nullptr) {
         current_call_count = ++build_call_counter_;
         uint64_t current_milestone = (current_call_count / PARTITION_INTERVAL) * PARTITION_INTERVAL;
         // std::cout<<"Build call count: " << current_call_count
@@ -211,7 +214,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
 
     // --- Submit Partition Task ---
 #ifdef ENABLE_AUTO_PARTITION
-    if (should_trigger_partition && associated_thread_pool_) {
+    if (enable_partition && should_trigger_partition && associated_thread_pool_) {
         std::string outfile = this->partition_output_file_;
         uint64_t nparts = this->num_partitions_;
 
@@ -252,6 +255,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
             if (partition_counts.size() > 1) { 
                 // 匹配到的图上的节点大于1, 取最大分布的亲和性作为路由节点
                 decision_made = true;
+                std::vector<node_id_t> candidates;
                 idx_t dominant_partition_idx = -1;
                 uint64_t max_count = 0;
             
@@ -259,9 +263,15 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                 for (const auto &pair: partition_counts) {
                     counts_str += "PartitionIndex " + std::to_string(pair.first) + ": exist " + std::to_string(pair.second) + " times; ";
                     if (pair.second > max_count) {
+                        candidates.clear();
                         max_count = pair.second;
-                        dominant_partition_idx = pair.first;
+                        candidates.push_back(pair.first);
+                    } else if (pair.second == max_count) {
+                        candidates.push_back(pair.first);
                     }
+                    assert(!candidates.empty());
+                    // 随机选择出现次数最多的节点
+                    dominant_partition_idx = candidates[rand() % candidates.size()];
                 }
                 counts_str += "}";
                 final_partition_index_result = dominant_partition_idx;
@@ -334,6 +344,15 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
                                                uint64_t ComputeNodeCount) {
     // std::cout<<"[Partition] Starting internal graph partitioning task (using DENSE ID snapshot)..." << std::endl;
     this->stats_.total_partition_calls++;
+    if(enable_partition == false){
+        // 理论上这种情况不应该出现
+        logger_->info("Partitioning disabled, skipping this partitioning call.");
+        return;
+    }
+    if(this->stats_.total_partition_calls > MetisWarmupRound){
+        logger_->info("MetisWarmupRound reached, skipping further partitioning.");
+        this->enable_partition = false;
+    }
     logger_->info("Starting internal graph partitioning task (using DENSE ID snapshot).");
 
     std::vector<idx_t> xadj_csr;
@@ -636,6 +655,17 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
                  ", nvtx (dense snapshot) = " + std::to_string(nvtx_for_metis) +
                  ", ncon = " + std::to_string(nWeights_metis) + "...");
 
+    idx_t options[METIS_NOPTIONS];
+    METIS_SetDefaultOptions(options);
+    options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_VOL; // 通信体积最小化
+    options[METIS_OPTION_CTYPE]    = METIS_CTYPE_SHEM;
+    options[METIS_OPTION_IPTYPE]   = METIS_IPTYPE_GROW;
+    options[METIS_OPTION_RTYPE]    = METIS_RTYPE_FM;
+    options[METIS_OPTION_UFACTOR] = 100;               // 允许 10% 不平衡 (默认 30, 即 3%)
+    options[METIS_OPTION_NCUTS] = 8;                   // 多次切割取最优
+    options[METIS_OPTION_NITER] = 10;                  // 迭代次数
+    options[METIS_OPTION_SEED] = 42;                   // 可复现性
+
     int metis_ret = METIS_PartGraphKway(
         &nvtx_for_metis,
         &nWeights_metis,
@@ -647,7 +677,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
         &nParts_metis,
         nullptr, // tpwgts
         nullptr, // ubvec
-        nullptr, // options
+        options, // options
         &objval_metis,
         part_csr.data()
     );
@@ -663,12 +693,17 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
     this->stats_.cut_edges_weight = objval_metis;
     this->stats_.total_nodes_in_graph = nvtx_for_metis;
     
-    // this->stabilize_partition_indices(
-    //     nvtx_for_metis,
-    //     part_csr, // Raw METIS output (dense ID -> new_idx)
-    //     dense_to_original_snapshot, // Mapping from dense ID to original ID
-    //     this->partition_node_map // The member map that will be updated with stabilized indices
-    // );
+    std::vector<uint64_t> partition_sizes(nParts_metis, 0);
+    for (idx_t dense_i = 0; dense_i < part_csr.size(); ++dense_i) {
+        idx_t assigned_partition = part_csr[dense_i];
+        assert(assigned_partition >= 0 && assigned_partition < nParts_metis);
+        partition_sizes[assigned_partition]++; 
+    }
+    std::string size_report = "Partition sizes (from METIS output): ";
+    for (idx_t i = 0; i < nParts_metis; ++i) {
+        size_report += "[PartitionIndex " + std::to_string(i) + ": " + std::to_string(partition_sizes[i]) + " nodes] ";
+    }
+    logger_->info(size_report);
 
     // 调用稳定化函数，它会修改 this->partition_node_map
     // 在调用前，this->partition_node_map 存储的是旧的分区结果

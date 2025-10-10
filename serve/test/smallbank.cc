@@ -140,8 +140,8 @@ void create_table(pqxx::connection *conn0) {
     // Create a new table and insert data
     try {
         pqxx::work txn(*conn0);
-        txn.exec("CREATE unlogged TABLE checking (id INT PRIMARY KEY, balance INT, name CHAR(500)) WITH (FILLFACTOR = 70)");
-        txn.exec("CREATE unlogged TABLE savings (id INT PRIMARY KEY, balance INT, name CHAR(500)) WITH (FILLFACTOR = 70)");
+        txn.exec("CREATE unlogged TABLE checking (id INT, balance INT, city INT, name CHAR(500)) WITH (FILLFACTOR = 50)");
+        txn.exec("CREATE unlogged TABLE savings (id INT, balance INT, city INT, name CHAR(500)) WITH (FILLFACTOR = 50)");
         std::cout << "Tables created successfully." << std::endl;
         // create index
         txn.exec("CREATE INDEX idx_checking_id ON checking (id)");
@@ -180,24 +180,36 @@ void load_data(pqxx::connection *conn0) {
     const int num_threads = 16;  // Number of worker threads
     std::vector<std::thread> threads;
     const int chunk_size = smallbank_account / num_threads;
-    auto worker = [](int start, int end) {
+    // 这里创建一个导入数据的账户id的列表, 随机导入
+    std::vector<int> id_list;
+    for(int i = 1; i <= smallbank_account; i++) id_list.push_back(i);
+    // 随机打乱 id_list
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(id_list.begin(), id_list.end(), g);
+    auto worker = [&id_list](int start, int end) {
         pqxx::connection conn00(DBConnection[0]);
         if (!conn00.is_open()) {
             std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
             return;
         }
+        int city_cnt = static_cast<int>(SmallBankCityType::Count);
         for(int i = start; i < end; i++) {
-            int id = i + 1;
-            int balance = 1000 + (i % 1000); // Random balance
+            int id = id_list[i];
+            int balance = 1000 + ((id - 1) % 1000); // Random balance
             std::string name = "Account_" + std::to_string(id);
+            int city = ((id - 1) / (smallbank_account / city_cnt) ) % city_cnt;
+            assert(city >=0 && city < city_cnt);
             // 使用RETURNING子句获取插入数据的位置信息
-            std::string insert_checking_sql = "INSERT INTO checking (id, balance, name) VALUES (" +
+            std::string insert_checking_sql = "INSERT INTO checking (id, balance, city, name) VALUES (" +
                                         std::to_string(id) + ", " +
-                                        std::to_string(balance) + ", '" +
+                                        std::to_string(balance) + ", " +
+                                        std::to_string(city) + ", '" +
                                         name + "') RETURNING ctid, id";
-            std::string insert_savings_sql = "INSERT INTO savings (id, balance, name) VALUES (" +
+            std::string insert_savings_sql = "INSERT INTO savings (id, balance, city, name) VALUES (" +
                                         std::to_string(id) + ", " +
-                                        std::to_string(balance) + ", '" +
+                                        std::to_string(balance) + ", " +
+                                        std::to_string(city) + ", '" +
                                         name + "') RETURNING ctid, id";
 
             try {
@@ -235,7 +247,11 @@ void load_data(pqxx::connection *conn0) {
     auto friend_worker = [](){
         // 生成用户朋友关系
         int num_users = smallbank_account;
+    #if WORKLOAD_AFFINITY_MODE == 0
         generate_friend_simulate_graph(user_friend_graph, num_users);
+    #elif WORKLOAD_AFFINITY_MODE == 1
+        generate_friend_city_simulate_graph(user_friend_graph, num_users);
+    #endif
         std::cout << "Generated friend graph for " << num_users << " users." << std::endl;
 #if LOG_FRIEND_GRAPH
         if(!friend_graph_export_file.empty()){
@@ -336,7 +352,7 @@ static const std::vector<table_id_t> TABLE_IDS_ARR[] = {
     // txn_type == 2
     {(table_id_t)SmallBankTableType::kCheckingTable},
     // txn_type == 3
-    {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable},
+    {(table_id_t)SmallBankTableType::kSavingsTable, (table_id_t)SmallBankTableType::kCheckingTable},
     // txn_type == 4
     {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable},
     // txn_type == 5
@@ -397,7 +413,7 @@ void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int
         // get page_id from checking_page_map
         node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
     }
-    else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6) {
+    else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7) {
         assert(smart_router != nullptr);
         // keys 只和 account1/account2有关，不能静态化，但可以用局部变量，每次只构造一份
         std::vector<itemkey_t> keys; 
@@ -659,6 +675,29 @@ void signal_handler(int signum) {
     auto end = std::chrono::high_resolution_clock::now();
     int ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     std::cout << "Elapsed time: " << ms << " milliseconds" << std::endl;
+    if(smart_router){
+        std::cout << "********** Smart Router page stats **********" << std::endl;
+        int change_page_cnt = smart_router->get_stats().change_page_cnt;
+        int page_update_cnt = smart_router->get_stats().page_update_cnt;
+        int hit_cnt = smart_router->get_stats().hot_hit;
+        int miss_cnt = smart_router->get_stats().hot_miss;
+        std::cout << "Hot page hit: " << hit_cnt << ", miss: " << miss_cnt 
+                  << ", hit ratio: " << (hit_cnt + miss_cnt > 0 ? (double)hit_cnt / (hit_cnt + miss_cnt) * 100.0 : 0.0) << "%" << std::endl;
+        std::cout << "Page ID changes: " << change_page_cnt << std::endl;
+        std::cout << "Ownership changes: " << smart_router->get_ownership_changes() << std::endl;
+        std::cout << "Page Operations count: " << page_update_cnt << std::endl; 
+        const NewMetis::Stats& metis_stats = smart_router->get_metis_stats();
+        std::cout << "Metis total nodes in graph: " << metis_stats.total_nodes_in_graph << std::endl;
+        std::cout << "Metis total edges in graph: " << metis_stats.total_edges_in_graph << std::endl;
+        std::cout << "Metis total edges weight: " << metis_stats.total_edges_weight << std::endl;
+        std::cout << "Metis edge weight cut: " << metis_stats.cut_edges_weight << std::endl;
+        std::cout << "Metis edge cut ratio: " << 1.0 * metis_stats.cut_edges_weight / metis_stats.total_edges_weight << std::endl;
+        std::cout << "Metis cross node decisions: " << metis_stats.total_cross_partition_decisions << std::endl;
+        std::cout << "Metis partial affinity decisions: " << metis_stats.partial_affinity_decisions << std::endl;
+        std::cout << "Metis full affinity decisions: " << metis_stats.entire_affinity_decisions << std::endl;
+        std::cout << "Metis missing decisions: " << metis_stats.missing_node_decisions << std::endl; 
+        std::cout << "*********************************************" << std::endl;
+    }
     // 计算吞吐
     std::cout << "Total transactions executed: " << exe_count << std::endl;
     double throughput = (double) exe_count / (ms / 1000.0);
@@ -692,13 +731,25 @@ void print_tps_loop() {
     using namespace std::chrono;
     uint64_t last_count = 0;
     auto last_time = steady_clock::now();
+    std::vector<int> routed_txn_cnt_per_node_last_snapshot, routed_txn_cnt_per_node_snapshot;
+    routed_txn_cnt_per_node_last_snapshot.resize(ComputeNodeCount, 0);
+    routed_txn_cnt_per_node_snapshot.resize(ComputeNodeCount, 0);
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
         auto now = steady_clock::now();
         uint64_t cur_count = exe_count.load(std::memory_order_relaxed);
         double seconds = duration_cast<duration<double>>(now - last_time).count();
         double tps = (cur_count - last_count) / seconds;
-        printf("[TPS] %.2f txn/sec (total: %lu)\n", tps, cur_count);
+        // print routed txn count per node
+        for(int i=0; i<ComputeNodeCount; i++) routed_txn_cnt_per_node_snapshot[i] = routed_txn_cnt_per_node[i].load(std::memory_order_relaxed); 
+        printf("[TPS] %.2f txn/sec (total: %lu). ", tps, cur_count); 
+        for(int i=0; i<ComputeNodeCount; i++) { 
+            int routed_cnt = routed_txn_cnt_per_node_snapshot[i] - routed_txn_cnt_per_node_last_snapshot[i];
+            routed_txn_cnt_per_node_last_snapshot[i] = routed_txn_cnt_per_node_snapshot[i];
+            printf("Node %d: %d ", i, routed_cnt);
+        } 
+        printf("\n");
+        // reset for next interval
         last_count = cur_count;
         last_time = now;
     }
@@ -858,7 +909,8 @@ int main(int argc, char *argv[]) {
                     std::cerr << "Error: Try count must be greater than 0" << std::endl;
                     return -1;
                 }
-                std::cout << "Try count set to: " << try_count << std::endl;
+                try_count += MetisWarmupRound * PARTITION_INTERVAL; // add warmup rounds
+                std::cout << "input try count is " << (try_count - MetisWarmupRound * PARTITION_INTERVAL) << ", total try count set to: " << try_count << std::endl;
             } else {
                 std::cerr << "Error: --try-count requires a value" << std::endl;
                 print_usage(argv[0]);
@@ -898,6 +950,9 @@ int main(int argc, char *argv[]) {
     case 6:
         std::cout << "\033[31m  key affinity router \033[0m" << std::endl;
         break;
+    case 7:
+        std::cout << "\033[31m  page ownership history \033[0m" << std::endl;
+        break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
         return -1;
@@ -927,11 +982,11 @@ int main(int argc, char *argv[]) {
     std::cout << "Loading database connection info..." << std::endl;
 
     // !!! need to update when changing the cluster environment
-    DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
-    DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
 
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
     ComputeNodeCount = DBConnection.size();
     std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
 
@@ -973,7 +1028,7 @@ int main(int argc, char *argv[]) {
     // Create table and indexes
     create_table(conn0);
 
-    if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 0) {
+    if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 0 || SYSTEM_MODE ==7) {
         std::cout << "Initializing Smart Router..." << std::endl;
         // Create a BtreeService
         BtreeIndexService *index_service = new BtreeIndexService(DBConnection, {"idx_checking_id", "idx_savings_id"}, read_btree_mode, read_frequency);
@@ -1042,6 +1097,14 @@ int main(int argc, char *argv[]) {
         std::cout << "Page ID changes: " << change_page_cnt << std::endl;
         std::cout << "Ownership changes: " << smart_router->get_ownership_changes() << std::endl;
         std::cout << "Page Operations count: " << page_update_cnt << std::endl; 
+        std::cout << "Simulated page ownership changes ratio (cache fusion ratio): " 
+                  << (page_update_cnt > 0 ? (double)smart_router->get_ownership_changes() / page_update_cnt * 100.0 : 0.0) << "%" << std::endl;
+        int ownership_random = smart_router->get_stats().ownership_random_txns;
+        int ownership_entire = smart_router->get_stats().ownership_entirely_txns;
+        int ownership_cross = smart_router->get_stats().ownership_cross_txns;
+        std::cout << "Ownership-based routing txns: random " << ownership_random 
+                  << ", entire " << ownership_entire 
+                  << ", cross " << ownership_cross << std::endl;
         const NewMetis::Stats& metis_stats = smart_router->get_metis_stats();
         std::cout << "Metis total nodes in graph: " << metis_stats.total_nodes_in_graph << std::endl;
         std::cout << "Metis total edges in graph: " << metis_stats.total_edges_in_graph << std::endl;
