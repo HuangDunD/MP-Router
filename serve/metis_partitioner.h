@@ -85,6 +85,13 @@ public:
         return stats_;
     }
 
+    void reset_stats() {
+        stats_.missing_node_decisions.store(0, std::memory_order_relaxed);
+        stats_.entire_affinity_decisions.store(0, std::memory_order_relaxed);
+        stats_.partial_affinity_decisions.store(0, std::memory_order_relaxed);
+        stats_.total_cross_partition_decisions.store(0, std::memory_order_relaxed);
+    }
+
 private:
     // Internal Graph Representation
     std::set<uint64_t> active_nodes_;
@@ -179,7 +186,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
     // --- Core Graph Modification (within graph_data_mutex_) ---
     // add sample rate here
     double random_value = distrib(gen_); // Generate a random value between 0.0 and 1.0
-    if (random_value <= AffinitySampleRate) {
+    if (enable_partition && (random_value <= AffinitySampleRate)) {
         std::lock_guard<std::mutex> lock(graph_data_mutex_);
 
         for (const uint64_t &regionid: unique_mapped_ids_in_group) {
@@ -657,7 +664,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
 
     idx_t options[METIS_NOPTIONS];
     METIS_SetDefaultOptions(options);
-    options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_VOL; // 通信体积最小化
+    options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_CUT; // 通信体积最小化 METIS_OBJTYPE_VOL or METIS_OBJTYPE_CUT
     options[METIS_OPTION_CTYPE]    = METIS_CTYPE_SHEM;
     options[METIS_OPTION_IPTYPE]   = METIS_IPTYPE_GROW;
     options[METIS_OPTION_RTYPE]    = METIS_RTYPE_FM;

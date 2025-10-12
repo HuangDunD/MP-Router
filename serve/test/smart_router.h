@@ -76,6 +76,11 @@ public:
         std::atomic<int> ownership_cross_txns = 0;
     };
 
+    void reset_Metis_Router_txn_statistics() {
+        reset_txn_statistics();
+        metis_->reset_stats();
+    }
+
     // hot hash 层的热键条目
     class HotEntry {
     public:
@@ -176,11 +181,7 @@ public:
         }
     }
 
-    void reset_stats() {
-        std::lock_guard<std::mutex> lock(hot_mutex_);
-
-    }
-
+    
     // ******************* METIS ******************
     // 执行分区操作，返回分区结果
     struct SmartRouterResult {
@@ -380,6 +381,15 @@ public:
     }
 
 private:
+    // 重置事务/路由相关的统计信息（线程安全）
+    void reset_txn_statistics() {
+        stats_.change_page_cnt.store(0, std::memory_order_relaxed);
+        stats_.page_update_cnt.store(0, std::memory_order_relaxed);
+        stats_.ownership_random_txns.store(0, std::memory_order_relaxed);
+        stats_.ownership_entirely_txns.store(0, std::memory_order_relaxed);
+        stats_.ownership_cross_txns.store(0, std::memory_order_relaxed);
+    }
+
     // 大小模型 — 根据实际结构开销调整
     static std::size_t hot_entry_size_model_() {
         return sizeof(HotEntry);

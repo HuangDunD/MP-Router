@@ -90,7 +90,7 @@
                 "--worker-threads",
                 "16",
                 "--try-count",
-                "10000",
+                "100000",
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/build/serve/test/",

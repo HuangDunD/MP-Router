@@ -10,3 +10,4 @@ int TPCC_WAREHOUSE_NUM = -1;
 double AffinityTxnRatio = 1;
 uint64_t PARTITION_INTERVAL = 300000;
 std::string partition_log_file_ = "partitioning_log.log";
+int MetisWarmupRound = 20;

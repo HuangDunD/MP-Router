@@ -19,7 +19,7 @@ void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, 
 	adj_list.resize(num_users);
 
 	int minFriends = std::min(5, std::max(0, num_users - 1));
-	int maxFriends = std::min(20, std::max(0, num_users - 1));
+	int maxFriends = std::min(15, std::max(0, num_users - 1));
 
 	// 随机数引擎
 	std::random_device rd;

@@ -17,6 +17,7 @@
 #include "smart_router.h"
 #include "friend_simulate.h"
 #include "util/zipf.h"
+#include "router_stat_snapshot.h"
 
 std::vector<std::string> DBConnection;
 std::atomic<uint64_t> tx_id_generator;
@@ -909,8 +910,10 @@ int main(int argc, char *argv[]) {
                     std::cerr << "Error: Try count must be greater than 0" << std::endl;
                     return -1;
                 }
-                try_count += MetisWarmupRound * PARTITION_INTERVAL; // add warmup rounds
-                std::cout << "input try count is " << (try_count - MetisWarmupRound * PARTITION_INTERVAL) << ", total try count set to: " << try_count << std::endl;
+                std::cout << "input try count is " << try_count << std::endl;
+                // try_count 是每个线程的尝试次数，总尝试次数要乘以线程数
+                try_count += MetisWarmupRound * PARTITION_INTERVAL / worker_threads; // add warmup rounds
+                std::cout << "Total try count (including warmup) is " << try_count << " per thread. " << std::endl;
             } else {
                 std::cerr << "Error: --try-count requires a value" << std::endl;
                 print_usage(argv[0]);
@@ -1056,6 +1059,13 @@ int main(int argc, char *argv[]) {
     auto start = std::chrono::high_resolution_clock::now();
     std::cout << "Starting transaction threads..." << std::endl;
 
+    std::cout << "Create the smart router snapshot." << std::endl;
+    RouterStatSnapshot snapshot0, snapshot1, snapshot2;
+    if(smart_router) {
+        snapshot0 = take_router_snapshot(smart_router);
+        print_snapshot(snapshot0);
+    }
+    
     std::vector<std::thread> threads;
     // !Start the transaction threads
     for(int i = 0; i < worker_threads; i++) {
@@ -1068,6 +1078,15 @@ int main(int argc, char *argv[]) {
     // Start a separate thread to print TPS periodically
     std::thread tps_thread(print_tps_loop);
     tps_thread.detach(); // Detach the thread to run independently
+
+    while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.1) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::cout << "\033[31m Warmup rounds completed. Create the smart router snapshot. \033[0m" << std::endl;
+    if(smart_router) { 
+        snapshot1 = take_router_snapshot(smart_router);
+        print_diff_snapshot(snapshot0, snapshot1);
+    }
 
     // Wait for all threads to complete
     for(auto& thread : threads) {
@@ -1086,36 +1105,9 @@ int main(int argc, char *argv[]) {
     // Print Report
     std::cout << "\n=== Performance Report ===" << std::endl;
     std::cout << "System mode: " << SYSTEM_MODE << " !!!" << std::endl;
-    if(smart_router){
-        std::cout << "********** Smart Router page stats **********" << std::endl;
-        int change_page_cnt = smart_router->get_stats().change_page_cnt;
-        int page_update_cnt = smart_router->get_stats().page_update_cnt;
-        int hit_cnt = smart_router->get_stats().hot_hit;
-        int miss_cnt = smart_router->get_stats().hot_miss;
-        std::cout << "Hot page hit: " << hit_cnt << ", miss: " << miss_cnt 
-                  << ", hit ratio: " << (hit_cnt + miss_cnt > 0 ? (double)hit_cnt / (hit_cnt + miss_cnt) * 100.0 : 0.0) << "%" << std::endl;
-        std::cout << "Page ID changes: " << change_page_cnt << std::endl;
-        std::cout << "Ownership changes: " << smart_router->get_ownership_changes() << std::endl;
-        std::cout << "Page Operations count: " << page_update_cnt << std::endl; 
-        std::cout << "Simulated page ownership changes ratio (cache fusion ratio): " 
-                  << (page_update_cnt > 0 ? (double)smart_router->get_ownership_changes() / page_update_cnt * 100.0 : 0.0) << "%" << std::endl;
-        int ownership_random = smart_router->get_stats().ownership_random_txns;
-        int ownership_entire = smart_router->get_stats().ownership_entirely_txns;
-        int ownership_cross = smart_router->get_stats().ownership_cross_txns;
-        std::cout << "Ownership-based routing txns: random " << ownership_random 
-                  << ", entire " << ownership_entire 
-                  << ", cross " << ownership_cross << std::endl;
-        const NewMetis::Stats& metis_stats = smart_router->get_metis_stats();
-        std::cout << "Metis total nodes in graph: " << metis_stats.total_nodes_in_graph << std::endl;
-        std::cout << "Metis total edges in graph: " << metis_stats.total_edges_in_graph << std::endl;
-        std::cout << "Metis total edges weight: " << metis_stats.total_edges_weight << std::endl;
-        std::cout << "Metis edge weight cut: " << metis_stats.cut_edges_weight << std::endl;
-        std::cout << "Metis edge cut ratio: " << 1.0 * metis_stats.cut_edges_weight / metis_stats.total_edges_weight << std::endl;
-        std::cout << "Metis cross node decisions: " << metis_stats.total_cross_partition_decisions << std::endl;
-        std::cout << "Metis partial affinity decisions: " << metis_stats.partial_affinity_decisions << std::endl;
-        std::cout << "Metis full affinity decisions: " << metis_stats.entire_affinity_decisions << std::endl;
-        std::cout << "Metis missing decisions: " << metis_stats.missing_node_decisions << std::endl; 
-        std::cout << "*********************************************" << std::endl;
+    if(smart_router) {
+        snapshot2 = take_router_snapshot(smart_router);
+        print_diff_snapshot(snapshot1, snapshot2);
     }
     std::cout << "All transaction threads completed." << std::endl;
     for(int i =0; i<DBConnection.size(); i++){
