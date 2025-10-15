@@ -39,6 +39,12 @@ public:
         return entry->owner;
     }
 
+    node_id_t get_owner(uint64_t table_page_id) const {
+        table_id_t table_id = static_cast<table_id_t>(table_page_id >> 32);
+        page_id_t page_id = static_cast<page_id_t>(table_page_id & 0xFFFFFFFF);
+        return get_owner(table_id, page_id);
+    }
+
     // 设置页面所有权, 如果所有权发生变化返回true，否则返回false
     bool set_owner(table_id_t table_id, itemkey_t access_key, page_id_t page_id, node_id_t owner) {
         if (table_id < 0 || table_id >= MAX_DB_TABLE_NUM) assert(false);
@@ -48,8 +54,9 @@ public:
         if (entry->owner == owner) {
         #if LOG_OWNERSHIP_CHANGE
             uint64_t table_page_id = (static_cast<uint64_t>(table_id) << 32) | static_cast<uint64_t>(page_id);
-            logger->info("# Ownership not change: (table_id=" + std::to_string(table_id) + ", access_key=" + std::to_string(access_key) + ", page_id=" + std::to_string(page_id) + 
-                     ") --> " + std::to_string(table_page_id) + " owner remains: " + std::to_string(entry->owner));
+            if(WarmupEnd) // 只在正式阶段记录
+                logger->info("# Ownership not change: (table_id=" + std::to_string(table_id) + ", access_key=" + std::to_string(access_key) + ", page_id=" + std::to_string(page_id) + 
+                        ") --> " + std::to_string(table_page_id) + " owner remains: " + std::to_string(entry->owner));
         #endif
             return false;
         }
@@ -57,8 +64,9 @@ public:
             ownership_changes++;
         #if LOG_OWNERSHIP_CHANGE
             uint64_t table_page_id = (static_cast<uint64_t>(table_id) << 32) | static_cast<uint64_t>(page_id);
-            logger->info("! Ownership changed: (table_id=" + std::to_string(table_id) + ", access_key=" + std::to_string(access_key) + ", page_id=" + std::to_string(page_id) + 
-                     ") --> " + std::to_string(table_page_id) + " original owner: " + std::to_string(entry->owner) + ", new owner: " + std::to_string(owner));
+            if(WarmupEnd) // 只在正式阶段记录
+                logger->info("! Ownership changed: (table_id=" + std::to_string(table_id) + ", access_key=" + std::to_string(access_key) + ", page_id=" + std::to_string(page_id) + 
+                        ") --> " + std::to_string(table_page_id) + " original owner: " + std::to_string(entry->owner) + ", new owner: " + std::to_string(owner));
         #endif
         }
         entry->owner = owner;

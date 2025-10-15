@@ -70,7 +70,8 @@ void test_partition_latency() {
                 auto start_time = std::chrono::high_resolution_clock::now();
 
                 // 1. 构建内部图
-                idx_t graph_result = metis_partitioner.build_internal_graph(region_ids);
+                idx_t graph_result;
+                metis_partitioner.build_internal_graph(region_ids, &graph_result);
 
                 // 2. 执行图分区
                 if (graph_result >= 0) {
@@ -190,7 +191,8 @@ void test_partition_count_impact() {
             try {
                 auto start_time = std::chrono::high_resolution_clock::now();
 
-                idx_t graph_result = metis_partitioner.build_internal_graph(region_ids);
+                idx_t graph_result;
+                metis_partitioner.build_internal_graph(region_ids, &graph_result);
                 if (graph_result >= 0) {
                     std::string graph_file = "/tmp/test_parts_" + std::to_string(part_count) + "_" + std::to_string(i) + ".graph";
                     std::string part_file = "/tmp/test_parts_" + std::to_string(part_count) + "_" + std::to_string(i) + ".part";

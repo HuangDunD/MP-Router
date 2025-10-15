@@ -188,7 +188,7 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) 
     std::vector<uint64_t> region_ids;
     std::string row_sql;
     bool ok = false;
-    uint64_t router_node = UINT64_MAX;
+    node_id_t router_node = -1;
 
     partition_id_t perfect_par_id = -1;
 
@@ -243,7 +243,7 @@ void process_client_data(std::string_view data, int socket_fd, Logger &log_ref) 
         // affinity based algorithm
         if (!region_ids.empty()) {
             build_graph_start_time = std::chrono::high_resolution_clock::now();
-            router_node = metis.build_internal_graph(region_ids);
+            metis.build_internal_graph(region_ids, &router_node);
             build_graph_end_time = std::chrono::high_resolution_clock::now();
             build_graph_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 build_graph_end_time - build_graph_start_time).count();

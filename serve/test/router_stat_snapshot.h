@@ -44,6 +44,30 @@ struct RouterStatSnapshot {
     uint64_t partial_affinity_decisions = 0;
     uint64_t total_cross_partition_decisions = 0;
     
+    // Metis and ownership combined statistics, for SYSTEM_MODE 8
+    // for metis no decision
+    uint64_t metis_no_decision = 0;
+    // for metis missing
+    uint64_t metis_missing_and_ownership_missing = 0;
+    uint64_t metis_missing_and_ownership_entirely = 0;
+    uint64_t metis_missing_and_ownership_cross = 0;
+    // for metis entirely
+    uint64_t metis_entirely_and_ownership_missing = 0;
+    uint64_t metis_entirely_and_ownership_cross_equal = 0;
+    uint64_t metis_entirely_and_ownership_cross_unequal = 0;
+    uint64_t metis_entirely_and_ownership_entirely_equal = 0;
+    uint64_t metis_entirely_and_ownership_entirely_unequal = 0;
+    // for metis cross
+    uint64_t metis_cross_and_ownership_missing = 0;
+    uint64_t metis_cross_and_ownership_entirely = 0;
+    uint64_t metis_cross_and_ownership_cross_equal = 0; 
+    uint64_t metis_cross_and_ownership_cross_unequal = 0; 
+    // for metis partial
+    uint64_t metis_partial_and_ownership_missing = 0;
+    uint64_t metis_partial_and_ownership_entirely = 0;
+    uint64_t metis_partial_and_ownership_cross_equal = 0;
+    uint64_t metis_partial_and_ownership_cross_unequal = 0; 
+
     // Helpers
     void print_snapshot() const {
         std::cout << "********** Smart Router page stats **********" << std::endl;
@@ -65,6 +89,32 @@ struct RouterStatSnapshot {
         std::cout << "Metis partial affinity decisions: " << partial_affinity_decisions << std::endl;
         std::cout << "Metis full affinity decisions: " << entire_affinity_decisions << std::endl;
         std::cout << "Metis missing decisions: " << missing_node_decisions << std::endl; 
+
+        
+        if(SYSTEM_MODE != 8) {
+            std::cout << "*********************************************" << std::endl;
+            return;
+        }
+        // for SYSTEM_MODE 8
+        // Metis and Ownership combined statistics
+        std::cout << "Metis and Ownership combined decisions (for SYSTEM_MODE 8):" << std::endl;
+        std::cout << "  Metis No Decision: " << metis_no_decision << std::endl;
+        std::cout << "  Metis Missing & Ownership Missing: " << metis_missing_and_ownership_missing << std::endl;   
+        std::cout << "  Metis Missing & Ownership Entirely: " << metis_missing_and_ownership_entirely << std::endl;
+        std::cout << "  Metis Missing & Ownership Cross: " << metis_missing_and_ownership_cross << std::endl;
+        std::cout << "  Metis Entirely & Ownership Missing: " << metis_entirely_and_ownership_missing << std::endl;
+        std::cout << "  Metis Entirely & Ownership Cross Equal: " << metis_entirely_and_ownership_cross_equal << std::endl;
+        std::cout << "  Metis Entirely & Ownership Cross Unequal: " << metis_entirely_and_ownership_cross_unequal << std::endl;
+        std::cout << "  Metis Entirely & Ownership Entirely Equal: " << metis_entirely_and_ownership_entirely_equal << std::endl;
+        std::cout << "  Metis Entirely & Ownership Entirely Unequal: " << metis_entirely_and_ownership_entirely_unequal << std::endl;
+        std::cout << "  Metis Cross & Ownership Missing: " << metis_cross_and_ownership_missing << std::endl;
+        std::cout << "  Metis Cross & Ownership Entirely: " << metis_cross_and_ownership_entirely << std::endl;
+        std::cout << "  Metis Cross & Ownership Cross Equal: " << metis_cross_and_ownership_cross_equal << std::endl;
+        std::cout << "  Metis Cross & Ownership Cross Unequal: " << metis_cross_and_ownership_cross_unequal << std::endl;
+        std::cout << "  Metis Partial & Ownership Missing: " << metis_partial_and_ownership_missing << std::endl;
+        std::cout << "  Metis Partial & Ownership Entirely: " << metis_partial_and_ownership_entirely << std::endl;
+        std::cout << "  Metis Partial & Ownership Cross Equal: " << metis_partial_and_ownership_cross_equal << std::endl;
+        std::cout << "  Metis Partial & Ownership Cross Unequal: " << metis_partial_and_ownership_cross_unequal << std::endl;
         std::cout << "*********************************************" << std::endl;
         return;
     }
@@ -105,6 +155,24 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.partial_affinity_decisions = ms.partial_affinity_decisions.load(std::memory_order_relaxed);
     snap.total_cross_partition_decisions = ms.total_cross_partition_decisions.load(std::memory_order_relaxed);
 
+    // Metis and ownership combined stats
+    snap.metis_no_decision = s.metis_no_decision.load(std::memory_order_relaxed);
+    snap.metis_missing_and_ownership_missing = s.metis_missing_and_ownership_missing.load(std::memory_order_relaxed);
+    snap.metis_missing_and_ownership_entirely = s.metis_missing_and_ownership_entirely.load(std::memory_order_relaxed);
+    snap.metis_missing_and_ownership_cross = s.metis_missing_and_ownership_cross.load(std::memory_order_relaxed);
+    snap.metis_entirely_and_ownership_missing = s.metis_entirely_and_ownership_missing.load(std::memory_order_relaxed);
+    snap.metis_entirely_and_ownership_cross_equal = s.metis_entirely_and_ownership_cross_equal.load(std::memory_order_relaxed);
+    snap.metis_entirely_and_ownership_cross_unequal = s.metis_entirely_and_ownership_cross_unequal.load(std::memory_order_relaxed);
+    snap.metis_entirely_and_ownership_entirely_equal = s.metis_entirely_and_ownership_entirely_equal.load(std::memory_order_relaxed);
+    snap.metis_entirely_and_ownership_entirely_unequal = s.metis_entirely_and_ownership_entirely_unequal.load(std::memory_order_relaxed);
+    snap.metis_cross_and_ownership_missing = s.metis_cross_and_ownership_missing.load(std::memory_order_relaxed);
+    snap.metis_cross_and_ownership_entirely = s.metis_cross_and_ownership_entirely.load(std::memory_order_relaxed);
+    snap.metis_cross_and_ownership_cross_equal = s.metis_cross_and_ownership_cross_equal.load(std::memory_order_relaxed);
+    snap.metis_cross_and_ownership_cross_unequal = s.metis_cross_and_ownership_cross_unequal.load(std::memory_order_relaxed);
+    snap.metis_partial_and_ownership_missing = s.metis_partial_and_ownership_missing.load(std::memory_order_relaxed);
+    snap.metis_partial_and_ownership_entirely = s.metis_partial_and_ownership_entirely.load(std::memory_order_relaxed);
+    snap.metis_partial_and_ownership_cross_equal = s.metis_partial_and_ownership_cross_equal.load(std::memory_order_relaxed);
+    snap.metis_partial_and_ownership_cross_unequal = s.metis_partial_and_ownership_cross_unequal.load(std::memory_order_relaxed);
     return snap;
 }
 
@@ -144,6 +212,40 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.partial_affinity_decisions = (b.partial_affinity_decisions >= a.partial_affinity_decisions) ? (b.partial_affinity_decisions - a.partial_affinity_decisions) : 0;
     d.total_cross_partition_decisions = (b.total_cross_partition_decisions >= a.total_cross_partition_decisions) ? (b.total_cross_partition_decisions - a.total_cross_partition_decisions) : 0;
 
+    // Metis and ownership combined stats
+    d.metis_no_decision = (b.metis_no_decision >= a.metis_no_decision) ? (b.metis_no_decision - a.metis_no_decision) : 0;
+    d.metis_missing_and_ownership_missing = (b.metis_missing_and_ownership_missing >= a.metis_missing_and_ownership_missing) ? 
+                                            (b.metis_missing_and_ownership_missing - a.metis_missing_and_ownership_missing) : 0;
+    d.metis_missing_and_ownership_entirely = (b.metis_missing_and_ownership_entirely >= a.metis_missing_and_ownership_entirely) ? 
+                                            (b.metis_missing_and_ownership_entirely - a.metis_missing_and_ownership_entirely) : 0;
+    d.metis_missing_and_ownership_cross = (b.metis_missing_and_ownership_cross >= a.metis_missing_and_ownership_cross) ? 
+                                            (b.metis_missing_and_ownership_cross - a.metis_missing_and_ownership_cross) : 0;
+    d.metis_entirely_and_ownership_missing = (b.metis_entirely_and_ownership_missing >= a.metis_entirely_and_ownership_missing) ? 
+                                            (b.metis_entirely_and_ownership_missing - a.metis_entirely_and_ownership_missing) : 0;
+    d.metis_entirely_and_ownership_cross_equal = (b.metis_entirely_and_ownership_cross_equal >= a.metis_entirely_and_ownership_cross_equal) ? 
+                                            (b.metis_entirely_and_ownership_cross_equal - a.metis_entirely_and_ownership_cross_equal) : 0;
+    d.metis_entirely_and_ownership_cross_unequal = (b.metis_entirely_and_ownership_cross_unequal >= a.metis_entirely_and_ownership_cross_unequal) ? 
+                                            (b.metis_entirely_and_ownership_cross_unequal - a.metis_entirely_and_ownership_cross_unequal) : 0;
+    d.metis_entirely_and_ownership_entirely_equal = (b.metis_entirely_and_ownership_entirely_equal >= a.metis_entirely_and_ownership_entirely_equal) ? 
+                                            (b.metis_entirely_and_ownership_entirely_equal - a.metis_entirely_and_ownership_entirely_equal) : 0;
+    d.metis_entirely_and_ownership_entirely_unequal = (b.metis_entirely_and_ownership_entirely_unequal >= a.metis_entirely_and_ownership_entirely_unequal) ? 
+                                            (b.metis_entirely_and_ownership_entirely_unequal - a.metis_entirely_and_ownership_entirely_unequal) : 0;
+    d.metis_cross_and_ownership_missing = (b.metis_cross_and_ownership_missing >= a.metis_cross_and_ownership_missing) ? 
+                                            (b.metis_cross_and_ownership_missing - a.metis_cross_and_ownership_missing) : 0;
+    d.metis_cross_and_ownership_entirely = (b.metis_cross_and_ownership_entirely >= a.metis_cross_and_ownership_entirely) ? 
+                                            (b.metis_cross_and_ownership_entirely - a.metis_cross_and_ownership_entirely) : 0;
+    d.metis_cross_and_ownership_cross_equal = (b.metis_cross_and_ownership_cross_equal >= a.metis_cross_and_ownership_cross_equal) ? 
+                                            (b.metis_cross_and_ownership_cross_equal - a.metis_cross_and_ownership_cross_equal) : 0;
+    d.metis_cross_and_ownership_cross_unequal = (b.metis_cross_and_ownership_cross_unequal >= a.metis_cross_and_ownership_cross_unequal) ? 
+                                            (b.metis_cross_and_ownership_cross_unequal - a.metis_cross_and_ownership_cross_unequal) : 0;
+    d.metis_partial_and_ownership_missing = (b.metis_partial_and_ownership_missing >= a.metis_partial_and_ownership_missing) ? 
+                                            (b.metis_partial_and_ownership_missing - a.metis_partial_and_ownership_missing) : 0;
+    d.metis_partial_and_ownership_entirely = (b.metis_partial_and_ownership_entirely >= a.metis_partial_and_ownership_entirely  ) ? 
+                                            (b.metis_partial_and_ownership_entirely - a.metis_partial_and_ownership_entirely) : 0;
+    d.metis_partial_and_ownership_cross_equal = (b.metis_partial_and_ownership_cross_equal >= a.metis_partial_and_ownership_cross_equal) ? 
+                                            (b.metis_partial_and_ownership_cross_equal - a.metis_partial_and_ownership_cross_equal) : 0;
+    d.metis_partial_and_ownership_cross_unequal = (b.metis_partial_and_ownership_cross_unequal >= a.metis_partial_and_ownership_cross_unequal) ? 
+                                            (b.metis_partial_and_ownership_cross_unequal - a.metis_partial_and_ownership_cross_unequal) : 0;
     return d;
 }
 

@@ -414,7 +414,7 @@ void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int
         // get page_id from checking_page_map
         node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
     }
-    else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7) {
+    else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8) {
         assert(smart_router != nullptr);
         // keys 只和 account1/account2有关，不能静态化，但可以用局部变量，每次只构造一份
         std::vector<itemkey_t> keys; 
@@ -956,6 +956,9 @@ int main(int argc, char *argv[]) {
     case 7:
         std::cout << "\033[31m  page ownership history \033[0m" << std::endl;
         break;
+    case 8: 
+        std::cout << "\033[31m  hybrid router (page affinity + ownership history) \033[0m" << std::endl;
+        break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
         return -1;
@@ -1031,7 +1034,7 @@ int main(int argc, char *argv[]) {
     // Create table and indexes
     create_table(conn0);
 
-    if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 0 || SYSTEM_MODE ==7) {
+    if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 0 || SYSTEM_MODE ==7 || SYSTEM_MODE == 8) {
         std::cout << "Initializing Smart Router..." << std::endl;
         // Create a BtreeService
         BtreeIndexService *index_service = new BtreeIndexService(DBConnection, {"idx_checking_id", "idx_savings_id"}, read_btree_mode, read_frequency);
@@ -1079,7 +1082,7 @@ int main(int argc, char *argv[]) {
     std::thread tps_thread(print_tps_loop);
     tps_thread.detach(); // Detach the thread to run independently
 
-    while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.1) {
+    while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     std::cout << "\033[31m Warmup rounds completed. Create the smart router snapshot. \033[0m" << std::endl;

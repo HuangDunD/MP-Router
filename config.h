@@ -26,7 +26,7 @@ extern int SYSTEM_MODE;
 #define LOG_ACCESS_KEY 0 // 0: no log 1: log
 #define LOG_FRIEND_GRAPH 0 // 0: no log 1: log
 #define LOG_METIS_DECISION 0 // 0: no log 1: log
-#define LOG_OWNERSHIP_CHANGE 0 // 0: no log 1: log
+#define LOG_OWNERSHIP_CHANGE 1 // 0: no log 1: log
 #define LOG_PAGE_UPDATE 1 // 0: no log 1: log
 #define WORKLOAD_AFFINITY_MODE 1 // 0: key affinity 1: city-key affinity
 // for log
@@ -40,6 +40,7 @@ extern double AffinitySampleRate;
 extern double AffinityTxnRatio;
 extern uint64_t PARTITION_INTERVAL;
 extern int MetisWarmupRound; // 这里表示初始情况下首先要先经过多少轮的metis分区，之后分区就不动了
+extern bool WarmupEnd;  // 标记是否完成了warmup阶段
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;

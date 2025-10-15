@@ -58,7 +58,8 @@ public:
     }
 
     // Returns the dominant PartitionIndex for the group, or -1 if none determined.
-    idx_t build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group);
+    idx_t build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group, node_id_t *metis_decision_node, 
+            std::unordered_map<uint64_t, node_id_t>* page_to_node_map = nullptr);
 
     void partition_internal_graph(const std::string &output_partition_file, uint64_t ComputeNodeCount);
 
@@ -143,7 +144,8 @@ private:
 // ========================================================================
 // MODIFIED build_internal_graph FUNCTION
 // ========================================================================
-inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group) {
+inline int NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group, node_id_t *metis_decision_node,
+        std::unordered_map<uint64_t, node_id_t>* page_to_node_map) {
     // std::cout << "build internal graph called with " << unique_mapped_ids_in_group.size() << " unique IDs." << std::endl;
     if (unique_mapped_ids_in_group.empty()) {
         return -1; // Sentinel for empty input or no decision
@@ -233,7 +235,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
     // --- End Submit Partition Task ---
 
     idx_t final_partition_index_result = -1; // Default: no specific partition index determined
-    bool decision_made = false;
+    int return_decision_type = 0; // 0: no decision, 1: entire affinity, 2: partial affinity, 3: cross-partition, -1: missing
     std::string cross_partition_log_message_str; {
         std::shared_lock<std::shared_mutex> lock(partition_map_mutex_);
 
@@ -246,6 +248,9 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                 auto map_it = partition_node_map.find(region_id);
                 if (map_it != partition_node_map.end()) {
                     partition_counts[map_it->second]++; // map_it->second is the PartitionIndex
+                    if(page_to_node_map != nullptr) { // for SYSTEM_MODE 8
+                        (*page_to_node_map)[region_id] = map_it->second;
+                    }
                 } else {
                     unmapped_count++;
                 }
@@ -261,7 +266,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
 
             if (partition_counts.size() > 1) { 
                 // 匹配到的图上的节点大于1, 取最大分布的亲和性作为路由节点
-                decision_made = true;
+                return_decision_type = 3; // cross-partition
                 std::vector<node_id_t> candidates;
                 idx_t dominant_partition_idx = -1;
                 uint64_t max_count = 0;
@@ -298,7 +303,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                 stats_.total_cross_partition_decisions++;
             } else if (partition_counts.size() == 1 && unmapped_count == 0) {
                 // 等于1且没有unmapped, 直接使用该PartitionIndex
-                decision_made = true;
+                return_decision_type = 1; // entire affinity
                 final_partition_index_result = partition_counts.begin()->first; // The only PartitionIndex present
             #if LOG_METIS_DECISION
                 cross_partition_log_message_str = "[Route Decision] Epoch: " + std::to_string(stats_.total_partition_calls) + " Group maps entirely to PartitionIndex: " + std::to_string(
@@ -308,7 +313,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                 stats_.entire_affinity_decisions++;
             } else if (partition_counts.size() == 1 && unmapped_count > 0) {
                 // 等于1但有unmapped, 直接使用该PartitionIndex (部分匹配到)
-                decision_made = true;
+                return_decision_type = 2; // partial affinity
                 final_partition_index_result = partition_counts.begin()->first; // The only PartitionIndex present
             #if LOG_METIS_DECISION
                 cross_partition_log_message_str = "[Route Decision] Epoch: " + std::to_string(stats_.total_partition_calls) + " Group partially maps to PartitionIndex: " + std::to_string(
@@ -320,7 +325,7 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
                 stats_.partial_affinity_decisions++;
             } else if (partition_counts.empty() && unmapped_count > 0) {
                 // 都没有匹配到, 那么返回-1
-                decision_made = false; // A decision that no mapping exists
+                return_decision_type = -1; // missing
                 // final_partition_index_result remains -1
             #if LOG_METIS_DECISION
                 cross_partition_log_message_str = "[Route Decision] Epoch: " + std::to_string(stats_.total_partition_calls) + " Missing: None of the nodes in group " + group_str +
@@ -339,8 +344,10 @@ inline idx_t NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_
         logger_->info(cross_partition_log_message_str);
     }
 #endif
-
-    return final_partition_index_result;
+    if (metis_decision_node != nullptr) {
+        *metis_decision_node = final_partition_index_result;
+    }
+    return return_decision_type;
 }
 
 
@@ -358,6 +365,7 @@ inline void NewMetis::partition_internal_graph(const std::string &output_partiti
     }
     if(this->stats_.total_partition_calls > MetisWarmupRound){
         logger_->info("MetisWarmupRound reached, skipping further partitioning.");
+        WarmupEnd = true; // indicate the end of warmup phase
         this->enable_partition = false;
     }
     logger_->info("Starting internal graph partitioning task (using DENSE ID snapshot).");
