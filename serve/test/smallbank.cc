@@ -23,7 +23,7 @@ std::vector<std::string> DBConnection;
 std::atomic<uint64_t> tx_id_generator;
 auto start = std::chrono::high_resolution_clock::now();
 int try_count = 10000;
-std::atomic<int> exe_count = 0;
+std::atomic<int> exe_count = 0; // 这个是所有线程的总事务数
 
 int smallbank_account = 300000;
 
@@ -390,7 +390,7 @@ void get_keys_by_txn_type(int txn_type, itemkey_t account1, itemkey_t account2, 
     return; 
 }
 
-void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int &node_id) {
+void decide_route_node(tx_id_t tx_id, itemkey_t account1, itemkey_t account2, int txn_type, int &node_id, int &txn_decision_type) {
     if(SYSTEM_MODE == 0) {
         node_id = rand() % 2; // Randomly select node ID for system mode 0
     }
@@ -435,9 +435,10 @@ void decide_route_node(itemkey_t account1, itemkey_t account2, int txn_type, int
         lock.unlock();
 #endif
 
-        SmartRouter::SmartRouterResult result = smart_router->get_route_primary(const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
+        SmartRouter::SmartRouterResult result = smart_router->get_route_primary(tx_id, const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
         if(result.success) {
             node_id = result.smart_router_id;
+            txn_decision_type = result.sys_8_decision_type; // for SYSTEM_MODE 8
         }
         else {
             // fallback to random
@@ -499,8 +500,8 @@ void run_smallbank_txns(thread_params* params) {
         }
         // init the routed node id
         int routed_node_id = 0; // Default node ID
-        
-        decide_route_node(account1, account2, txn_type, routed_node_id);
+        int txn_decision_type = -1; // for SYSTEM_MODE 8
+        decide_route_node(tx_id, account1, account2, txn_type, routed_node_id, txn_decision_type);
 
         // Create a new transaction
         pqxx::work* txn = nullptr;
@@ -651,9 +652,7 @@ void run_smallbank_txns(thread_params* params) {
             }
             txn->commit();
             // update the smart router page map if needed
-            if(smart_router) {
-                smart_router->update_key_page(const_cast<std::vector<table_id_t>&>(tables), keys, ctid_ret_page_ids, routed_node_id);
-            }
+            if(smart_router) smart_router->update_key_page(const_cast<std::vector<table_id_t>&>(tables), keys, ctid_ret_page_ids, routed_node_id, txn_decision_type);
             
         } catch (const std::exception &e) {
             std::cerr << "Transaction failed: " << e.what() << std::endl;

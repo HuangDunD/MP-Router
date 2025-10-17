@@ -29,6 +29,7 @@ extern int SYSTEM_MODE;
 #define LOG_OWNERSHIP_CHANGE 1 // 0: no log 1: log
 #define LOG_PAGE_UPDATE 1 // 0: no log 1: log
 #define WORKLOAD_AFFINITY_MODE 1 // 0: key affinity 1: city-key affinity
+#define SYS_8_DECISION_TYPE_COUNT 17 // for SYSTEM_MODE 8, 17 types of ownership changes
 // for log
 extern std::string partition_log_file_; 
     

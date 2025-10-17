@@ -18,7 +18,7 @@ public:
 
 class OwnershipTable {
 public:
-    OwnershipTable(Logger* logger) : logger(logger) {
+    OwnershipTable(Logger* logger) : logger(logger), ownership_changes_per_txn_type(SYS_8_DECISION_TYPE_COUNT) {
         // 初始化
         table_.clear();
         table_.resize(MAX_DB_TABLE_NUM);
@@ -28,6 +28,13 @@ public:
                 table_[i][j] = new OwnershipEntry();
             }
         }
+        // ownership_changes_per_txn_type 已在初始化列表中构造
+        // 0: metis no decision, 1: metis missing and ownership missing, 2: metis missing and ownership entirely, 3: metis missing and ownership cross
+                                      // 4: metis entirely and ownership missing, 5: metis entirely and ownership cross equal, 6: metis entirely and ownership cross unequal
+                                      // 7: metis entirely and ownership entirely equal, 8: metis entirely and ownership entirely unequal
+                                      // 9: metis cross and ownership missing, 10: metis cross and ownership entirely, 11: metis cross and ownership cross equal
+                                      // 12: metis cross and ownership cross unequal, 13: metis partial and ownership missing, 14: metis partial and ownership entirely
+                                      // 15: metis partial and ownership cross equal, 16: metis partial and ownership cross unequal
     }
     
     // 查询页面所有者，未找到返回-1
@@ -46,7 +53,7 @@ public:
     }
 
     // 设置页面所有权, 如果所有权发生变化返回true，否则返回false
-    bool set_owner(table_id_t table_id, itemkey_t access_key, page_id_t page_id, node_id_t owner) {
+    bool set_owner(table_id_t table_id, itemkey_t access_key, page_id_t page_id, node_id_t owner, int txn_type = -1) {
         if (table_id < 0 || table_id >= MAX_DB_TABLE_NUM) assert(false);
         if (page_id < 0 || page_id >= MAX_DB_PAGE_NUM) assert(false);
         auto& entry = table_[table_id][page_id];
@@ -62,6 +69,7 @@ public:
         }
         if(entry->owner != -1) {
             ownership_changes++;
+            if(txn_type >=0) ownership_changes_per_txn_type[txn_type]++;
         #if LOG_OWNERSHIP_CHANGE
             uint64_t table_page_id = (static_cast<uint64_t>(table_id) << 32) | static_cast<uint64_t>(page_id);
             if(WarmupEnd) // 只在正式阶段记录
@@ -78,8 +86,17 @@ public:
         return ownership_changes.load();
     }
 
+    std::vector<int> get_ownership_changes_per_txn_type() const {
+        std::vector<int> result(ownership_changes_per_txn_type.size());
+        for(size_t i=0; i<ownership_changes_per_txn_type.size(); i++) {
+            result[i] = ownership_changes_per_txn_type[i].load();
+        }
+        return result;
+    }
+
 private:
     std::vector<std::vector<OwnershipEntry*>> table_;
     std::atomic<int> ownership_changes;
+    std::vector<std::atomic<int>> ownership_changes_per_txn_type; // 按事务类型统计的所有权变更次数, for sys_8_decision_type
     Logger* logger;
 };

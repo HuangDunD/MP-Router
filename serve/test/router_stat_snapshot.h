@@ -29,6 +29,7 @@ struct RouterStatSnapshot {
 
     // ownership changes
     int64_t ownership_changes = 0;
+    std::vector<int> ownership_changes_per_txn_type = std::vector<int>(SYS_8_DECISION_TYPE_COUNT, 0); // for SYSTEM_MODE 8, 17 types of ownership changes
 
     // ownership transaction counters
     int64_t ownership_random_txns = 0;
@@ -98,23 +99,23 @@ struct RouterStatSnapshot {
         // for SYSTEM_MODE 8
         // Metis and Ownership combined statistics
         std::cout << "Metis and Ownership combined decisions (for SYSTEM_MODE 8):" << std::endl;
-        std::cout << "  Metis No Decision: " << metis_no_decision << std::endl;
-        std::cout << "  Metis Missing & Ownership Missing: " << metis_missing_and_ownership_missing << std::endl;   
-        std::cout << "  Metis Missing & Ownership Entirely: " << metis_missing_and_ownership_entirely << std::endl;
-        std::cout << "  Metis Missing & Ownership Cross: " << metis_missing_and_ownership_cross << std::endl;
-        std::cout << "  Metis Entirely & Ownership Missing: " << metis_entirely_and_ownership_missing << std::endl;
-        std::cout << "  Metis Entirely & Ownership Cross Equal: " << metis_entirely_and_ownership_cross_equal << std::endl;
-        std::cout << "  Metis Entirely & Ownership Cross Unequal: " << metis_entirely_and_ownership_cross_unequal << std::endl;
-        std::cout << "  Metis Entirely & Ownership Entirely Equal: " << metis_entirely_and_ownership_entirely_equal << std::endl;
-        std::cout << "  Metis Entirely & Ownership Entirely Unequal: " << metis_entirely_and_ownership_entirely_unequal << std::endl;
-        std::cout << "  Metis Cross & Ownership Missing: " << metis_cross_and_ownership_missing << std::endl;
-        std::cout << "  Metis Cross & Ownership Entirely: " << metis_cross_and_ownership_entirely << std::endl;
-        std::cout << "  Metis Cross & Ownership Cross Equal: " << metis_cross_and_ownership_cross_equal << std::endl;
-        std::cout << "  Metis Cross & Ownership Cross Unequal: " << metis_cross_and_ownership_cross_unequal << std::endl;
-        std::cout << "  Metis Partial & Ownership Missing: " << metis_partial_and_ownership_missing << std::endl;
-        std::cout << "  Metis Partial & Ownership Entirely: " << metis_partial_and_ownership_entirely << std::endl;
-        std::cout << "  Metis Partial & Ownership Cross Equal: " << metis_partial_and_ownership_cross_equal << std::endl;
-        std::cout << "  Metis Partial & Ownership Cross Unequal: " << metis_partial_and_ownership_cross_unequal << std::endl;
+        std::cout << "  Metis No Decision: " << metis_no_decision << " Ownership Changes: " << ownership_changes_per_txn_type[0] << std::endl;
+        std::cout << "  Metis Missing & Ownership Missing: " << metis_missing_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[1] << std::endl;
+        std::cout << "  Metis Missing & Ownership Entirely: " << metis_missing_and_ownership_entirely << " Ownership Changes: " << ownership_changes_per_txn_type[2] << std::endl;
+        std::cout << "  Metis Missing & Ownership Cross: " << metis_missing_and_ownership_cross << " Ownership Changes: " << ownership_changes_per_txn_type[3] << std::endl;
+        std::cout << "  Metis Entirely & Ownership Missing: " << metis_entirely_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[4] << std::endl;
+        std::cout << "  Metis Entirely & Ownership Cross Equal: " << metis_entirely_and_ownership_cross_equal << " Ownership Changes: " << ownership_changes_per_txn_type[5] << std::endl;
+        std::cout << "  Metis Entirely & Ownership Cross Unequal: " << metis_entirely_and_ownership_cross_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[6] << std::endl;
+        std::cout << "  Metis Entirely & Ownership Entirely Equal: " << metis_entirely_and_ownership_entirely_equal << " Ownership Changes: " << ownership_changes_per_txn_type[7] << std::endl;
+        std::cout << "  Metis Entirely & Ownership Entirely Unequal: " << metis_entirely_and_ownership_entirely_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[8] << std::endl;
+        std::cout << "  Metis Cross & Ownership Missing: " << metis_cross_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[9] << std::endl;
+        std::cout << "  Metis Cross & Ownership Entirely: " << metis_cross_and_ownership_entirely << " Ownership Changes: " << ownership_changes_per_txn_type[10] << std::endl;
+        std::cout << "  Metis Cross & Ownership Cross Equal: " << metis_cross_and_ownership_cross_equal << " Ownership Changes: " << ownership_changes_per_txn_type[11] << std::endl;
+        std::cout << "  Metis Cross & Ownership Cross Unequal: " << metis_cross_and_ownership_cross_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[12] << std::endl;
+        std::cout << "  Metis Partial & Ownership Missing: " << metis_partial_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[13] << std::endl;
+        std::cout << "  Metis Partial & Ownership Entirely: " << metis_partial_and_ownership_entirely << " Ownership Changes: " << ownership_changes_per_txn_type[14] << std::endl;
+        std::cout << "  Metis Partial & Ownership Cross Equal: " << metis_partial_and_ownership_cross_equal << " Ownership Changes: " << ownership_changes_per_txn_type[15] << std::endl;
+        std::cout << "  Metis Partial & Ownership Cross Unequal: " << metis_partial_and_ownership_cross_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[16] << std::endl;
         std::cout << "*********************************************" << std::endl;
         return;
     }
@@ -140,6 +141,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.page_update_cnt = s.page_update_cnt.load(std::memory_order_relaxed);
 
     snap.ownership_changes = router->get_ownership_changes();
+    snap.ownership_changes_per_txn_type = router->get_ownership_changes_per_txn_type();
 
     snap.ownership_random_txns = s.ownership_random_txns.load(std::memory_order_relaxed);
     snap.ownership_entirely_txns = s.ownership_entirely_txns.load(std::memory_order_relaxed);
@@ -200,6 +202,9 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
 
     // ownership changes
     d.ownership_changes = b.ownership_changes - a.ownership_changes;
+    for(size_t i=0; i<b.ownership_changes_per_txn_type.size(); i++) {
+        d.ownership_changes_per_txn_type[i] = b.ownership_changes_per_txn_type[i] - a.ownership_changes_per_txn_type[i];
+    }
 
     // ownership transaction counters
     d.ownership_random_txns = b.ownership_random_txns - a.ownership_random_txns;
