@@ -140,7 +140,16 @@ public:
     // 如果key不存在, 则不进行任何操作
     inline void update_key_page(std::vector<table_id_t>& table_ids, std::vector<itemkey_t>& keys, 
             std::vector<page_id_t> ctid_ret_pages, node_id_t routed_node_id, int txn_type = -1) { // txn_type for SYSTEM_MODE 8
-        assert(table_ids.size() == keys.size() && keys.size() == ctid_ret_pages.size());
+        // 这个地方可能ctid_ret_pages的数量不等于keys, 因为这个事务可能触发了回滚, 此时需要将table_ids, keys截断一下
+        if(table_ids.size() != ctid_ret_pages.size() || keys.size() != ctid_ret_pages.size()) {
+            std::cerr << "Warning: Mismatched sizes in update_key_page. table_ids: " << table_ids.size() 
+                      << ", keys: " << keys.size() << ", ctid_ret_pages: " << ctid_ret_pages.size() << std::endl;
+            size_t min_size = std::min({table_ids.size(), keys.size(), ctid_ret_pages.size()});
+            table_ids.resize(min_size);
+            keys.resize(min_size);
+            ctid_ret_pages.resize(min_size);
+        }
+        // assert(table_ids.size() == keys.size() && keys.size() == ctid_ret_pages.size());
         for(size_t i=0; i<table_ids.size(); i++) {
             std::lock_guard<std::mutex> lock(hot_mutex_);
             auto it = hot_key_map.find({table_ids[i], keys[i]});

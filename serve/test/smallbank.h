@@ -16,6 +16,13 @@
 #define FREQUENCY_TRANSACT_SAVINGS 15
 #define FREQUENCY_WRITE_CHECK 15
 
+// #define FREQUENCY_AMALGAMATE 0
+// #define FREQUENCY_BALANCE 0
+// #define FREQUENCY_DEPOSIT_CHECKING 50
+// #define FREQUENCY_SEND_PAYMENT 0
+// #define FREQUENCY_TRANSACT_SAVINGS 0
+// #define FREQUENCY_WRITE_CHECK 50
+
 #define TX_HOT 80 /* Percentage of txns that use accounts from hotspot */
 
 // Helpers for generating workload

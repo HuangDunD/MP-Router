@@ -81,6 +81,23 @@ void generate_account_id(itemkey_t &acc1) {
     }
 }
 
+int generate_txn_type() {
+    int r = rand() % 100;
+    if (r < FREQUENCY_AMALGAMATE) {
+        return 0; // Amalgamate
+    } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE) {
+        return 1; // Balance
+    } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE + FREQUENCY_DEPOSIT_CHECKING) {
+        return 2; // DepositChecking
+    } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE + FREQUENCY_DEPOSIT_CHECKING + FREQUENCY_SEND_PAYMENT) {
+        return 3; // SendPayment
+    } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE + FREQUENCY_DEPOSIT_CHECKING + FREQUENCY_SEND_PAYMENT + FREQUENCY_TRANSACT_SAVINGS) {
+        return 4; // TransactSaving
+    } else {
+        return 5; // WriteCheck
+    }
+}
+
 void generate_two_account_ids(itemkey_t &acc1, itemkey_t &acc2) {
     // 先生成第一个账号
     generate_account_id(acc1);
@@ -490,7 +507,7 @@ void run_smallbank_txns(thread_params* params) {
         tx_id_t tx_id = tx_id_generator++; // global atomic transaction ID
         // Simulate some work
         // Randomly select a transaction type and accounts
-        int txn_type = rand() % 6;  // 6 types of transactions
+        int txn_type = generate_txn_type();
         
         itemkey_t account1, account2;
         if(txn_type == 0 || txn_type == 1) { // TxAmagamate or TxSendPayment
@@ -1089,6 +1106,8 @@ int main(int argc, char *argv[]) {
         snapshot1 = take_router_snapshot(smart_router);
         print_diff_snapshot(snapshot0, snapshot1);
     }
+    // Create a performance snapshot after warmup
+    int mid_snapshot_id = create_perf_kwr_snapshot(conn0);
 
     // Wait for all threads to complete
     for(auto& thread : threads) {
@@ -1130,8 +1149,10 @@ int main(int argc, char *argv[]) {
     char buffer[100];
     std::strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", now_tm);
     std::string timestamp(buffer);  
-    std::string report_file = "smallbank_report_" + timestamp + "_mode" + std::to_string(SYSTEM_MODE) + ".html";
-    generate_perf_kwr_report(conn0, start_snapshot_id, end_snapshot_id, report_file);
+    std::string report_file_warm_phase = "smallbank_report_" + timestamp + "_mode" + std::to_string(SYSTEM_MODE) + "_fisrt.html";
+    generate_perf_kwr_report(conn0, start_snapshot_id, mid_snapshot_id, report_file_warm_phase);
+    std::string report_file_run_phase = "smallbank_report_" + timestamp + "_mode" + std::to_string(SYSTEM_MODE) + "_end.html";
+    generate_perf_kwr_report(conn0, start_snapshot_id, end_snapshot_id, report_file_run_phase);
 
     // 关闭连接
     delete conn0;

@@ -61,6 +61,8 @@ public:
     idx_t build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group, node_id_t *metis_decision_node, 
             std::unordered_map<uint64_t, node_id_t>* page_to_node_map = nullptr);
 
+    void build_link_between_nodes_in_graph(uint64_t from_node, uint64_t to_node);
+
     void partition_internal_graph(const std::string &output_partition_file, uint64_t ComputeNodeCount);
 
     void stabilize_partition_indices(
@@ -102,6 +104,7 @@ private:
     // Mapping and Partitioning Results
     // Stores OriginalRegionID -> PartitionIndex (from METIS)
     std::unordered_map<uint64_t, idx_t> partition_node_map;
+    std::unordered_map<uint64_t, std::pair<idx_t, std::vector<int>> > pending_partition_node_map; // 在触发分区操作间隔中第一次出现悬而未决的顶点. 
 
     // Mutexes for thread safety
     mutable std::mutex graph_data_mutex_;
@@ -350,6 +353,44 @@ inline int NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_ma
     return return_decision_type;
 }
 
+// MODIFIED build_link_between_nodes_in_graph FUNCTION
+inline void NewMetis::build_link_between_nodes_in_graph(uint64_t from_node, uint64_t to_node) {
+    // try lock the partition_map_mutex_ for writing
+    std::unique_lock<std::shared_mutex> lock(partition_map_mutex_); 
+    // 首先先看下to_node是否已经有分区信息
+    auto to_it = partition_node_map.find(to_node);
+    if(to_it != partition_node_map.end()) return; // 已经有分区信息, 直接返回
+    // 如果没有分区信息, 那么查看from_node的分区信息
+    idx_t from_partition = partition_node_map.count(from_node) ? partition_node_map[from_node] : -1; 
+    if (from_partition == -1) {
+        // check pending_partition_node_map
+        auto pending_it = pending_partition_node_map.find(from_node);
+        if(pending_it != pending_partition_node_map.end() ) {
+            from_partition = pending_it->second.first;
+        }
+    }
+    if(from_partition == -1) { assert(false); } // 如果from_node没有分区信息, 则不进行任何处理, 按道理这种情况应该不会出现
+    // 剩下的情况是to_it 不在partition_node_map中, 或者已经在里面了
+    auto pending_to_it = pending_partition_node_map.find(to_node);
+    if(pending_to_it != pending_partition_node_map.end()) {
+        pending_to_it->second.second[from_partition]++; // 增加对应分区的计数
+        idx_t now_idx = pending_to_it->second.first;
+        if(from_partition != now_idx) {
+            // 不同分区, 需要比较计数
+            if(pending_to_it->second.second[from_partition] > pending_to_it->second.second[now_idx]) {
+                // 更新为新的分区
+                pending_to_it->second.first = from_partition;
+            }
+        }
+    }
+    else {
+        // 不在pending_partition_node_map中, 直接插入
+        std::vector<int> partition_counts(num_partitions_, 0);
+        partition_counts[from_partition] = 1;
+        pending_partition_node_map[to_node] = {from_partition, partition_counts};
+    }
+    return;
+}
 
 // ========================================================================
 // MODIFIED partition_internal_graph FUNCTION
