@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 /*********************** For common **********************/
 
 // ! pay attention: need modify this when use different workload
@@ -29,10 +30,11 @@ extern int SYSTEM_MODE;
 #define LOG_OWNERSHIP_CHANGE 1 // 0: no log 1: log
 #define LOG_PAGE_UPDATE 1 // 0: no log 1: log
 #define WORKLOAD_AFFINITY_MODE 1 // 0: key affinity 1: city-key affinity
-#define SYS_8_DECISION_TYPE_COUNT 17 // for SYSTEM_MODE 8, 17 types of ownership changes
+#define SYS_8_DECISION_TYPE_COUNT 19 // for SYSTEM_MODE 8, 17 types of ownership changes
 // for log
 extern std::string partition_log_file_; 
-    
+
+extern std::vector<std::string> DBConnection;
 extern int ComputeNodeCount; // 计算节点数量
 extern uint64_t ATTEMPTED_NUM;
 extern double CrossNodeAccessRatio;
@@ -42,6 +44,7 @@ extern double AffinityTxnRatio;
 extern uint64_t PARTITION_INTERVAL;
 extern int MetisWarmupRound; // 这里表示初始情况下首先要先经过多少轮的metis分区，之后分区就不动了
 extern bool WarmupEnd;  // 标记是否完成了warmup阶段
+extern int TxnPoolMaxSize; // 事务池的最大大小
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;

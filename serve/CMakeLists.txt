@@ -13,23 +13,23 @@ set(SERVER_SRC
 )
 # --- MODIFICATION END ---
 
-add_executable(serve ${SERVER_SRC} ${LOG_SRC})
+# add_executable(serve ${SERVER_SRC} ${LOG_SRC})
 add_executable(offline_analyzer offline_analyze.cc)
 add_executable(create_table create_table.cc)
 
 add_library(logger STATIC ${LOG_SRC})
 
 # Link libraries to 'serve'
-target_link_libraries(serve PRIVATE # Use PRIVATE or PUBLIC as appropriate
-        global # Assuming 'global' is a library target defined elsewhere
-        # nlohmann_json::nlohmann_json
-        ${METIS_LIBRARY}
-        ${GKLIB_LIBRARY}
-        ${PQXX_LIBRARY}
-        ${PQ_LIBRARY}
-        pgcommon 
-        pgport
-)
+# target_link_libraries(serve PRIVATE # Use PRIVATE or PUBLIC as appropriate
+#         global # Assuming 'global' is a library target defined elsewhere
+#         # nlohmann_json::nlohmann_json
+#         ${METIS_LIBRARY}
+#         ${GKLIB_LIBRARY}
+#         ${PQXX_LIBRARY}
+#         ${PQ_LIBRARY}
+#         pgcommon 
+#         pgport
+# )
 
 # Link libraries to 'offline_analyzer' (if it also needs Logger, Region etc., add sources above too)
 target_link_libraries(offline_analyzer PRIVATE # Use PRIVATE or PUBLIC

@@ -6,10 +6,9 @@
 #include <algorithm>
 #include <numeric>
 #include <iostream>
-#include "smallbank.h"
 
 // 生成模拟社交网络图的函数
-void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, float>>> &adj_list, int num_users) {
+void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, float>>> &adj_list, int num_users, int city_cnt) {
 	adj_list.clear();
 	if (num_users <= 20) {
         std::cerr << "Number of users must be greater than 20 to generate a meaningful graph." << std::endl;
@@ -25,11 +24,11 @@ void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, 
 	std::random_device rd;
 	std::mt19937 gen(rd());
 	std::vector<std::uniform_int_distribution<int>> city_dists;
-	int account_per_city = std::max(1, num_users / static_cast<int>(SmallBankCityType::Count));
+	int account_per_city = std::max(1, num_users / city_cnt);
 	// 为每个城市创建一个分布，确保朋友主要来自同一城市
-	for(int i = 0; i < static_cast<int>(SmallBankCityType::Count); i++) {
+	for(int i = 0; i < city_cnt; i++) {
 		int start = i * account_per_city;
-		int end = (i == static_cast<int>(SmallBankCityType::Count) - 1) ? num_users : (i + 1) * account_per_city;
+		int end = (i == city_cnt - 1) ? num_users : (i + 1) * account_per_city;
 		city_dists.emplace_back(start, end - 1);
 	}
 	std::uniform_real_distribution<float> weightDist(0.001f, 1.0f);
@@ -55,8 +54,8 @@ void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, 
     for( int u = 0; u < num_users; ++u ) {
         while(degree(u) < target[u]) { 
 			int city = u / account_per_city;
-			if(city >= static_cast<int>(SmallBankCityType::Count)) city = static_cast<int>(SmallBankCityType::Count) - 1;
-			assert(city >=0 && city < static_cast<int>(SmallBankCityType::Count));
+			if(city >= city_cnt) city = city_cnt - 1;
+			assert(city >=0 && city < city_cnt);
 			int v = city_dists[city](gen); // 主要从同一城市选择朋友
             add_edge(u, v); // 添加无向边
         }    
@@ -169,7 +168,7 @@ void generate_friend_simulate_graph(std::vector<std::vector<std::pair<int, float
 }
 
 // 导出社交网络图到 CSV: src,dst,prob
-inline bool dump_friend_graph_csv(const std::vector<std::vector<std::pair<int,float>>> &adj_list, const std::string &path, size_t limit_nodes = 0){
+bool dump_friend_graph_csv(const std::vector<std::vector<std::pair<int,float>>> &adj_list, const std::string &path, size_t limit_nodes = 0){
 	std::ofstream ofs(path, std::ios::out | std::ios::trunc);
 	if(!ofs.is_open()) return false;
 	ofs << "src,dst,prob\n";

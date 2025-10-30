@@ -18,6 +18,8 @@
 #include "threadpool.h"
 #include "log/Logger.h"
 #include "ownership_table.h"
+#include "txn_queue.h"
+#include "config.h"
 
 // SmartRouter: 一个针对 hot-key hash cache 设有严格内存预算的事务路由器。
 // 它维护：
@@ -52,9 +54,31 @@ public:
         std::size_t partition_nums = ComputeNodeCount; // 分区数量，通常等于计算节点数量
 
         std::size_t hot_hash_cap_bytes = 640ULL * 1024ULL * 1024ULL; // 默认 64 MB, 作为 hot hash 的内存预算
-        int thread_pool_size = 16; // 线程池大小
+        int thread_pool_size = 4; // 线程池大小
         std::string log_file = "smart_router_metis.log"; // 日志文件
     };
+
+	enum class MetisOwnershipDecisionType {
+		MetisNoDecision = 0,
+		MetisMissingAndOwnershipMissing,
+		MetisMissingAndOwnershipEntirely,
+		MetisMissingAndOwnershipCross,
+		MetisEntirelyAndOwnershipMissing,
+		MetisEntirelyAndOwnershipCrossEqual,
+		MetisEntirelyAndOwnershipCrossUnequal,
+		MetisEntirelyAndOwnershipEntirelyEqual,
+		MetisEntirelyAndOwnershipEntirelyUnequal,
+		MetisCrossAndOwnershipMissing,
+		MetisCrossAndOwnershipEntirelyEqual,
+        MetisCrossAndOwnershipEntirelyUnequal,
+		MetisCrossAndOwnershipCrossEqual,
+		MetisCrossAndOwnershipCrossUnequal,
+		MetisPartialAndOwnershipMissing,
+		MetisPartialAndOwnershipEntirelyEqual,
+        MetisPartialAndOwnershipEntirelyUnequal,
+		MetisPartialAndOwnershipCrossEqual,
+		MetisPartialAndOwnershipCrossUnequal
+	};
 
     struct Stats {
         // 当前大小
@@ -90,12 +114,14 @@ public:
         std::atomic<int> metis_entirely_and_ownership_entirely_unequal = 0;
         // for metis cross
         std::atomic<int> metis_cross_and_ownership_missing = 0;
-        std::atomic<int> metis_cross_and_ownership_entirely = 0;
+        std::atomic<int> metis_cross_and_ownership_entirely_equal = 0;
+         std::atomic<int> metis_cross_and_ownership_entirely_unequal = 0;
         std::atomic<int> metis_cross_and_ownership_cross_equal = 0; 
         std::atomic<int> metis_cross_and_ownership_cross_unequal = 0;
         // for metis partial
         std::atomic<int> metis_partial_and_ownership_missing = 0;
-        std::atomic<int> metis_partial_and_ownership_entirely = 0;
+        std::atomic<int> metis_partial_and_ownership_entirely_equal = 0;
+        std::atomic<int> metis_partial_and_ownership_entirely_unequal = 0;
         std::atomic<int> metis_partial_and_ownership_cross_equal = 0;
         std::atomic<int> metis_partial_and_ownership_cross_unequal = 0; 
     };
@@ -121,20 +147,83 @@ public:
     };
 
 public:
-    explicit SmartRouter(const Config &cfg, BtreeIndexService *btree_service, 
-            NewMetis* metis = nullptr, Logger* logger_ptr = nullptr)
+    explicit SmartRouter(const Config &cfg, TxnPool* txn_pool, std::vector<TxnQueue*> txn_queue, int worker_threads,
+            BtreeIndexService *btree_service, NewMetis* metis = nullptr, Logger* logger_ptr = nullptr)
         : cfg_(cfg),
+          txn_pool_(txn_pool),
+          txn_queues_(txn_queue),
           logger(logger_ptr),
           btree_service_(btree_service),
           metis_(metis),
-          pool(cfg.thread_pool_size, *logger)
+          pool(cfg.thread_pool_size, *logger), 
+          routed_txn_cnt_per_node(MaxComputeNodeCount)
     {
         metis_->set_thread_pool(&pool);
         metis_->init_node_nums(cfg.partition_nums);
         ownership_table_ = new OwnershipTable(logger);
+
+        // for logging access key
+        #if LOG_ACCESS_KEY
+            // open the access key log file
+            access_key_log_file.open(access_log_file_name, std::ios::out | std::ios::trunc);
+            if (!access_key_log_file.is_open()) {
+                std::cerr << "Failed to open access key log file." << std::endl;
+                return -1;
+            }
+        #else 
+            // delete existing log file if any
+            std::remove(access_log_file_name.c_str());
+        #endif
+
+        // start the router thread
+        for(int i=0; i<worker_threads; i++) {
+            std::thread router_thread([this, i]() {
+                std::string thread_name = "SmartRouter_" + std::to_string(i);
+                pthread_setname_np(pthread_self(), thread_name.c_str());
+                this->run_router_worker();
+            });
+            pthread_setname_np(router_thread.native_handle(), ("SmartRouter_" + std::to_string(i)).c_str());
+            router_thread.detach();
+        }
     }
 
-    ~SmartRouter() = default; // 使用 = default
+    ~SmartRouter() {
+        #if LOG_ACCESS_KEY
+            // 转到 vector 便于排序
+            std::vector<std::pair<int, long long>> vec(key_freq.begin(), key_freq.end());
+
+            // 按 value 从大到小排序
+            std::sort(vec.begin(), vec.end(),
+                    [](auto &a, auto &b) { return a.second > b.second; });
+
+            // 输出前 50 个
+            int topN = 50;
+            if (vec.size() < topN) topN = vec.size();
+            for (int i = 0; i < topN; i++) {
+                std::cout << "Key: " << vec[i].first
+                        << "  Count: " << vec[i].second << "\n";
+            }
+            
+            // 计算总访问次数
+            long long total = 0;
+            for (auto &p : vec) total += p.second;
+
+            auto calc_ratio = [&](double percent) {
+                size_t topN = std::max<size_t>(1, size_t(vec.size() * percent));
+                long long sum = 0;
+                for (size_t i = 0; i < topN && i < vec.size(); i++) sum += vec[i].second;
+                return double(sum) / total * 100.0;
+            };
+
+            double r1  = calc_ratio(0.01);
+            double r10 = calc_ratio(0.10);
+            double r50 = calc_ratio(0.50);
+
+            std::cout << "前 1% key 占总访问比例:  " << r1  << "%\n";
+            std::cout << "前10% key 占总访问比例:  " << r10 << "%\n";
+            std::cout << "前50% key 占总访问比例:  " << r50 << "%\n";
+        #endif
+    }
 
     // 可能Update SQL执行之后数据页所在的位置, 根据returning ctid 进行更新key-page映射
     // 如果key不存在, 则不进行任何操作
@@ -254,13 +343,13 @@ public:
             return result;
         }
 
-        std::vector<uint64_t> table_page_id; // 高32位存table_id，低32位存page_id, for SYSTEM_MODE 3
+        std::unordered_map<uint64_t, node_id_t> page_to_node_map; // 高32位存table_id，低32位存page_id, for SYSTEM_MODE 3
         std::unordered_map<node_id_t, int> node_count_basedon_key_access_last; // 基于key_access_last的计数, for SYSTEM_MODE 5
-        std::vector<uint64_t> table_key_id;  // 高32位存table_id，低32位存key, for SYSTEM_MODE 6
+        std::unordered_map<uint64_t, node_id_t> table_key_id;  // 高32位存table_id，低32位存key, for SYSTEM_MODE 6
         std::unordered_map<node_id_t, int> node_count_basedon_page_access_last; // 基于page_access_last的计数, for SYSTEM_MODE 7
         std::unordered_map<uint64_t, node_id_t> page_ownership_to_node_map; // 找到ownership对应的节点的映射关系, for SYSTEM_MODE 8
         std::string debug_info;
-        table_page_id.reserve(keys.size());
+        page_to_node_map.reserve(keys.size());
         for (size_t i = 0; i < keys.size(); ++i) {
             if(SYSTEM_MODE == 3) {
                 auto entry = lookup(table_ids[i], keys[i], thread_conns);
@@ -271,7 +360,8 @@ public:
                     assert(false); // 这里不应该失败
                 }
                 // 方法1: 直接使用page_id
-                table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | entry.page);
+                uint64_t table_page = (static_cast<uint64_t>(table_ids[i]) << 32) | entry.page;
+                page_to_node_map[table_page] = -1; // 初始化
                 // 方法2: 每GroupPageAffinitySize个页面作为一个region, 这样可以减少图分区的大小
                 // table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | (entry.page / GroupPageAffinitySize));
                 // 方法3: 直接对page_id做hash, 这样可以减少图分区的大小, 这会使得负载变得更加均衡
@@ -288,7 +378,8 @@ public:
             }
             else if(SYSTEM_MODE == 6) {
                 // 计算key id
-                table_key_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | keys[i]); 
+                uint64_t table_key = (static_cast<uint64_t>(table_ids[i]) << 32) | keys[i];
+                table_key_id[table_key] = -1; // 初始化
             }
             else if(SYSTEM_MODE == 7) {
                 auto entry = lookup(table_ids[i], keys[i], thread_conns);
@@ -314,7 +405,7 @@ public:
                     assert(false); // 这里不应该失败
                 }
                 uint64_t table_page_id_val = (static_cast<uint64_t>(table_ids[i]) << 32) | entry.page;
-                table_page_id.push_back(table_page_id_val);
+                page_to_node_map[table_page_id_val] = -1; // 初始化
                 auto last_node = ownership_table_->get_owner(table_ids[i], entry.page);
                 if (last_node != -1) {
                     page_ownership_to_node_map[table_page_id_val] = last_node;
@@ -332,10 +423,8 @@ public:
             if (SYSTEM_MODE == 3) {
                 // 基于page Metis的结果进行分区
                 // 去重优化
-                std::sort(table_page_id.begin(), table_page_id.end());
-                table_page_id.erase(std::unique(table_page_id.begin(), table_page_id.end()), table_page_id.end());
-                result.keys_processed = table_page_id.size();
-                metis_->build_internal_graph(table_page_id, &result.smart_router_id);
+                result.keys_processed = page_to_node_map.size();
+                metis_->build_internal_graph(page_to_node_map, &result.smart_router_id);
                 // result.smart_router_id = 0;
             }
             else if (SYSTEM_MODE == 5) {
@@ -363,8 +452,6 @@ public:
             else if (SYSTEM_MODE == 6) {
                 // SYSTEM_MODE 6: 按照key做亲和性划分
                 // 去重优化
-                std::sort(table_key_id.begin(), table_key_id.end());
-                table_key_id.erase(std::unique(table_key_id.begin(), table_key_id.end()), table_key_id.end());
                 result.keys_processed = table_key_id.size();
                 metis_->build_internal_graph(table_key_id, &result.smart_router_id);
             }
@@ -406,46 +493,37 @@ public:
             }
             else if(SYSTEM_MODE == 8) {
                 // 基于page Metis的结果进行分区, 同时返回page到node的映射
-                std::sort(table_page_id.begin(), table_page_id.end());
-                table_page_id.erase(std::unique(table_page_id.begin(), table_page_id.end()), table_page_id.end());
-                result.keys_processed = table_page_id.size();
+                result.keys_processed = page_to_node_map.size();
                 node_id_t metis_decision_node;
-                std::unordered_map<uint64_t, node_id_t> page_to_node_map;
-                int ret_code = metis_->build_internal_graph(table_page_id, &metis_decision_node, &page_to_node_map);
+                int ret_code = metis_->build_internal_graph(page_to_node_map, &metis_decision_node);
                 // page_ownership_to_node_map 是ownership_table_中记录的page到node的映射
                 // page_to_node_map 是metis分区后得到的page到node的映射
                 // 这里进行对比, 看看两者是否一致, 综合考虑page_to_node_map和ownership_table_的信息, 进行调整
                 if  (ret_code == 0){ 
                     // no decision
-                    assert(page_to_node_map.empty());
+                    assert(!page_to_node_map.empty());
                     this->stats_.metis_no_decision++;
                     result.smart_router_id = rand() % cfg_.partition_nums; // 随机选择一个节点
                     result.sys_8_decision_type = 0;
-                    if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                        logger->info("[SmartRouter Metis No Decision] found no candidate node based on metis, randomly selected node " + 
-                                std::to_string(result.smart_router_id));
+                    log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisNoDecision);
                 }
                 else if (ret_code == -1) {
                     // missing, 没有任何page被映射到节点
                     // 这个时候再检查一下ownership_table_的信息
-                    assert(page_to_node_map.empty()); // 因为ret_code == -1, 所以page_to_node_map应该是空的
+                    assert(!page_to_node_map.empty()); 
                     if(node_count_basedon_page_access_last.empty()) {
                         // ownership_table_中也没有任何page的映射信息, 即涉及到的页面第一次被访问
                         this->stats_.metis_missing_and_ownership_missing++;
                         result.smart_router_id = rand() % cfg_.partition_nums; // 随机选择一个节点
                         result.sys_8_decision_type = 1;
-                        if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                            logger->info("[SmartRouter Metis Missing + Ownership Missing] found no candidate node based on ownership table, randomly selected node " + 
-                                    std::to_string(result.smart_router_id));
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisMissingAndOwnershipMissing);
                     }
                     else if(node_count_basedon_page_access_last.size() == 1) {
                         // ownership_table_中只有一个page的映射信息
                         this->stats_.metis_missing_and_ownership_entirely++;
                         result.smart_router_id = page_ownership_to_node_map.begin()->second;
                         result.sys_8_decision_type = 2;
-                        if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                            logger->info("[SmartRouter Metis Missing + Ownership Entirely] " + debug_info + 
-                                    " based on ownership table directly to node " + std::to_string(result.smart_router_id));
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisMissingAndOwnershipEntirely);
                     }
                     else if(node_count_basedon_page_access_last.size() > 1) {
                         // ownership_table_中有多个page的映射信息
@@ -467,10 +545,7 @@ public:
                         assert(!candidates.empty());
                         // 随机选择出现次数最多的节点
                         result.smart_router_id = candidates[rand() % candidates.size()];
-                        if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                            logger->info("[SmartRouter Metis Missing + Ownership Cross] " + debug_info + 
-                                    " based on ownership table with count (" + std::to_string(max_count) + 
-                                    ") to node " + std::to_string(result.smart_router_id));
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisMissingAndOwnershipCross);
                     }
                     else assert(false); // 不可能出现的情况
                 }
@@ -483,32 +558,7 @@ public:
                         this->stats_.metis_entirely_and_ownership_missing++;
                         result.smart_router_id = metis_decision_node;
                         result.sys_8_decision_type = 4;
-                        if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                            logger->info("[SmartRouter Metis Entirely + Ownership Missing] found no candidate node based on ownership table, selected metis node " + 
-                                    std::to_string(result.smart_router_id));
-                    }
-                    else if(node_count_basedon_page_access_last.size() == 1) {
-                        // ownership_table_中只有一个page的映射信息
-                        auto ownership_node = page_ownership_to_node_map.begin()->second;
-                        if(ownership_node == metis_decision_node) {
-                            this->stats_.metis_entirely_and_ownership_entirely_equal++;
-                            result.smart_router_id = metis_decision_node;
-                            result.sys_8_decision_type = 7;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Entirely + Ownership Entirely Equal] " + debug_info + 
-                                        " both metis and ownership table to node " + std::to_string(result.smart_router_id));
-                        }
-                        else {
-                            this->stats_.metis_entirely_and_ownership_entirely_unequal++;
-                            // !两者不一致, 优先选择ownership_node
-                            result.smart_router_id = ownership_node;
-                            result.sys_8_decision_type = 8;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Entirely + Ownership Entirely Unequal] " + debug_info + 
-                                        " metis to node " + std::to_string(metis_decision_node) + 
-                                        " but ownership table to node " + std::to_string(ownership_node) + 
-                                        ", selected ownership node");
-                        }
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipMissing);
                     }
                     else if(node_count_basedon_page_access_last.size() > 1) {
                         // ownership_table_中有多个page的映射信息
@@ -540,20 +590,31 @@ public:
                             this->stats_.metis_entirely_and_ownership_cross_equal++;
                             result.smart_router_id = metis_decision_node;
                             result.sys_8_decision_type = 5;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Entirely + Ownership Cross Equal] " + debug_info + 
-                                        " both metis and ownership table to node " + std::to_string(result.smart_router_id));
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipCrossEqual);
                         }
                         else {
                             this->stats_.metis_entirely_and_ownership_cross_unequal++;
                             // !pay attention: 这里对于candidates 中有可能包含metis_decision_node的情况, 这种情况需要选择metis_decision_node
                             result.smart_router_id = candidate_node;
                             result.sys_8_decision_type = 6;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Entirely + Ownership Cross Unequal] " + debug_info + 
-                                        " metis to node " + std::to_string(metis_decision_node) + 
-                                        " but ownership table to node " + std::to_string(candidate_node) + 
-                                        ", selected ownership node");
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipCrossUnequal);
+                        }
+                    }
+                    else if(node_count_basedon_page_access_last.size() == 1) {
+                        // ownership_table_中只有一个page的映射信息
+                        auto ownership_node = page_ownership_to_node_map.begin()->second;
+                        if(ownership_node == metis_decision_node) {
+                            this->stats_.metis_entirely_and_ownership_entirely_equal++;
+                            result.smart_router_id = metis_decision_node;
+                            result.sys_8_decision_type = 7;
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyEqual);
+                        }
+                        else {
+                            this->stats_.metis_entirely_and_ownership_entirely_unequal++;
+                            // !两者不一致, 优先选择ownership_node
+                            result.smart_router_id = ownership_node;
+                            result.sys_8_decision_type = 8;
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyUnequal);
                         }
                     }
                     else assert(false); // 不可能出现的情况
@@ -566,32 +627,25 @@ public:
                         // ownership_table_中也没有任何page的映射信息, 即涉及到的页面第一次被访问
                         this->stats_.metis_partial_and_ownership_missing++;
                         result.smart_router_id = metis_decision_node;
-                        result.sys_8_decision_type = 13;
-                        if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                            logger->info("[SmartRouter Metis Partial + Ownership Missing] found no candidate node based on ownership table, selected metis node " + 
-                                    std::to_string(result.smart_router_id));
+                        result.sys_8_decision_type = 14;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipMissing);
                     }
                     else if(node_count_basedon_page_access_last.size() == 1) {
                         // ownership_table_中只有一个page的映射信息
                         auto ownership_node = page_ownership_to_node_map.begin()->second;
-                        this->stats_.metis_partial_and_ownership_entirely++;
                         if(ownership_node == metis_decision_node) {
                             // 两者一致
+                            this->stats_.metis_partial_and_ownership_entirely_equal++;
                             result.smart_router_id = metis_decision_node;
-                            result.sys_8_decision_type = 14;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Partial + Ownership Entirely Equal] " + debug_info + 
-                                        " both metis and ownership table to node " + std::to_string(result.smart_router_id));
+                            result.sys_8_decision_type = 15;
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyEqual);
                         }
                         else {
                             // !两者不一致, 优先选择ownership_node
+                            this->stats_.metis_partial_and_ownership_entirely_unequal++;
                             result.smart_router_id = ownership_node;
-                            result.sys_8_decision_type = 14;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Partial + Ownership Entirely Unequal] " + debug_info + 
-                                        " metis to node " + std::to_string(metis_decision_node) + 
-                                        " but ownership table to node " + std::to_string(ownership_node) + 
-                                        ", selected ownership node");
+                            result.sys_8_decision_type = 16;
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyUnequal);
                         }
                     }
                     else if(node_count_basedon_page_access_last.size() > 1) {
@@ -613,21 +667,15 @@ public:
                         if(ownership_node == metis_decision_node) {
                             this->stats_.metis_partial_and_ownership_cross_equal++;
                             result.smart_router_id = metis_decision_node;
-                            result.sys_8_decision_type = 15;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Partial + Ownership Cross Equal] " + debug_info + 
-                                        " both metis and ownership table to node " + std::to_string(result.smart_router_id));
+                            result.sys_8_decision_type = 17;
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossEqual);
                         }
                         else {
                             this->stats_.metis_partial_and_ownership_cross_unequal++;
                             // !两者不一致, 优先选择ownership_node
                             result.smart_router_id = ownership_node;
-                            result.sys_8_decision_type = 16;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Partial + Ownership Cross Unequal] " + debug_info + 
-                                        " metis to node " + std::to_string(metis_decision_node) + 
-                                        " but ownership table to node " + std::to_string(ownership_node) + 
-                                        ", selected ownership node");
+                            result.sys_8_decision_type = 18;
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossUnequal);
                         }
                     }
                     else assert(false); // 不可能出现的情况
@@ -641,31 +689,24 @@ public:
                         this->stats_.metis_cross_and_ownership_missing++;
                         result.smart_router_id = metis_decision_node;
                         result.sys_8_decision_type = 9;
-                        if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                            logger->info("[SmartRouter Metis Cross + Ownership Missing] found no candidate node based on ownership table, selected metis node " + 
-                                    std::to_string(result.smart_router_id));
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipMissing);
                     }
                     else if(node_count_basedon_page_access_last.size() == 1) {
                         // ownership_table_中只有一个page的映射信息
                         auto ownership_node = page_ownership_to_node_map.begin()->second;
-                        this->stats_.metis_cross_and_ownership_entirely++;
                         if(ownership_node == metis_decision_node) {
                             // 两者一致
+                            this->stats_.metis_cross_and_ownership_entirely_equal++;
                             result.smart_router_id = metis_decision_node;
                             result.sys_8_decision_type = 10;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Cross + Ownership Entirely Equal] " + debug_info + 
-                                        " both metis and ownership table to node " + std::to_string(result.smart_router_id));
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyEqual);
                         }
                         else {
                             // !两者不一致, 优先选择ownership_node
-                            result.smart_router_id = ownership_node;
-                            result.sys_8_decision_type = 10;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Cross + Ownership Entirely Unequal] " + debug_info + 
-                                        " metis to node " + std::to_string(metis_decision_node) + 
-                                        " but ownership table to node " + std::to_string(ownership_node) + 
-                                        ", selected ownership node");
+                            this->stats_.metis_cross_and_ownership_entirely_unequal++; 
+                            result.smart_router_id = ownership_node; 
+                            result.sys_8_decision_type = 11; 
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyUnequal);
                         }
                     }
                     else if(node_count_basedon_page_access_last.size() > 1) {
@@ -687,21 +728,15 @@ public:
                         if(ownership_node == metis_decision_node) {
                             this->stats_.metis_cross_and_ownership_cross_equal++;
                             result.smart_router_id = metis_decision_node;
-                            result.sys_8_decision_type = 11;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Cross + Ownership Cross Equal] " + debug_info + 
-                                        " both metis and ownership table to node " + std::to_string(result.smart_router_id));
+                            result.sys_8_decision_type = 12;
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossEqual);
                         }
                         else {
                             this->stats_.metis_cross_and_ownership_cross_unequal++;
                             // !两者不一致, 优先选择ownership_node
                             result.smart_router_id = ownership_node;
-                            result.sys_8_decision_type = 12;
-                            if(WarmupEnd) // 仅在完成warmup阶段后记录日志
-                                logger->info("[SmartRouter Metis Cross + Ownership Cross Unequal] " + debug_info + 
-                                        " metis to node " + std::to_string(metis_decision_node) + 
-                                        " but ownership table to node " + std::to_string(ownership_node) + 
-                                        ", selected ownership node");
+                            result.sys_8_decision_type = 13;
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossUnequal);
                         }
                     }
                     else assert(false); // 不可能出现的情况
@@ -722,6 +757,157 @@ public:
             result.error_message = std::string("Exception during partitioning: ") + e.what();
         }
         return result;
+    }
+    
+    // ! core code, propose the transaction scheduling
+    // 批量对事务进行路由
+    std::vector<TxnQueue*> get_route_primary_batch(std::vector<TxnQueueEntry*> &txn_batch,
+            std::vector<pqxx::connection *> &thread_conns) {
+        
+        assert(SYSTEM_MODE == 9); // 仅支持SYSTEM_MODE 9的批量路由
+        std::vector<SmartRouterResult> results;
+        results.reserve(txn_batch.size());
+        // 这几个变量是对整个batch
+        std::unordered_map<tx_id_t, std::vector<uint64_t>> txn_to_pages_map; // 记录每个事务涉及的页面列表
+        std::unordered_map<uint64_t, tx_id_t> page_to_txn_map; // 记录每个页面对应的事务ID
+        std::unordered_map<uint64_t, node_id_t> page_to_node_map; // 记录每个页面对应的节点ID（Metis分区结果）
+        std::unordered_map<uint64_t, node_id_t> page_ownership_to_node_map; // 记录每个页面对应的节点ID（Ownership表结果）
+        for (auto& txn : txn_batch) { 
+            auto txn_type = txn->txn_type;
+            auto tx_id = txn->tx_id;
+            std::vector<itemkey_t> accounts_keys = txn->accounts; 
+            std::vector<table_id_t> table_ids = smallbank_->get_table_ids_by_txn_type(txn_type); 
+            assert(table_ids.size() == accounts_keys.size());
+
+            // 获取涉及的页面列表
+            std::unordered_map<uint64_t, node_id_t> table_page_ids; // 高32位存table_id，低32位存page_id
+            for (size_t i = 0; i < accounts_keys.size(); ++i) {
+                auto entry = lookup(table_ids[i], accounts_keys[i], thread_conns);
+                // 计算page id
+                if (entry.page == kInvalidPageId) {
+                    assert(false); // 这里不应该失败
+                }
+                uint64_t table_page_id = (static_cast<uint64_t>(table_ids[i]) << 32) | entry.page;
+                table_page_ids[table_page_id] = -1; // 初始化
+                page_to_txn_map[table_page_id] = tx_id;
+                txn_to_pages_map[tx_id].push_back(table_page_id);
+            }
+            // 让Metis构建图
+            node_id_t metis_decision_node;
+            int metis_ret = metis_->build_internal_graph(table_page_ids, &metis_decision_node);
+
+            if (SYSTEM_MODE == 9) {
+                if (metis_ret == 1){
+                    // entire affinity
+
+                }
+            }
+        }
+
+        // 获取Metis分区结果
+        // init the page_to_node_map
+        for(const auto& [page, txn_id] : page_to_txn_map) {
+            page_to_node_map[page] = -1;
+        }
+        metis_->get_metis_partitioning_result(page_to_node_map);
+        
+        // 获取Ownership表结果
+        for(const auto& [page, txn_id] : page_to_txn_map) {
+            page_ownership_to_node_map[page] = ownership_table_->get_owner(page);
+        }
+        // ------ 基本信息已经收集完毕, 开始进行路由决策 ------
+
+    }
+
+    // 这个是路由层的主循环, 他不断从txn_pool中取出事务进行路由
+    // 进行的路由决策会放入txn_queue中，供执行层消费
+    void run_router_worker() {
+        // for routing needed db connections, each routing thread has its own connections
+        std::vector<pqxx::connection*> thread_conns_vec;
+        for(int i=0; i<ComputeNodeCount; i++) {
+            pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
+            thread_conns_vec.push_back(conn);
+        }
+        while (true) {
+            TxnQueueEntry* txn_entry = txn_pool_->fetch_txn_from_poolfront();
+            if (txn_entry == nullptr) {
+                // 说明事务池已经运行完成
+                for(auto txn_queue : txn_queues_) {
+                    txn_queue->set_finished();
+                }
+                break;
+            }
+            tx_id_t tx_id = txn_entry->tx_id;
+            int txn_type = txn_entry->txn_type;
+            itemkey_t account1 = txn_entry->accounts[0];
+            itemkey_t account2 = txn_entry->accounts[1];
+
+            // Init the routed node id
+            int routed_node_id = 0; // Default node ID
+            
+            // ! decide the routed_node_id based on SYSTEM_MODE
+            // keys 只和 account1/account2有关，不能静态化，但可以用局部变量，每次只构造一份
+            std::vector<itemkey_t> keys; 
+            smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
+            // table_ids 静态化后只需引用
+            const std::vector<table_id_t>& table_ids = TABLE_IDS_ARR[txn_type < 6 ? txn_type : 0];
+            #if LOG_ACCESS_KEY
+                // 写日志记录一下
+                std::unique_lock<std::mutex> lock(log_mutex);
+                if(access_key_log_file.is_open()) {
+                    int i=0;
+                    for(i=0; i<table_ids.size()-1; i++) access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "},";
+                    access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "}" << std::endl;
+                    access_key_log_file.flush();
+                }
+                for (auto key: keys) key_freq[key]++;
+                lock.unlock();
+            #endif
+
+            if(SYSTEM_MODE == 0) {
+                routed_node_id = rand() % 2; // Randomly select node ID for system mode 0
+            }
+            else if(SYSTEM_MODE == 1){
+                if(txn_type == 0 || txn_type == 1) {
+                    int node1 = account1 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
+                    int node2 = account2 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
+                    if(node1 == node2) {
+                        routed_node_id = node1;
+                    }
+                    else {
+                        // randomly pick one
+                        routed_node_id = (rand() % 2 == 0) ? node1 : node2;
+                    }
+                }
+                else {
+                    routed_node_id = account1 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
+                }
+            }
+            else if(SYSTEM_MODE == 2) {
+                // get page_id from checking_page_map
+                routed_node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
+            }
+            else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8) {
+                SmartRouter::SmartRouterResult result = this->get_route_primary(tx_id, const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
+                if(result.success) {
+                    routed_node_id = result.smart_router_id;
+                    txn_entry->txn_decision_type = result.sys_8_decision_type; 
+                }
+                else {
+                    // fallback to random
+                    routed_node_id = rand() % ComputeNodeCount;
+                    std::cerr << "Warning: SmartRouter get_route_primary failed: " << result.error_message << std::endl;
+                }
+            }
+            else if(SYSTEM_MODE == 4) {
+                routed_node_id = 0; // All to node 0 for single
+            }
+
+            // 将事务放入对应的TxnQueue中
+            txn_queues_[routed_node_id]->push_txn(txn_entry);
+            routed_txn_cnt_per_node[routed_node_id]++;
+        }
+        std::cout << "Router worker thread finished." << std::endl;
     }
 
     // 设置METIS分区数量
@@ -745,6 +931,14 @@ public:
 
     std::vector<int> get_ownership_changes_per_txn_type() const {
         return ownership_table_->get_ownership_changes_per_txn_type();
+    }
+
+    std::vector<uint64_t> get_routed_txn_cnt_per_node() {
+        std::vector<uint64_t> result;
+        for (int i = 0; i < ComputeNodeCount; i++) {
+            result.push_back(routed_txn_cnt_per_node[i].load(std::memory_order_relaxed));
+        }
+        return result;
     }
 
 private:
@@ -846,6 +1040,96 @@ private:
         }
     }
 
+    inline void log_metis_ownership_based_router_result(const SmartRouterResult &result, const std::string &debug_info, const MetisOwnershipDecisionType router_decision_type) {
+		if(!WarmupEnd) return;
+        if(router_decision_type == MetisOwnershipDecisionType::MetisNoDecision) {
+			logger->info("[SmartRouter Metis No Decision] found no candidate node based on metis, randomly selected node " + 
+					std::to_string(result.smart_router_id));
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisMissingAndOwnershipMissing) {
+			logger->info("[SmartRouter Metis Missing + Ownership Missing] found no candidate node based on ownership table, randomly selected node " + 
+					std::to_string(result.smart_router_id));
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisMissingAndOwnershipEntirely) {
+			logger->info("[SmartRouter Metis Missing + Ownership Entirely] " + debug_info + 
+					" based on ownership table directly to node " + std::to_string(result.smart_router_id));
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisMissingAndOwnershipCross) {
+			logger->info("[SmartRouter Metis Missing + Ownership Cross] " + debug_info + 
+					" based on ownership table with count to node " + std::to_string(result.smart_router_id));
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisEntirelyAndOwnershipMissing) {
+			logger->info("[SmartRouter Metis Entirely + Ownership Missing] found no candidate node based on ownership table, selected metis node " + 
+					std::to_string(result.smart_router_id));
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyEqual) {
+			logger->info("[SmartRouter Metis Entirely + Ownership Cross Equal] " + debug_info + 
+					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisEntirelyAndOwnershipCrossUnequal) {
+			logger->info("[SmartRouter Metis Entirely + Ownership Cross Unequal] " + debug_info + 
+					" metis to node " + std::to_string(result.smart_router_id) + 
+					" but ownership table to node " + std::to_string(result.smart_router_id) + 
+					", selected ownership node");
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyEqual) {
+			logger->info("[SmartRouter Metis Entirely + Ownership Entirely Equal] " + debug_info + 
+					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyUnequal) {
+			logger->info("[SmartRouter Metis Entirely + Ownership Entirely Unequal] " + debug_info + 
+					" metis to node " + std::to_string(result.smart_router_id) + 
+					" but ownership table to node " + std::to_string(result.smart_router_id) + 
+					", selected ownership node");
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisCrossAndOwnershipMissing) {
+			logger->info("[SmartRouter Metis Cross + Ownership Missing] found no candidate node based on ownership table, selected metis node " + 
+					std::to_string(result.smart_router_id));
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyEqual) {
+			logger->info("[SmartRouter Metis Cross + Ownership Entirely Equal] " + debug_info + 
+					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+		}
+        else if(router_decision_type == MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyUnequal) {
+            logger->info("[SmartRouter Metis Cross + Ownership Entirely Unequal] " + debug_info + 
+                    " metis to node " + std::to_string(result.smart_router_id) + 
+                    " but ownership table to node " + std::to_string(result.smart_router_id) + 
+                    ", selected ownership node");
+        }
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossEqual) {
+			logger->info("[SmartRouter Metis Cross + Ownership Cross Equal] " + debug_info + 
+					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossUnequal) {
+			logger->info("[SmartRouter Metis Cross + Ownership Cross Unequal] " + debug_info + 
+					" metis to node " + std::to_string(result.smart_router_id) + 
+					" but ownership table to node " + std::to_string(result.smart_router_id) + 
+					", selected ownership node");
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisPartialAndOwnershipMissing) {
+			logger->info("[SmartRouter Metis Partial + Ownership Missing] found no candidate node based on ownership table, selected metis node " + 
+					std::to_string(result.smart_router_id));
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyEqual) {
+			logger->info("[SmartRouter Metis Partial + Ownership Entirely Equal] " + debug_info + 
+					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+		}
+        else if(router_decision_type == MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyUnequal) {
+            logger->info("[SmartRouter Metis Partial + Ownership Entirely Unequal] " + debug_info + 
+                    " based on ownership table directly to node " + std::to_string(result.smart_router_id));
+        }
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossEqual) {
+			logger->info("[SmartRouter Metis Partial + Ownership Cross Equal] " + debug_info + 
+					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+		}
+		else if(router_decision_type == MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossUnequal) {
+			logger->info("[SmartRouter Metis Partial + Ownership Cross Unequal] " + debug_info + 
+					" metis to node " + std::to_string(result.smart_router_id) + 
+					" but ownership table to node " + std::to_string(result.smart_router_id) + 
+					", selected ownership node");
+		}
+    }
+
 private:
     // 配置
     Config cfg_{};
@@ -868,4 +1152,20 @@ private:
 
     // 统计数据
     Stats stats_{};
+
+    SmallBank* smallbank_ = nullptr;
+
+    // 事务池
+    TxnPool* txn_pool_ = nullptr;
+    // 事务队列
+    std::vector<TxnQueue*> txn_queues_;
+
+    std::vector<std::atomic<int>> routed_txn_cnt_per_node;
+
+    // log access key
+    std::mutex log_mutex;
+    std::string access_log_file_name = "access_key.log"; // 日志文件路径
+    std::ofstream access_key_log_file;
+    std::unordered_map<int, long long> key_freq;
+
 };

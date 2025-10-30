@@ -58,8 +58,10 @@ public:
     }
 
     // Returns the dominant PartitionIndex for the group, or -1 if none determined.
-    idx_t build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group, node_id_t *metis_decision_node, 
-            std::unordered_map<uint64_t, node_id_t>* page_to_node_map = nullptr);
+    idx_t build_internal_graph(std::unordered_map<uint64_t, node_id_t> &request_partition_node_map, node_id_t *metis_decision_node);
+
+    // 不构建图，只是获取当前的分区结果
+    void get_metis_partitioning_result(std::unordered_map<uint64_t, idx_t> &request_partition_node_map);
 
     void build_link_between_nodes_in_graph(uint64_t from_node, uint64_t to_node);
 
@@ -147,10 +149,9 @@ private:
 // ========================================================================
 // MODIFIED build_internal_graph FUNCTION
 // ========================================================================
-inline int NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_mapped_ids_in_group, node_id_t *metis_decision_node,
-        std::unordered_map<uint64_t, node_id_t>* page_to_node_map) {
+inline int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &request_partition_node_map, node_id_t *metis_decision_node) {
     // std::cout << "build internal graph called with " << unique_mapped_ids_in_group.size() << " unique IDs." << std::endl;
-    if (unique_mapped_ids_in_group.empty()) {
+    if (request_partition_node_map.empty()) {
         return -1; // Sentinel for empty input or no decision
     }
 
@@ -194,7 +195,10 @@ inline int NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_ma
     if (enable_partition && (random_value <= AffinitySampleRate)) {
         std::lock_guard<std::mutex> lock(graph_data_mutex_);
 
-        for (const uint64_t &regionid: unique_mapped_ids_in_group) {
+        std::vector<uint64_t> keys;
+        for (const auto& itr: request_partition_node_map) {
+            uint64_t regionid = itr.first;
+            keys.push_back(regionid);
             active_nodes_.insert(regionid);
             partition_graph_.try_emplace(regionid);
             partition_weight_.try_emplace(regionid, 1); // 点的权重就是1
@@ -212,11 +216,11 @@ inline int NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_ma
             }
         }
 
-        if (unique_mapped_ids_in_group.size() >= 2) {
-            for (size_t i = 0; i < unique_mapped_ids_in_group.size(); ++i) {
-                for (size_t j = i + 1; j < unique_mapped_ids_in_group.size(); ++j) {
-                    uint64_t u = unique_mapped_ids_in_group[i];
-                    uint64_t v = unique_mapped_ids_in_group[j];
+        if (keys.size() >= 2) {
+            for (size_t i = 0; i < keys.size(); ++i) {
+                for (size_t j = i + 1; j < keys.size(); ++j) {
+                    uint64_t u = keys[i];
+                    uint64_t v = keys[j];
                     partition_graph_[u][v]++;
                     partition_graph_[v][u]++;
                 }
@@ -247,17 +251,16 @@ inline int NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_ma
             std::map<idx_t, uint64_t> partition_counts;
             uint64_t unmapped_count = 0;
 
-            for (uint64_t region_id: unique_mapped_ids_in_group) {
-                auto map_it = partition_node_map.find(region_id);
+            for (const auto& r: request_partition_node_map) {
+                auto map_it = partition_node_map.find(r.first);
                 if (map_it != partition_node_map.end()) {
                     partition_counts[map_it->second]++; // map_it->second is the PartitionIndex
-                    if(page_to_node_map != nullptr) { // for SYSTEM_MODE 8
-                        (*page_to_node_map)[region_id] = map_it->second;
-                    }
+                    request_partition_node_map[r.first] = map_it->second; // Update to PartitionIndex
                 } else {
                     unmapped_count++;
                 }
             }
+
             #if LOG_METIS_DECISION
             std::string group_str = "[";
             for (size_t i = 0; i < unique_mapped_ids_in_group.size(); ++i) {
@@ -351,6 +354,20 @@ inline int NewMetis::build_internal_graph(const std::vector<uint64_t> &unique_ma
         *metis_decision_node = final_partition_index_result;
     }
     return return_decision_type;
+}
+
+// 只查询当前分区的结果, 但不构建图
+// 传入的request_partition_node_map 的key是图节点id, value是占位符, 函数会将value更新为对应的分区id
+inline void NewMetis::get_metis_partitioning_result(std::unordered_map<uint64_t, idx_t> &request_partition_node_map) {
+    std::shared_lock<std::shared_mutex> lock(partition_map_mutex_);
+    for(auto& r: request_partition_node_map) {
+        auto map_it = partition_node_map.find(r.first);
+        if (map_it != partition_node_map.end()) {
+            r.second = map_it->second; // Update to PartitionIndex
+        } else {
+            r.second = -1; // Indicate not found
+        }
+    }
 }
 
 // MODIFIED build_link_between_nodes_in_graph FUNCTION

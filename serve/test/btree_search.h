@@ -349,7 +349,8 @@ public:
             std::thread btree_background_thread([this, btree_read_mode, frequency, btree_index, connections_]() {
                 // 设置线程名称
                 std::string index_name = btree_index->index_name;
-                pthread_setname_np(pthread_self(), ("BtreeBG_" + index_name).c_str());
+
+                pthread_setname_np(pthread_self(), ("BtreeBG_" + index_name.substr(3,8)).c_str());
                 while (true) {
                     std::this_thread::sleep_for(std::chrono::seconds(frequency));
                     // std::cout << "Checking B-tree index for " << btree_index->index_name << "..." << std::endl;
@@ -369,8 +370,8 @@ public:
                     // std::cout << "B-tree index for checking is up to date." << std::endl;
                 } 
             });
-            std::string thread_name = "BtreeBG_" + index_name;
-            pthread_setname_np(btree_background_thread.native_handle(), thread_name.c_str());
+            // std::string thread_name = "BtreeBG_" + index_name;
+            // pthread_setname_np(btree_background_thread.native_handle(), thread_name.c_str());
             btree_background_thread.detach();
         }
     }

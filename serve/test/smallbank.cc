@@ -15,123 +15,28 @@
 #include "common.h"
 #include "btree_search.h"
 #include "smart_router.h"
-#include "friend_simulate.h"
 #include "util/zipf.h"
 #include "router_stat_snapshot.h"
+#include "txn_queue.h"
 
-std::vector<std::string> DBConnection;
 std::atomic<uint64_t> tx_id_generator;
 auto start = std::chrono::high_resolution_clock::now();
 int try_count = 10000;
 std::atomic<int> exe_count = 0; // 这个是所有线程的总事务数
+std::atomic<int> generated_txn_count = 0; // 这个是所有线程生成的总事务数
 
-int smallbank_account = 300000;
+SmallBank* smallbank = nullptr;
 
-// int system_mode = 0;
-int access_pattern = 0; // 0: uniform, 1: zipfian, 2: hotspot
-double zipfian_theta = 0.99; // Zipfian distribution parameter
-double hotspot_fraction = 0.2; // Fraction of accounts that are hot
-double hotspot_access_prob = 0.8; // Probability of accessing hot accounts
-int read_btree_mode = 0; // 0: read from conn0, 1: read from random conn
-int read_frequency = 5; // seconds
 int worker_threads = 16;
-std::mutex log_mutex;
-std::string access_log_file_name = "access_key.log"; // 日志文件路径
-std::string friend_graph_export_file = "friend_graph.csv"; // 导出社交图 CSV 文件
-std::ofstream access_key_log_file;
-
-std::unordered_map<int, long long> key_freq;
-
 SmartRouter* smart_router = nullptr;
+TxnPool* txn_pool = nullptr;
+std::vector<TxnQueue*> txn_queues; // one queue per compute node
 
-thread_local std::vector<pqxx::connection*> thread_conns_vec;
 thread_local uint64_t thread_gid;
 // Global Zipfian generator
 thread_local ZipfGen* zipfian_gen = nullptr;
 
-std::vector<std::vector<std::pair<int, float>>> user_friend_graph; // 每个用户的朋友图, 模拟亲和性
-std::vector<std::atomic<int>> routed_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
-
-// Generate account ID based on access pattern
-void generate_account_id(itemkey_t &acc1) {
-    switch (access_pattern) {
-        case 0: // Uniform distribution
-            acc1 = rand() % smallbank_account + 1;
-            break;
-        case 1: // Zipfian distribution
-            acc1 = zipfian_gen->next() + 1; // ZipfGen is 0-based, account IDs are 1-based
-            break;
-        case 2: // Hotspot distribution
-        {
-            double r = (double)rand() / RAND_MAX;
-            int hot_accounts = (int)(smallbank_account * hotspot_fraction);
-            
-            if (r < hotspot_access_prob) {
-                // Access hot accounts (first hotspot_fraction of accounts)
-                acc1 = rand() % hot_accounts + 1;
-            } else {
-                // Access cold accounts (remaining accounts)
-                acc1 = hot_accounts + rand() % (smallbank_account - hot_accounts) + 1;
-            }
-            break;
-        }
-        default:
-            acc1 = rand() % smallbank_account + 1;
-            break;
-    }
-}
-
-int generate_txn_type() {
-    int r = rand() % 100;
-    if (r < FREQUENCY_AMALGAMATE) {
-        return 0; // Amalgamate
-    } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE) {
-        return 1; // Balance
-    } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE + FREQUENCY_DEPOSIT_CHECKING) {
-        return 2; // DepositChecking
-    } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE + FREQUENCY_DEPOSIT_CHECKING + FREQUENCY_SEND_PAYMENT) {
-        return 3; // SendPayment
-    } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE + FREQUENCY_DEPOSIT_CHECKING + FREQUENCY_SEND_PAYMENT + FREQUENCY_TRANSACT_SAVINGS) {
-        return 4; // TransactSaving
-    } else {
-        return 5; // WriteCheck
-    }
-}
-
-void generate_two_account_ids(itemkey_t &acc1, itemkey_t &acc2) {
-    // 先生成第一个账号
-    generate_account_id(acc1);
-    // 再生成第二个亲和性账号
-    // 生成一个随机小数，决定是否使用亲和性账号
-    double r = (double)rand() / RAND_MAX;
-    if (r < AffinityTxnRatio) {
-        // 使用亲和性账号
-        const auto &friends = user_friend_graph[acc1 - 1]; // acc1
-        if (!friends.empty()) {
-            // 根据朋友的权重选择一个朋友账号
-            double p = (double)rand() / RAND_MAX;
-            double cumulative_prob = 0.0;
-            for (const auto &[friend_id, prob] : friends) {
-                cumulative_prob += prob;
-                if (p <= cumulative_prob) {
-                    acc2 = friend_id + 1; // friend_id 是从0开始的，账号从1开始
-                    return;
-                }
-            }
-            // 如果没有选中任何朋友（理论上不应该发生），则随机选择一个
-            acc2 = friends.back().first + 1;
-        } else {
-            // 如果没有朋友，则随机选择一个账号
-            acc2 = rand() % smallbank_account + 1;
-        }
-    } else {
-        // 不使用亲和性账号，随机选择一个账号
-        // 确保两个账号不相同
-        do {
-            generate_account_id(acc2);
-        } while (acc2 == acc1);
-    }
-}
+std::vector<std::atomic<int>> exec_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
 
 void create_table(pqxx::connection *conn0) {
     std::cout << "Create table..." << std::endl;
@@ -191,6 +96,7 @@ void create_table(pqxx::connection *conn0) {
 }
 
 void load_data(pqxx::connection *conn0) {
+    auto smallbank_account = smallbank->get_account_count();
     std::cout << "Loading data..." << std::endl;
     std::cout << "Will load " << smallbank_account << " accounts into checking and savings tables" << std::endl;
     // Load data into the database if needed
@@ -205,7 +111,7 @@ void load_data(pqxx::connection *conn0) {
     std::random_device rd;
     std::mt19937 g(rd());
     std::shuffle(id_list.begin(), id_list.end(), g);
-    auto worker = [&id_list](int start, int end) {
+    auto worker = [&id_list, smallbank_account](int start, int end) {
         pqxx::connection conn00(DBConnection[0]);
         if (!conn00.is_open()) {
             std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
@@ -262,36 +168,16 @@ void load_data(pqxx::connection *conn0) {
         }
     }; 
 
-    auto friend_worker = [](){
-        // 生成用户朋友关系
-        int num_users = smallbank_account;
-    #if WORKLOAD_AFFINITY_MODE == 0
-        generate_friend_simulate_graph(user_friend_graph, num_users);
-    #elif WORKLOAD_AFFINITY_MODE == 1
-        generate_friend_city_simulate_graph(user_friend_graph, num_users);
-    #endif
-        std::cout << "Generated friend graph for " << num_users << " users." << std::endl;
-#if LOG_FRIEND_GRAPH
-        if(!friend_graph_export_file.empty()){
-            if(dump_friend_graph_csv(user_friend_graph, friend_graph_export_file)){
-                std::cout << "Friend graph exported to: " << friend_graph_export_file << std::endl;
-            } else {
-                std::cerr << "Failed to export friend graph to: " << friend_graph_export_file << std::endl;
-            }
-        }
-#else
-        // delete existing friend graph file if any
-        std::remove(friend_graph_export_file.c_str());
-#endif
-    };
-
     // Create and start threads
     for(int i = 0; i < num_threads; i++) {
         int start = i * chunk_size;
         int end = (i == num_threads - 1) ? smallbank_account : (i + 1) * chunk_size;
         threads.emplace_back(worker, start, end);
     }
-    std::thread friend_thread(friend_worker);
+    std::thread friend_thread([&]() {
+        smallbank->generate_friend_graph();
+    });
+
     // Wait for friend thread to complete
     friend_thread.join();
     // Wait for all threads to complete
@@ -362,180 +248,94 @@ void generate_perf_kwr_report(pqxx::connection *conn0, int start_snapshot_id, in
     }
 }
 
-static const std::vector<table_id_t> TABLE_IDS_ARR[] = {
-    // txn_type == 0
-    {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable, (table_id_t)SmallBankTableType::kCheckingTable},
-    // txn_type == 1
-    {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kCheckingTable},
-    // txn_type == 2
-    {(table_id_t)SmallBankTableType::kCheckingTable},
-    // txn_type == 3
-    {(table_id_t)SmallBankTableType::kSavingsTable, (table_id_t)SmallBankTableType::kCheckingTable},
-    // txn_type == 4
-    {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable},
-    // txn_type == 5
-    {(table_id_t)SmallBankTableType::kSavingsTable}
-};
+void generate_smallbank_txns_worker(thread_params* params) {
+    // 设置线程名
+    pthread_setname_np(pthread_self(), ("txn_gen_t_" + std::to_string(params->thread_id)).c_str());
 
-std::vector<table_id_t>& get_table_ids_by_txn_type(int txn_type) {
-    assert(txn_type >= 0 && txn_type < sizeof(TABLE_IDS_ARR)/sizeof(TABLE_IDS_ARR[0]));
-    return const_cast<std::vector<table_id_t>&>(TABLE_IDS_ARR[txn_type]);
-}
-
-void get_keys_by_txn_type(int txn_type, itemkey_t account1, itemkey_t account2, std::vector<itemkey_t> &keys) {
-    keys.clear();
-    switch(txn_type) {
-        case 0:
-            keys = {account1, account1, account2};
-            break;
-        case 1:
-            keys = {account1, account2};
-            break;
-        case 2:
-            keys = {account1};
-            break;
-        case 3:
-        case 4:
-            keys = {account1, account1};
-            break;
-        case 5:
-            keys = {account1};
-            break;
-        default:
-            break;
-    }
-    return; 
-}
-
-void decide_route_node(tx_id_t tx_id, itemkey_t account1, itemkey_t account2, int txn_type, int &node_id, int &txn_decision_type) {
-    if(SYSTEM_MODE == 0) {
-        node_id = rand() % 2; // Randomly select node ID for system mode 0
-    }
-    else if(SYSTEM_MODE == 1){
-        if(txn_type == 0 || txn_type == 1) {
-            int node1 = account1 / (smallbank_account / ComputeNodeCount); // Range partitioning
-            int node2 = account2 / (smallbank_account / ComputeNodeCount); // Range partitioning
-            if(node1 == node2) {
-                node_id = node1;
-            }
-            else {
-                // randomly pick one
-                node_id = (rand() % 2 == 0) ? node1 : node2;
-            }
-        }
-        else {
-            node_id = account1 / (smallbank_account / ComputeNodeCount); // Range partitioning
-        }
-    }
-    else if(SYSTEM_MODE == 2) {
-        // get page_id from checking_page_map
-        node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
-    }
-    else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8) {
-        assert(smart_router != nullptr);
-        // keys 只和 account1/account2有关，不能静态化，但可以用局部变量，每次只构造一份
-        std::vector<itemkey_t> keys; 
-        get_keys_by_txn_type(txn_type, account1, account2, keys);
-        // table_ids 静态化后只需引用
-        const std::vector<table_id_t>& table_ids = TABLE_IDS_ARR[txn_type < 6 ? txn_type : 0];
-
-#if LOG_ACCESS_KEY
-        // 写日志记录一下
-        std::unique_lock<std::mutex> lock(log_mutex);
-        if(access_key_log_file.is_open()) {
-            int i=0;
-            for(i=0; i<table_ids.size()-1; i++) access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "},";
-            access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "}" << std::endl;
-            access_key_log_file.flush();
-        }
-        for (auto key: keys) key_freq[key]++;
-        lock.unlock();
-#endif
-
-        SmartRouter::SmartRouterResult result = smart_router->get_route_primary(tx_id, const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
-        if(result.success) {
-            node_id = result.smart_router_id;
-            txn_decision_type = result.sys_8_decision_type; // for SYSTEM_MODE 8
-        }
-        else {
-            // fallback to random
-            node_id = rand() % ComputeNodeCount;
-            std::cerr << "Warning: SmartRouter get_route_primary failed: " << result.error_message << std::endl;
-        }
-    }
-    else if(SYSTEM_MODE == 4) {
-        node_id = 0; // All to node 0 for single
-    }
-    routed_txn_cnt_per_node[node_id]++;
-}
-
-struct thread_params
-{
-    int thread_id;
-    int thread_count;
-};
-
-void run_smallbank_txns(thread_params* params) {
-    std::cout << "Running smallbank transactions..." << std::endl;
-    // This is a placeholder for actual transaction logic
-    // You would implement the logic to run transactions against the smallbank database here
-    // For example, you could create threads that perform various operations like deposits, withdrawals, etc.
-    // Update exe_count as transactions are executed
-
-    // init the thread connections
-    thread_conns_vec.clear();
-    for(auto con_str: DBConnection) {
-        auto con = new pqxx::connection(con_str);
-        if(!con->is_open()) {
-            std::cerr << "Failed to connect to database: " << con_str << std::endl;
-            assert(false);
-            exit(-1);
-        }
-        thread_conns_vec.push_back(con);
-    }
-    // init the thread id
-    thread_gid = params->thread_id;
+    std::vector<itemkey_t> accounts_vec(2);
     if (!zipfian_gen) {
         uint64_t zipf_seed = 2 * thread_gid * GetCPUCycle();
         uint64_t zipf_seed_mask = (uint64_t(1) << 48) - 1;
-        zipfian_gen = new ZipfGen(smallbank_account, zipfian_theta, zipf_seed & zipf_seed_mask);
+        zipfian_gen = new ZipfGen(smallbank->get_account_count(), params->zipfian_theta, zipf_seed & zipf_seed_mask);
     }
 
-    // run smallbank transactions
-    for (int i = 0; i < try_count; ++i) {
-        exe_count++;
+    while(generated_txn_count < try_count * worker_threads * ComputeNodeCount + 100){
+        generated_txn_count++;
         tx_id_t tx_id = tx_id_generator++; // global atomic transaction ID
         // Simulate some work
         // Randomly select a transaction type and accounts
-        int txn_type = generate_txn_type();
-        
-        itemkey_t account1, account2;
+        int txn_type = smallbank->generate_txn_type();
         if(txn_type == 0 || txn_type == 1) { // TxAmagamate or TxSendPayment
-            generate_two_account_ids(account1, account2);
+            smallbank->generate_two_account_ids(accounts_vec[0], accounts_vec[1], zipfian_gen);
         } else {
-            generate_account_id(account1);
+            smallbank->generate_account_id(accounts_vec[0], zipfian_gen);
         }
-        // init the routed node id
-        int routed_node_id = 0; // Default node ID
-        int txn_decision_type = -1; // for SYSTEM_MODE 8
-        decide_route_node(tx_id, account1, account2, txn_type, routed_node_id, txn_decision_type);
+        // Create a new transaction object
+        TxnQueueEntry* txn_entry = new TxnQueueEntry(tx_id, txn_type, accounts_vec);
+        // Enqueue the transaction into the global transaction pool
+        txn_pool->receive_txn_from_client(txn_entry);
+    }
+    txn_pool->stop_pool();
+}
 
-        // Create a new transaction
-        pqxx::work* txn = nullptr;
-        auto txn_con = thread_conns_vec[routed_node_id];
-        while (!txn_con->is_open()){
-            std::cerr << "Connection is broken, reconnecting..." << std::endl;
-            delete txn_con;
-            txn_con = new pqxx::connection(DBConnection[routed_node_id]);
-            thread_conns_vec[routed_node_id] = txn_con;
+// this function runs smallbank transactions for one compute node
+void run_smallbank_txns(thread_params* params) {
+    // 设置线程名
+    pthread_setname_np(pthread_self(), ("dbcon_n" + std::to_string(params->compute_node_id_connecter)
+                                                + "_t_" + std::to_string(params->thread_id)).c_str());
+
+    std::cout << "Running smallbank transactions..." << std::endl;
+
+    node_id_t compute_node_id = params->compute_node_id_connecter;
+    TxnQueue* txn_queue = txn_queues[compute_node_id];
+
+    // init the thread connection for this compute node
+    auto con_str = DBConnection[compute_node_id];
+    auto con = new pqxx::connection(con_str);
+    if(!con->is_open()) {
+        std::cerr << "Failed to connect to database: " << con_str << std::endl;
+        assert(false);
+        exit(-1);
+    }
+
+    // init the thread id
+    thread_gid = params->thread_id;
+
+    // run smallbank transactions
+    // for (int i = 0; i < try_count; ++i) {
+    while (true) {
+        exe_count++;
+        // ! Fetch a transaction from the global transaction pool
+        // ! pay attention here, different system mode may have different txn fetching strategy, now all use pool front
+        TxnQueueEntry* txn_entry = txn_queue->pop_txn();
+        if (txn_entry == nullptr)  {
+            // 说明该计算节点的事务队列已经均处理完成
+            break;
         }
-        txn = new pqxx::work(*txn_con);
+
+        // statistics
+        exec_txn_cnt_per_node[compute_node_id]++;
+
+        tx_id_t tx_id = txn_entry->tx_id;
+        int txn_type = txn_entry->txn_type;
+        itemkey_t account1 = txn_entry->accounts[0];
+        itemkey_t account2 = txn_entry->accounts[1];
+        int txn_decision_type = txn_entry->txn_decision_type;
+        delete txn_entry; // free the txn entry memory
+        
+        // Create a new transaction
+        while (con->is_open() == false) {
+            std::cerr << "Connection is broken, reconnecting..." << std::endl;
+            delete con;
+            con = new pqxx::connection(con_str);
+        }
+        pqxx::work* txn = new pqxx::work(*con);
 
         // init the table ids and keys
-        std::vector<table_id_t>& tables = get_table_ids_by_txn_type(txn_type);
+        std::vector<table_id_t>& tables = smallbank->get_table_ids_by_txn_type(txn_type);
         assert(tables.size() > 0);
         std::vector<itemkey_t> keys;
-        get_keys_by_txn_type(txn_type, account1, account2, keys);
+        smallbank->get_keys_by_txn_type(txn_type, account1, account2, keys);
         assert(tables.size() == keys.size());
         std::vector<page_id_t> ctid_ret_page_ids; 
         try {  
@@ -669,7 +469,7 @@ void run_smallbank_txns(thread_params* params) {
             }
             txn->commit();
             // update the smart router page map if needed
-            if(smart_router) smart_router->update_key_page(const_cast<std::vector<table_id_t>&>(tables), keys, ctid_ret_page_ids, routed_node_id, txn_decision_type);
+            if(smart_router) smart_router->update_key_page(const_cast<std::vector<table_id_t>&>(tables), keys, ctid_ret_page_ids, compute_node_id, txn_decision_type);
             
         } catch (const std::exception &e) {
             std::cerr << "Transaction failed: " << e.what() << std::endl;
@@ -678,11 +478,6 @@ void run_smallbank_txns(thread_params* params) {
         // std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     std::cout << "Finished running smallbank transactions." << std::endl;
-
-}
-
-void dtx_exe(){
-
 }
 
 void signal_handler(int signum) {
@@ -746,28 +541,50 @@ void print_usage(const char* program_name) {
 
 void print_tps_loop() {
     using namespace std::chrono;
-    uint64_t last_count = 0;
+    uint64_t exec_last_count = 0;
+    uint64_t route_last_count = 0;
     auto last_time = steady_clock::now();
     std::vector<int> routed_txn_cnt_per_node_last_snapshot, routed_txn_cnt_per_node_snapshot;
+    std::vector<int> exec_txn_cnt_per_node_last_snapshot, exec_txn_cnt_per_node_snapshot, txn_queue_size_snapshot;
     routed_txn_cnt_per_node_last_snapshot.resize(ComputeNodeCount, 0);
     routed_txn_cnt_per_node_snapshot.resize(ComputeNodeCount, 0);
+    exec_txn_cnt_per_node_last_snapshot.resize(ComputeNodeCount, 0);
+    exec_txn_cnt_per_node_snapshot.resize(ComputeNodeCount, 0);
+    txn_queue_size_snapshot.resize(ComputeNodeCount, 0);
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
         auto now = steady_clock::now();
-        uint64_t cur_count = exe_count.load(std::memory_order_relaxed);
+        uint64_t exec_cur_count = exe_count.load(std::memory_order_relaxed);
+        uint64_t route_cur_count = 0;
         double seconds = duration_cast<duration<double>>(now - last_time).count();
-        double tps = (cur_count - last_count) / seconds;
+        double exec_tps = (exec_cur_count - exec_last_count) / seconds;
         // print routed txn count per node
-        for(int i=0; i<ComputeNodeCount; i++) routed_txn_cnt_per_node_snapshot[i] = routed_txn_cnt_per_node[i].load(std::memory_order_relaxed); 
-        printf("[TPS] %.2f txn/sec (total: %lu). ", tps, cur_count); 
+        auto routed_txn_cnt_per_node = smart_router->get_routed_txn_cnt_per_node();
+        for(int i=0; i<ComputeNodeCount; i++) {
+            routed_txn_cnt_per_node_snapshot[i] = routed_txn_cnt_per_node[i];
+            route_cur_count += routed_txn_cnt_per_node_snapshot[i];
+        }
+        double route_tps = (route_cur_count - route_last_count) / seconds;
+        printf("[Routed TPS] %.2f txn/sec (total: %lu). ", route_tps, exec_cur_count); 
         for(int i=0; i<ComputeNodeCount; i++) { 
             int routed_cnt = routed_txn_cnt_per_node_snapshot[i] - routed_txn_cnt_per_node_last_snapshot[i];
             routed_txn_cnt_per_node_last_snapshot[i] = routed_txn_cnt_per_node_snapshot[i];
             printf("Node %d: %d ", i, routed_cnt);
+        }
+        printf("\n");
+        // print exec txn count per node 
+        for(int i=0; i<ComputeNodeCount; i++) exec_txn_cnt_per_node_snapshot[i] = exec_txn_cnt_per_node[i].load(std::memory_order_relaxed); 
+        for(int i=0; i<ComputeNodeCount; i++) txn_queue_size_snapshot[i] = txn_queues[i]->size();
+        printf("[Exec TPS] %.2f txn/sec (total: %lu). ", exec_tps, exec_cur_count); 
+        for(int i=0; i<ComputeNodeCount; i++) { 
+            int routed_cnt = exec_txn_cnt_per_node_snapshot[i] - exec_txn_cnt_per_node_last_snapshot[i];
+            exec_txn_cnt_per_node_last_snapshot[i] = exec_txn_cnt_per_node_snapshot[i];
+            printf("Node %d: %d queue remain: %d ", i, routed_cnt, txn_queue_size_snapshot[i]);
         } 
         printf("\n");
         // reset for next interval
-        last_count = cur_count;
+        exec_last_count = exec_cur_count;
+        route_last_count = route_cur_count;
         last_time = now;
     }
 }
@@ -779,6 +596,19 @@ int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
 
     int system_mode = 0; // Default system mode
+    int access_pattern = 0; // 0: uniform, 1: zipfian, 2: hotspot
+    // default parameters
+    double zipfian_theta = 0.99; // Zipfian distribution parameter
+    double hotspot_fraction = 0.2; // Fraction of accounts that are hot
+    double hotspot_access_prob = 0.8; // Probability of accessing hot accounts
+    
+    // for smallbank
+    int smallbank_account = 300000; // Number of accounts to load
+
+    // btree read parameters
+    int read_btree_mode = 0; // 0: read from conn0, 1: read from random conn
+    int read_frequency = 5; // seconds
+
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -997,6 +827,11 @@ int main(int argc, char *argv[]) {
         std::cout << "Hotspot access probability: " << hotspot_access_prob << std::endl;
     }
     
+    // --- Initialize SmallBank Benchmark ---
+    smallbank = new SmallBank(smallbank_account, access_pattern); 
+    if(access_pattern == 2) smallbank->set_hotspot_params(hotspot_fraction, hotspot_access_prob); 
+    std::cout << "SmallBank benchmark initialized." << std::endl; 
+
     std::cout << "Worker threads: " << worker_threads << std::endl;
     std::cout << "====================" << std::endl;
 
@@ -1011,18 +846,6 @@ int main(int argc, char *argv[]) {
     DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
     ComputeNodeCount = DBConnection.size();
     std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
-
-#if LOG_ACCESS_KEY
-    // open the access key log file
-    access_key_log_file.open(access_log_file_name, std::ios::out | std::ios::trunc);
-    if (!access_key_log_file.is_open()) {
-        std::cerr << "Failed to open access key log file." << std::endl;
-        return -1;
-    }
-#else 
-    // delete existing log file if any
-    std::remove(access_log_file_name.c_str());
-#endif
 
     pqxx::connection *conn0 = nullptr;
     pqxx::connection *conn1 = nullptr;
@@ -1050,19 +873,22 @@ int main(int argc, char *argv[]) {
     // Create table and indexes
     create_table(conn0);
 
-    if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 0 || SYSTEM_MODE ==7 || SYSTEM_MODE == 8) {
-        std::cout << "Initializing Smart Router..." << std::endl;
-        // Create a BtreeService
-        BtreeIndexService *index_service = new BtreeIndexService(DBConnection, {"idx_checking_id", "idx_savings_id"}, read_btree_mode, read_frequency);
-        // Initialize NewMetis
-        NewMetis* metis = new NewMetis(logger_);
-        SmartRouter::Config cfg{};
-        smart_router = new SmartRouter(cfg, index_service, metis, logger_);
-        std::cout << "Smart Router initialized." << std::endl;
+    // Initialize Smart Router anyway
+    std::cout << "Initializing Smart Router..." << std::endl;
+    // Create a BtreeService
+    BtreeIndexService *index_service = new BtreeIndexService(DBConnection, {"idx_checking_id", "idx_savings_id"}, read_btree_mode, read_frequency);
+    // initialize the transaction pool
+    txn_pool = new TxnPool(TxnPoolMaxSize); 
+    // initialize the transaction queues for each compute node connection
+    for (int i = 0; i < ComputeNodeCount; i++) {
+        txn_queues.push_back(new TxnQueue(i));
     }
-    else {
-        std::cout << "Smart Router not used in this system mode." << std::endl;
-    }
+    // Initialize NewMetis
+    NewMetis* metis = new NewMetis(logger_);
+
+    SmartRouter::Config cfg{};
+    smart_router = new SmartRouter(cfg, txn_pool, txn_queues, worker_threads * 2, index_service, metis, logger_);
+    std::cout << "Smart Router initialized." << std::endl;
 
     // Load data into the database if needed
     load_data(conn0);
@@ -1085,13 +911,27 @@ int main(int argc, char *argv[]) {
         print_snapshot(snapshot0);
     }
     
-    std::vector<std::thread> threads;
-    // !Start the transaction threads
+    // !start the client transaction generation threads
+    std::vector<std::thread> client_gen_txn_threads;
     for(int i = 0; i < worker_threads; i++) {
         thread_params* params = new thread_params();
         params->thread_id = i;
         params->thread_count = worker_threads;
-        threads.emplace_back(run_smallbank_txns, params);
+        params->zipfian_theta = zipfian_theta;
+        client_gen_txn_threads.emplace_back(generate_smallbank_txns_worker, params);
+    }
+
+    // !Start the transaction threads
+    std::vector<std::thread> db_conn_threads;
+    for(int i = 0; i < ComputeNodeCount; i++) {
+        for(int j = 0; j < worker_threads; j++) {
+            thread_params* params = new thread_params();
+            params->compute_node_id_connecter = i;
+            params->thread_id = j;
+            params->thread_count = worker_threads;
+            params->zipfian_theta = zipfian_theta;
+            db_conn_threads.emplace_back(run_smallbank_txns, params);
+        }
     }
 
     // Start a separate thread to print TPS periodically
@@ -1110,7 +950,11 @@ int main(int argc, char *argv[]) {
     int mid_snapshot_id = create_perf_kwr_snapshot(conn0);
 
     // Wait for all threads to complete
-    for(auto& thread : threads) {
+    for(auto& thread : db_conn_threads) {
+        thread.join();
+    }
+    // Stop the client transaction generation threads
+    for(auto& thread : client_gen_txn_threads) {
         thread.join();
     }
 
@@ -1132,7 +976,7 @@ int main(int argc, char *argv[]) {
     }
     std::cout << "All transaction threads completed." << std::endl;
     for(int i =0; i<DBConnection.size(); i++){
-        std::cout << "node " << i << " routed txn count: " << routed_txn_cnt_per_node[i] << std::endl;
+        std::cout << "node " << i << " routed txn count: " << exec_txn_cnt_per_node[i] << std::endl;
     }
     std::cout << "Total accounts loaded: " << smallbank_account << std::endl;
     std::cout << "Access pattern used: " << access_pattern_name << std::endl;
@@ -1163,42 +1007,6 @@ int main(int argc, char *argv[]) {
         delete zipfian_gen;
         zipfian_gen = nullptr;
     }
-
-#if LOG_ACCESS_KEY
-    // 转到 vector 便于排序
-    std::vector<std::pair<int, long long>> vec(key_freq.begin(), key_freq.end());
-
-    // 按 value 从大到小排序
-    std::sort(vec.begin(), vec.end(),
-              [](auto &a, auto &b) { return a.second > b.second; });
-
-    // 输出前 50 个
-    int topN = 50;
-    if (vec.size() < topN) topN = vec.size();
-    for (int i = 0; i < topN; i++) {
-        std::cout << "Key: " << vec[i].first
-                  << "  Count: " << vec[i].second << "\n";
-    }
-    
-    // 计算总访问次数
-    long long total = 0;
-    for (auto &p : vec) total += p.second;
-
-    auto calc_ratio = [&](double percent) {
-        size_t topN = std::max<size_t>(1, size_t(vec.size() * percent));
-        long long sum = 0;
-        for (size_t i = 0; i < topN && i < vec.size(); i++) sum += vec[i].second;
-        return double(sum) / total * 100.0;
-    };
-
-    double r1  = calc_ratio(0.01);
-    double r10 = calc_ratio(0.10);
-    double r50 = calc_ratio(0.50);
-
-    std::cout << "前 1% key 占总访问比例:  " << r1  << "%\n";
-    std::cout << "前10% key 占总访问比例:  " << r10 << "%\n";
-    std::cout << "前50% key 占总访问比例:  " << r50 << "%\n";
-#endif
 
     return 0;
 }

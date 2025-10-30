@@ -37,7 +37,8 @@ private:
 
 inline ThreadPool::ThreadPool(size_t threads, Logger &lg) : stop(false) {
     for (size_t i = 0; i < threads; ++i) {
-        workers.emplace_back([this] {
+        workers.emplace_back([this, i] {
+            pthread_setname_np(pthread_self(), ("ThreadPool_" + std::to_string(i)).c_str());
             while (true) {
                 std::function<void()> task; {
                     std::unique_lock<std::mutex> lock(this->queue_mutex);
