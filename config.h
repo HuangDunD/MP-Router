@@ -27,8 +27,8 @@ extern int SYSTEM_MODE;
 #define LOG_ACCESS_KEY 0 // 0: no log 1: log
 #define LOG_FRIEND_GRAPH 0 // 0: no log 1: log
 #define LOG_METIS_DECISION 0 // 0: no log 1: log
-#define LOG_OWNERSHIP_CHANGE 1 // 0: no log 1: log
-#define LOG_PAGE_UPDATE 1 // 0: no log 1: log
+#define LOG_OWNERSHIP_CHANGE 0 // 0: no log 1: log
+#define LOG_PAGE_UPDATE 0 // 0: no log 1: log
 #define WORKLOAD_AFFINITY_MODE 1 // 0: key affinity 1: city-key affinity
 #define SYS_8_DECISION_TYPE_COUNT 19 // for SYSTEM_MODE 8, 17 types of ownership changes
 // for log
@@ -45,6 +45,7 @@ extern uint64_t PARTITION_INTERVAL;
 extern int MetisWarmupRound; // 这里表示初始情况下首先要先经过多少轮的metis分区，之后分区就不动了
 extern bool WarmupEnd;  // 标记是否完成了warmup阶段
 extern int TxnPoolMaxSize; // 事务池的最大大小
+extern int BatchRouterProcessSize; // 每次批量路由处理的事务数量
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;

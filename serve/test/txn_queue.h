@@ -25,10 +25,13 @@ public:
     TxnQueueEntry* pop_txn() {
         std::unique_lock<std::mutex> lock(queue_mutex_);
         queue_cv_.wait(lock, [this]() {
-            return !txn_queue_.empty() || finished_;
+            return !txn_queue_.empty() || finished_ || batch_finished_;
         });
         if (finished_ && txn_queue_.empty()) {
             return nullptr; // indicate finished
+        }
+        if (batch_finished_ && txn_queue_.empty()) {
+            return nullptr; // indicate batch finished
         }
         TxnQueueEntry* entry = txn_queue_.front();
         txn_queue_.pop();
@@ -53,6 +56,29 @@ public:
         queue_cv_.notify_all();
     }
 
+    void set_process_batch_id(int batch_id) {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        assert(current_queue_size_ == 0); // only set new batch id when queue is empty
+        process_batch_id_ = batch_id;
+        batch_finished_ = false;
+    }
+
+    void set_batch_finished() {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        batch_finished_ = true;
+        queue_cv_.notify_all();
+    }
+
+    bool is_batch_finished() {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        return batch_finished_;
+    }
+
+    bool is_finished() {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        return finished_;
+    }
+
 private:
     std::queue<TxnQueueEntry*> txn_queue_;
     std::mutex queue_mutex_;
@@ -60,6 +86,9 @@ private:
     node_id_t node_id_; // the compute node id this queue belongs to
     std::atomic<int> current_queue_size_ = 0;
     bool finished_ = false;
+
+    int process_batch_id_ = 0;
+    bool batch_finished_ = false;
 };
 
 
@@ -95,7 +124,7 @@ public:
         return entry;
     }
 
-    std::vector<TxnQueueEntry*> fetch_batch_txns_from_pool(int batch_size) {
+    std::unique_ptr<std::vector<TxnQueueEntry*>> fetch_batch_txns_from_pool(int batch_size) {
         std::unique_lock<std::mutex> lock(pool_mutex_);
         pool_cv_.wait(lock, [this, batch_size]() {
             return txn_pool_.size() >= batch_size || stop_; // 如果停止标志被设置，也要退出等待
@@ -103,12 +132,13 @@ public:
         if (stop_ && txn_pool_.size() < batch_size) {
             return {}; // 如果停止且池中事务不足，返回空向量
         }
-        std::vector<TxnQueueEntry*> batch_txns;
+        std::unique_ptr<std::vector<TxnQueueEntry*>> batch_txns = 
+            std::make_unique<std::vector<TxnQueueEntry*>>();
         for (int i = 0; i < batch_size; i++) {
             current_pool_size_--;
             TxnQueueEntry* entry = txn_pool_.front();
             txn_pool_.pop_front();
-            batch_txns.push_back(entry);
+            batch_txns->push_back(entry);
         }
         if(current_pool_size_ + batch_size >= max_pool_size_) {
             pool_cv_.notify_one();

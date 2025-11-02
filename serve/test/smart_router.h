@@ -1,3 +1,5 @@
+// Copyright 2025
+// Author: huangdund
 #pragma once
 
 #include <unordered_map>
@@ -11,6 +13,7 @@
 #include <mutex>
 #include <iostream>
 #include <string>
+#include <atomic>
 
 #include "common.h"
 #include "btree_search.h"
@@ -152,13 +155,15 @@ public:
         : cfg_(cfg),
           txn_pool_(txn_pool),
           txn_queues_(txn_queue),
+          db_con_worker_threads(worker_threads),
           logger(logger_ptr),
           btree_service_(btree_service),
           metis_(metis),
-          pool(cfg.thread_pool_size, *logger), 
-          routed_txn_cnt_per_node(MaxComputeNodeCount)
+          threadpool(cfg.thread_pool_size, *logger), 
+          routed_txn_cnt_per_node(MaxComputeNodeCount), 
+          batch_finished_flags(MaxComputeNodeCount, 0)
     {
-        metis_->set_thread_pool(&pool);
+        metis_->set_thread_pool(&threadpool);
         metis_->init_node_nums(cfg.partition_nums);
         ownership_table_ = new OwnershipTable(logger);
 
@@ -176,14 +181,29 @@ public:
         #endif
 
         // start the router thread
-        for(int i=0; i<worker_threads; i++) {
-            std::thread router_thread([this, i]() {
-                std::string thread_name = "SmartRouter_" + std::to_string(i);
+        if(SYSTEM_MODE <= 8){
+            for(int i=0; i<worker_threads; i++) {
+                std::thread router_thread([this, i]() {
+                    std::string thread_name = "SmartRouter_" + std::to_string(i);
+                    pthread_setname_np(pthread_self(), thread_name.c_str());
+                    this->run_router_worker();
+                });
+                pthread_setname_np(router_thread.native_handle(), ("SmartRouter_" + std::to_string(i)).c_str());
+                router_thread.detach();
+            }
+        }
+        else if (SYSTEM_MODE == 9) {
+            // SYSTEM_MODE 9 的 SmartRouter 线程启动逻辑（如果有不同的话）
+            std::thread router_thread([this]() {
+                std::string thread_name = "SmartRouter";
                 pthread_setname_np(pthread_self(), thread_name.c_str());
-                this->run_router_worker();
+                this->run_router_batch_worker();
             });
-            pthread_setname_np(router_thread.native_handle(), ("SmartRouter_" + std::to_string(i)).c_str());
             router_thread.detach();
+        }
+        else {
+            std::cerr << "Unsupported SYSTEM_MODE for SmartRouter: " << SYSTEM_MODE << std::endl;
+            assert(false);
         }
     }
 
@@ -761,22 +781,35 @@ public:
     
     // ! core code, propose the transaction scheduling
     // 批量对事务进行路由
-    std::vector<TxnQueue*> get_route_primary_batch(std::vector<TxnQueueEntry*> &txn_batch,
+    std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> get_route_primary_batch(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch,
             std::vector<pqxx::connection *> &thread_conns) {
         
         assert(SYSTEM_MODE == 9); // 仅支持SYSTEM_MODE 9的批量路由
         std::vector<SmartRouterResult> results;
-        results.reserve(txn_batch.size());
-        // 这几个变量是对整个batch
+        results.reserve(txn_batch->size());
+        // 这几个变量是对整个batch, 记录一些基本的信息
         std::unordered_map<tx_id_t, std::vector<uint64_t>> txn_to_pages_map; // 记录每个事务涉及的页面列表
         std::unordered_map<uint64_t, tx_id_t> page_to_txn_map; // 记录每个页面对应的事务ID
         std::unordered_map<uint64_t, node_id_t> page_to_node_map; // 记录每个页面对应的节点ID（Metis分区结果）
         std::unordered_map<uint64_t, node_id_t> page_ownership_to_node_map; // 记录每个页面对应的节点ID（Ownership表结果）
-        for (auto& txn : txn_batch) { 
+
+        std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> ready_txn_queues = 
+            std::make_unique<std::vector<std::queue<TxnQueueEntry*>>>(ComputeNodeCount);
+        std::vector<std::queue<TxnQueueEntry*>> tmp_routed_txn_queues(ComputeNodeCount);
+
+
+        std::vector<int> partition_txn_count(ComputeNodeCount, 0);
+        std::vector<int> global_txn_count(ComputeNodeCount, 0);
+
+        for (auto& txn : *txn_batch) { 
             auto txn_type = txn->txn_type;
             auto tx_id = txn->tx_id;
-            std::vector<itemkey_t> accounts_keys = txn->accounts; 
+            itemkey_t account1 = txn->accounts[0];
+            itemkey_t account2 = txn->accounts[1];
+            std::vector<itemkey_t> accounts_keys;
             std::vector<table_id_t> table_ids = smallbank_->get_table_ids_by_txn_type(txn_type); 
+            assert(!table_ids.empty());
+            smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
             assert(table_ids.size() == accounts_keys.size());
 
             // 获取涉及的页面列表
@@ -798,23 +831,50 @@ public:
 
             if (SYSTEM_MODE == 9) {
                 if (metis_ret == 1){
-                    // entire affinity
-
+                    // 事务访问的页面在metis图分区中全部映射到同一个节点
+                    (*ready_txn_queues)[metis_decision_node].push(txn);
+                    partition_txn_count[metis_decision_node]++;
+                }
+                else {
+                    if(metis_decision_node == -1) {
+                        // metis没有给出决策, 随机选择一个节点
+                        metis_decision_node = rand() % cfg_.partition_nums;
+                    }
+                    // 否则给他push到metis_decision_node节点上，该信息是根据metis的分区结果选择出来的最匹配的那一个
+                    tmp_routed_txn_queues[metis_decision_node].push(txn);
+                    global_txn_count[metis_decision_node]++;
                 }
             }
         }
-
-        // 获取Metis分区结果
-        // init the page_to_node_map
-        for(const auto& [page, txn_id] : page_to_txn_map) {
-            page_to_node_map[page] = -1;
-        }
-        metis_->get_metis_partitioning_result(page_to_node_map);
         
-        // 获取Ownership表结果
-        for(const auto& [page, txn_id] : page_to_txn_map) {
-            page_ownership_to_node_map[page] = ownership_table_->get_owner(page);
+        for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+            // 合并tmp_routed_txn_queues到txn_queues_
+            while(!tmp_routed_txn_queues[node_id].empty()) {
+                (*ready_txn_queues)[node_id].push(tmp_routed_txn_queues[node_id].front());
+                tmp_routed_txn_queues[node_id].pop();
+            }
         }
+
+        
+        // std::cout << "[SmartRouter Batch] Total Txns: " << txn_batch->size() << std::endl;
+        // for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+        //     std::cout << "  Node " << node_id << ": Partition Txns: " << partition_txn_count[node_id] 
+        //               << ", Global Txns: " << global_txn_count[node_id] << std::endl;
+        // }
+        
+        return ready_txn_queues;
+
+        // // 获取Metis分区结果
+        // // init the page_to_node_map
+        // for(const auto& [page, txn_id] : page_to_txn_map) {
+        //     page_to_node_map[page] = -1;
+        // }
+        // metis_->get_metis_partitioning_result(page_to_node_map);
+        
+        // // 获取Ownership表结果
+        // for(const auto& [page, txn_id] : page_to_txn_map) {
+        //     page_ownership_to_node_map[page] = ownership_table_->get_owner(page);
+        // }
         // ------ 基本信息已经收集完毕, 开始进行路由决策 ------
 
     }
@@ -902,6 +962,7 @@ public:
             else if(SYSTEM_MODE == 4) {
                 routed_node_id = 0; // All to node 0 for single
             }
+            else assert(false); // unknown mode
 
             // 将事务放入对应的TxnQueue中
             txn_queues_[routed_node_id]->push_txn(txn_entry);
@@ -910,6 +971,91 @@ public:
         std::cout << "Router worker thread finished." << std::endl;
     }
 
+    // !层次与run_router_worker并列，用于批量路由事务
+    void run_router_batch_worker() {
+        // for routing needed db connections, each routing thread has its own connections
+        std::vector<pqxx::connection*> thread_conns_vec;
+        for(int i=0; i<ComputeNodeCount; i++) {
+            pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
+            thread_conns_vec.push_back(conn);
+        }
+        while (true) {
+            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize);
+            if (txn_batch == nullptr || txn_batch->empty()) {
+                // 说明事务池已经运行完成
+                for(auto txn_queue : txn_queues_) {
+                    txn_queue->set_finished();
+                }
+                break;
+            }
+            assert(txn_batch->size() == BatchRouterProcessSize);
+            
+            auto reorder_route_queues = this->get_route_primary_batch(txn_batch, thread_conns_vec);
+            assert(reorder_route_queues && reorder_route_queues->size() == ComputeNodeCount);
+            // 开几个线程把reorder_route_queues合并到txn_queues_，运用线程池
+            for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+                auto node_q = std::move((*reorder_route_queues)[node_id]);
+                
+                threadpool.enqueue([this, node_id, q = std::move(node_q)]() mutable {
+                    txn_queues_[node_id]->set_process_batch_id(batch_id);
+                    // 合并reorder_route_queues到txn_queues_
+                    while (!q.empty()) {
+                        // std::cout << "Routing txn " << q.front()->tx_id << " to node " << node_id << std::endl;
+                        // 将事务放入对应的TxnQueue中
+                        txn_queues_[node_id]->push_txn(q.front());
+                        q.pop();
+                        routed_txn_cnt_per_node[node_id]++;
+                    }
+                    // 把该批的事务都分发完成，设置batch处理完成标志
+                    txn_queues_[node_id]->set_batch_finished();
+                });
+            }
+            // 等待所有db connector线程完成该批次的路由
+            for(int i=0; i<ComputeNodeCount; i++) {
+                std::unique_lock<std::mutex> lock(batch_mutex); 
+                batch_cv.wait(lock, [this, i]() { 
+                    if(batch_finished_flags[i] >= db_con_worker_threads) return true; 
+                    else return false;
+                });
+                // std::cout << "Batch Router Worker: Node " << i << " finished batch " << batch_id << std::endl;
+            }
+            
+            // 说明该计算节点的所有线程已经跑完事务了, 重置该节点的batch完成标志
+            std::unique_lock<std::mutex> lock(batch_mutex); 
+            for(int i=0; i<ComputeNodeCount; i++) {
+                // 设置txn_queues_可以开始处理下一批次
+                txn_queues_[i]->set_process_batch_id(batch_id);
+                // 设置batch_finished_flags, 之后db connector线程可以开始处理下一批次
+                batch_finished_flags[i] = 0;
+                batch_cv.notify_all();
+            }
+            batch_id ++;
+        }
+        std::cout << "Router worker thread finished." << std::endl; 
+    }
+    
+    // 计算节点通知
+    void notify_batch_finished(node_id_t compute_node_id) { 
+        std::lock_guard<std::mutex> lock(batch_mutex);
+        // 累计该计算节点完成的线程数
+        if(++batch_finished_flags[compute_node_id] >= db_con_worker_threads) {
+            batch_cv.notify_all();
+        }
+    }
+
+    // 计算节点等待
+    void wait_for_next_batch(node_id_t compute_node_id, int con_batch_id) {
+        std::unique_lock<std::mutex> lock(batch_mutex);
+        batch_cv.wait(lock, [this, compute_node_id, con_batch_id]() { 
+            // 如果该计算节点的所有线程还没有完成该批次的处理，则继续等待
+            // 如果batch_finished_flags被重置为0，说明可以开始下一批次的处理
+            if(batch_finished_flags[compute_node_id] == 0 || con_batch_id < batch_id) return true; 
+            else return false; 
+        });
+    }
+
+
+    // ---------- metis -----------
     // 设置METIS分区数量
     void set_partition_count(int count) {
         if (count > 0) {
@@ -1134,6 +1280,7 @@ private:
     // 配置
     Config cfg_{};
     Logger* logger;
+    int db_con_worker_threads;
 
     // 一级缓存: hot hash (key -> HotEntry)
     std::unordered_map<DataItemKey, HotEntry, DataItemKeyHash> hot_key_map;
@@ -1147,7 +1294,7 @@ private:
     OwnershipTable* ownership_table_;
 
     //for metis
-    ThreadPool pool;
+    ThreadPool threadpool;
     NewMetis* metis_;
 
     // 统计数据
@@ -1168,4 +1315,9 @@ private:
     std::ofstream access_key_log_file;
     std::unordered_map<int, long long> key_freq;
 
+    // for batch routing
+    std::mutex batch_mutex;
+    std::condition_variable batch_cv;
+    std::atomic<int> batch_id{0};
+    std::vector<int> batch_finished_flags;
 };

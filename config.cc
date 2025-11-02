@@ -14,3 +14,4 @@ std::string partition_log_file_ = "partitioning_log.log";
 int MetisWarmupRound = 20;
 bool WarmupEnd = false;
 int TxnPoolMaxSize = 10000;
+int BatchRouterProcessSize = 1000;
