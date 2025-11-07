@@ -14,7 +14,7 @@ include_directories(./)
 
 
 add_executable(smallbank_test smallbank.cc smart_router.cc friend_simulate.cc parse.cc)
-target_link_libraries(smallbank_test global logger metis ${METIS_LIBRARY} ${GKLIB_LIBRARY} ${PQXX_LIBRARY} ${PQ_LIBRARY} pgcommon pgport)
+target_link_libraries(smallbank_test global metis logger ${METIS_LIBRARY} ${GKLIB_LIBRARY} ${PQXX_LIBRARY} ${PQ_LIBRARY} pgcommon pgport)
 
 # add_executable(btree_search btree_search.cc)
 # target_link_libraries(btree_search global logger ${METIS_LIBRARY} ${GKLIB_LIBRARY} ${PQXX_LIBRARY} ${PQ_LIBRARY} pgcommon pgport)

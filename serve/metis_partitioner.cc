@@ -3,7 +3,7 @@
 // ========================================================================
 // MODIFIED build_internal_graph FUNCTION
 // ========================================================================
-inline int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &request_partition_node_map, node_id_t *metis_decision_node) {
+int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &request_partition_node_map, node_id_t *metis_decision_node) {
     // std::cout << "build internal graph called with " << unique_mapped_ids_in_group.size() << " unique IDs." << std::endl;
     if (request_partition_node_map.empty()) {
         return -1; // Sentinel for empty input or no decision
@@ -212,7 +212,7 @@ inline int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t
 
 // 只查询当前分区的结果, 但不构建图
 // 传入的request_partition_node_map 的key是图节点id, value是占位符, 函数会将value更新为对应的分区id
-inline void NewMetis::get_metis_partitioning_result(std::unordered_map<uint64_t, idx_t> &request_partition_node_map) {
+void NewMetis::get_metis_partitioning_result(std::unordered_map<uint64_t, idx_t> &request_partition_node_map) {
     std::shared_lock<std::shared_mutex> lock(partition_map_mutex_);
     for(auto& r: request_partition_node_map) {
         auto map_it = partition_node_map.find(r.first);
@@ -224,7 +224,7 @@ inline void NewMetis::get_metis_partitioning_result(std::unordered_map<uint64_t,
     }
 }
 
-inline node_id_t NewMetis::get_metis_partitioning_result(uint64_t request_partition_node) {
+node_id_t NewMetis::get_metis_partitioning_result(uint64_t request_partition_node) {
     std::shared_lock<std::shared_mutex> lock(partition_map_mutex_);
     auto map_it = partition_node_map.find(request_partition_node);
     if (map_it != partition_node_map.end()) {
@@ -235,7 +235,7 @@ inline node_id_t NewMetis::get_metis_partitioning_result(uint64_t request_partit
 }
 
 // MODIFIED build_link_between_nodes_in_graph FUNCTION
-inline void NewMetis::build_link_between_nodes_in_graph(uint64_t from_node, uint64_t to_node) {
+void NewMetis::build_link_between_nodes_in_graph(uint64_t from_node, uint64_t to_node) {
     // try lock the partition_map_mutex_ for writing
     std::unique_lock<std::shared_mutex> lock(partition_map_mutex_); 
     // 首先先看下to_node是否已经有分区信息
@@ -276,7 +276,7 @@ inline void NewMetis::build_link_between_nodes_in_graph(uint64_t from_node, uint
 // ========================================================================
 // MODIFIED partition_internal_graph FUNCTION
 // ========================================================================
-inline void NewMetis::partition_internal_graph(const std::string &output_partition_file,
+void NewMetis::partition_internal_graph(const std::string &output_partition_file,
                                                uint64_t ComputeNodeCount) {
     // std::cout<<"[Partition] Starting internal graph partitioning task (using DENSE ID snapshot)..." << std::endl;
     this->stats_.total_partition_calls++;

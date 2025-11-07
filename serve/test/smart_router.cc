@@ -1,5 +1,438 @@
 #include "smart_router.h"
 
+SmartRouter::SmartRouterResult SmartRouter::get_route_primary(tx_id_t tx_id, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, 
+        std::vector<pqxx::connection *> &thread_conns) {
+    SmartRouterResult result;
+    if (table_ids.size() != keys.size() || table_ids.empty()) {
+        result.error_message = "Mismatched or empty table_ids and keys";
+        return result;
+    }
+
+    std::unordered_map<uint64_t, node_id_t> page_to_node_map; // 高32位存table_id，低32位存page_id, for SYSTEM_MODE 3
+    std::unordered_map<node_id_t, int> node_count_basedon_key_access_last; // 基于key_access_last的计数, for SYSTEM_MODE 5
+    std::unordered_map<uint64_t, node_id_t> table_key_id;  // 高32位存table_id，低32位存key, for SYSTEM_MODE 6
+    std::unordered_map<node_id_t, int> node_count_basedon_page_access_last; // 基于page_access_last的计数, for SYSTEM_MODE 7
+    std::unordered_map<uint64_t, node_id_t> page_ownership_to_node_map; // 找到ownership对应的节点的映射关系, for SYSTEM_MODE 8
+    std::string debug_info;
+    page_to_node_map.reserve(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if(SYSTEM_MODE == 3) {
+            auto entry = lookup(table_ids[i], keys[i], thread_conns);
+            // 计算page id
+            if (entry.page == kInvalidPageId) {
+                result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
+                                    ", key=" + std::to_string(keys[i]) + ")";
+                assert(false); // 这里不应该失败
+            }
+            // 方法1: 直接使用page_id
+            uint64_t table_page = (static_cast<uint64_t>(table_ids[i]) << 32) | entry.page;
+            page_to_node_map[table_page] = -1; // 初始化
+            // 方法2: 每GroupPageAffinitySize个页面作为一个region, 这样可以减少图分区的大小
+            // table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | (entry.page / GroupPageAffinitySize));
+            // 方法3: 直接对page_id做hash, 这样可以减少图分区的大小, 这会使得负载变得更加均衡
+            // std::hash<page_id_t> h;
+            // int region_id = h(entry.page) % (cfg_.partition_nums * 1000); // 10倍分区数的region
+            // table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | region_id);
+        }
+        else if(SYSTEM_MODE == 5) {
+            auto entry = lookup(table_ids[i], keys[i], thread_conns);
+            // 如果是模式5，则统计key_access_last_node出现的次数, 按照上次key访问节点进行路由
+            if (entry.key_access_last_node != -1) {
+                node_count_basedon_key_access_last[entry.key_access_last_node]++;
+            }
+        }
+        else if(SYSTEM_MODE == 6) {
+            // 计算key id
+            uint64_t table_key = (static_cast<uint64_t>(table_ids[i]) << 32) | keys[i];
+            table_key_id[table_key] = -1; // 初始化
+        }
+        else if(SYSTEM_MODE == 7) {
+            auto entry = lookup(table_ids[i], keys[i], thread_conns);
+            // 计算page id
+            if (entry.page == kInvalidPageId) {
+                result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
+                                    ", key=" + std::to_string(keys[i]) + ")";
+                assert(false); // 这里不应该失败
+            }
+            auto last_node = ownership_table_->get_owner(table_ids[i], entry.page);
+            if (last_node != -1) {
+                node_count_basedon_page_access_last[last_node]++;
+            }
+            debug_info += "(table_id=" + std::to_string(table_ids[i]) + ", key=" + std::to_string(keys[i]) + 
+                            ", page=" + std::to_string(entry.page) + ", last_node=" + std::to_string(last_node) + "); ";
+        }
+        else if(SYSTEM_MODE == 8) {
+            // 计算page id
+            auto entry = lookup(table_ids[i], keys[i], thread_conns);
+            if (entry.page == kInvalidPageId) {
+                result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
+                                    ", key=" + std::to_string(keys[i]) + ")";
+                assert(false); // 这里不应该失败
+            }
+            uint64_t table_page_id_val = (static_cast<uint64_t>(table_ids[i]) << 32) | entry.page;
+            page_to_node_map[table_page_id_val] = -1; // 初始化
+            auto last_node = ownership_table_->get_owner(table_ids[i], entry.page);
+            if (last_node != -1) {
+                page_ownership_to_node_map[table_page_id_val] = last_node;
+                node_count_basedon_page_access_last[last_node]++;
+            }
+            debug_info += "(table_id=" + std::to_string(table_ids[i]) + ", key=" + std::to_string(keys[i]) + 
+                            ", page=" + std::to_string(entry.page) + ", last_node=" + std::to_string(last_node) + "); ";
+        }
+        else { 
+            assert(false); // unknown mode
+        }
+    }
+
+    try {
+        if (SYSTEM_MODE == 3) {
+            // 基于page Metis的结果进行分区
+            // 去重优化
+            result.keys_processed = page_to_node_map.size();
+            int ret_code = metis_->build_internal_graph(page_to_node_map, &result.smart_router_id);
+            if(ret_code == 0) {
+                result.sys_3_decision_type = 0; // metis no decision
+            } else if (ret_code == -1) {
+                result.sys_3_decision_type = 1; // metis missing
+            }
+            else if (ret_code == 1) {
+                result.sys_3_decision_type = 2; // metis entirely
+            }
+            else if (ret_code == 2) {
+                result.sys_3_decision_type = 3; // metis partial
+            }
+            else if (ret_code == 3) {
+                result.sys_3_decision_type = 4; // metis cross
+            }
+            // result.smart_router_id = 0;
+        }
+        else if (SYSTEM_MODE == 5) {
+            // !如果是模式5，则结合key_access_last_node的计数结果进行调整
+            int max_count = 0;
+            node_id_t candidate_node = -1;
+            for (const auto& [node, count] : node_count_basedon_key_access_last) {
+                if (count > max_count) {
+                    max_count = count;
+                    candidate_node = node;
+                }
+            }
+            if (candidate_node != -1) {
+                if (candidate_node != result.smart_router_id) {
+                    // !直接选择出现次数最多的节点
+                    result.smart_router_id = candidate_node;
+                }
+            }
+            else {
+                // 在运行前面一段时间, 因为初始化时没有last_node, 导致这里没有任何候选节点
+                // 那就随机选择一个
+                result.smart_router_id = rand() % cfg_.partition_nums;
+            }
+        }
+        else if (SYSTEM_MODE == 6) {
+            // SYSTEM_MODE 6: 按照key做亲和性划分
+            // 去重优化
+            result.keys_processed = table_key_id.size();
+            metis_->build_internal_graph(table_key_id, &result.smart_router_id);
+        }
+        else if (SYSTEM_MODE == 7) {
+            // SYSTEM_MODE 7: 按照page做亲和性划分, 结合page_access_last_node
+            if(node_count_basedon_page_access_last.empty()) {
+                this->stats_.ownership_random_txns++;
+                result.smart_router_id = rand() % cfg_.partition_nums;
+                logger->info("[SmartRouter Random] found no candidate node based on page access last node, randomly selected node " + 
+                            std::to_string(result.smart_router_id));
+            }
+            else if (node_count_basedon_page_access_last.size() == 1) {
+                this->stats_.ownership_entirely_txns++;
+                // 只有一个候选节点, 直接选择
+                result.smart_router_id = node_count_basedon_page_access_last.begin()->first;
+                logger->info("[SmartRouter Entirely] " + debug_info + " based on page access last node directly to node " + 
+                            std::to_string(result.smart_router_id));
+            }
+            else if (node_count_basedon_page_access_last.size() > 1) {
+                this->stats_.ownership_cross_txns++;
+                int max_count = 0;
+                node_id_t candidate_node = -1;
+                std::vector<node_id_t> candidates;
+                for (const auto& [node, count] : node_count_basedon_page_access_last) {
+                    if (count > max_count) {
+                        max_count = count;
+                        candidates.clear();
+                        candidates.push_back(node);
+                    } else if (count == max_count) {
+                        candidates.push_back(node);
+                    }
+                }
+                assert(!candidates.empty());
+                // 随机选择出现次数最多的节点
+                result.smart_router_id = candidates[rand() % candidates.size()];
+                logger->info("[SmartRouter Cross] " + debug_info + " based on page access last node with count (" 
+                            + std::to_string(max_count) + ") to node " + std::to_string(result.smart_router_id));
+            }
+        }
+        else if(SYSTEM_MODE == 8) {
+            // 基于page Metis的结果进行分区, 同时返回page到node的映射
+            result.keys_processed = page_to_node_map.size();
+            node_id_t metis_decision_node;
+            int ret_code = metis_->build_internal_graph(page_to_node_map, &metis_decision_node);
+            // page_ownership_to_node_map 是ownership_table_中记录的page到node的映射
+            // page_to_node_map 是metis分区后得到的page到node的映射
+            // 这里进行对比, 看看两者是否一致, 综合考虑page_to_node_map和ownership_table_的信息, 进行调整
+            if  (ret_code == 0){ 
+                // no decision
+                assert(!page_to_node_map.empty());
+                result.smart_router_id = rand() % cfg_.partition_nums; // 随机选择一个节点
+                log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisNoDecision);
+            }
+            else if (ret_code == -1) {
+                // missing, 没有任何page被映射到节点
+                // 这个时候再检查一下ownership_table_的信息
+                assert(!page_to_node_map.empty()); 
+                if(node_count_basedon_page_access_last.empty()) {
+                    // ownership_table_中也没有任何page的映射信息, 即涉及到的页面第一次被访问
+                    result.smart_router_id = rand() % cfg_.partition_nums; // 随机选择一个节点
+                    log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisMissingAndOwnershipMissing);
+                }
+                else if(node_count_basedon_page_access_last.size() == 1) {
+                    // ownership_table_中只有一个page的映射信息
+                    result.smart_router_id = page_ownership_to_node_map.begin()->second;
+                    log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisMissingAndOwnershipEntirely);
+                }
+                else if(node_count_basedon_page_access_last.size() > 1) {
+                    // ownership_table_中有多个page的映射信息
+                    // 基于page_ownership_to_node_map进行计数, 选择出现次数最多的节点
+                    int max_count = 0;
+                    node_id_t candidate_node = -1;
+                    std::vector<node_id_t> candidates;
+                    for (const auto& [node, count] : node_count_basedon_page_access_last) {
+                        if (count > max_count) {
+                            max_count = count;
+                            candidates.clear();
+                            candidates.push_back(node);
+                        } else if (count == max_count) {
+                            candidates.push_back(node);
+                        }
+                    }
+                    assert(!candidates.empty());
+                    // 随机选择出现次数最多的节点
+                    node_id_t min_txn_node = -1;
+                    size_t min_txn_count = SIZE_MAX;
+                    for (int i=0; i<candidates.size(); i++) {
+                        auto node = candidates[i];
+                        if (routed_txn_cnt_per_node[node].load() < min_txn_count) {
+                            min_txn_count = routed_txn_cnt_per_node[node].load();
+                            min_txn_node = node;
+                        }
+                    }
+                    assert(min_txn_node != -1);
+                    result.smart_router_id = min_txn_node;
+                    log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisMissingAndOwnershipCross);
+                }
+                else assert(false); // 不可能出现的情况
+            }
+            else if (ret_code == 1) {
+                // entire affinity, 所有page都映射到同一个节点
+                assert(!page_to_node_map.empty());
+                assert(metis_decision_node != -1);
+                if(node_count_basedon_page_access_last.empty()) {
+                    // ownership_table_中没有任何page的映射信息, 即涉及到的页面
+                    result.smart_router_id = metis_decision_node;
+                    log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipMissing);
+                }
+                else if(node_count_basedon_page_access_last.size() == 1) {
+                    // ownership_table_中只有一个page的映射信息
+                    auto ownership_node = page_ownership_to_node_map.begin()->second;
+                    if(ownership_node == metis_decision_node) {
+                        result.smart_router_id = metis_decision_node;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyEqual);
+                    }
+                    else {
+                        // !两者不一致, 优先选择ownership_node
+                        result.smart_router_id = ownership_node;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyUnequal);
+                    }
+                }
+                else if(node_count_basedon_page_access_last.size() > 1) {
+                    // ownership_table_中有多个page的映射信息
+                    int max_count = 0;
+                    node_id_t candidate_node = -1;
+                    std::vector<node_id_t> candidates;
+                    for (const auto& [node, count] : node_count_basedon_page_access_last) {
+                        if (count > max_count) {
+                            max_count = count;
+                            candidates.clear();
+                            candidates.push_back(node);
+                        } else if (count == max_count) {
+                            candidates.push_back(node);
+                        }
+                    }
+                    assert(!candidates.empty());
+                    int i;
+                    for(i=0; i<candidates.size(); i++) {
+                        if (candidates[i] == metis_decision_node) {
+                            candidate_node = candidates[i];
+                            break;
+                        }
+                    }
+                    if(i >= candidates.size()) {
+                        // candidates中没有metis_decision_node, 那就随机选择一个
+                        candidate_node = candidates[rand() % candidates.size()];
+                    }
+                    if(candidate_node == metis_decision_node) {
+                        result.smart_router_id = metis_decision_node;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipCrossEqual);
+                    }
+                    else {
+                        // !pay attention: 这里对于candidates 中有可能包含metis_decision_node的情况, 这种情况需要选择metis_decision_node
+                        result.smart_router_id = candidate_node;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipCrossUnequal);
+                    }
+                }
+                else assert(false); // 不可能出现的情况
+            }
+            else if (ret_code == 2) {
+                // partial affinity, 多个page映射到多个节点
+                assert(!page_to_node_map.empty());
+                // 这个时候再检查一下ownership_table_的信息
+                if(node_count_basedon_page_access_last.empty()) {
+                    // ownership_table_中也没有任何page的映射信息, 即涉及到的页面第一次被访问
+                    result.smart_router_id = metis_decision_node;
+                    log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipMissing);
+                }
+                else if(node_count_basedon_page_access_last.size() == 1) {
+                    // ownership_table_中只有一个page的映射信息
+                    auto ownership_node = page_ownership_to_node_map.begin()->second;
+                    if(ownership_node == metis_decision_node) {
+                        // 两者一致
+                        result.smart_router_id = metis_decision_node;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyEqual);
+                    }
+                    else {
+                        // !两者不一致, 优先选择ownership_node
+                        result.smart_router_id = ownership_node;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyUnequal);
+                    }
+                }
+                else if(node_count_basedon_page_access_last.size() > 1) {
+                    // ownership_table_中有多个page的映射信息
+                    int max_count = 0;
+                    node_id_t candidate_node = -1;
+                    std::vector<node_id_t> candidates;
+                    for (const auto& [node, count] : node_count_basedon_page_access_last) {
+                        if (count > max_count) {
+                            max_count = count;
+                            candidates.clear();
+                            candidates.push_back(node);
+                        } else if (count == max_count) {
+                            candidates.push_back(node);
+                        }
+                    }
+                    assert(!candidates.empty());
+                    // 找到routed_txn_cnt_per_node中最小的节点
+                    node_id_t min_txn_node = -1;
+                    size_t min_txn_count = SIZE_MAX;
+                    for (int i=0; i<candidates.size(); i++) {
+                        auto node = candidates[i];
+                        if (routed_txn_cnt_per_node[node].load() < min_txn_count) {
+                            min_txn_count = routed_txn_cnt_per_node[node].load();
+                            min_txn_node = node;
+                        }
+                    }
+                    assert(min_txn_node != -1);
+                    node_id_t ownership_node = min_txn_node;
+                    if(ownership_node == metis_decision_node) {
+                        result.smart_router_id = metis_decision_node;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossEqual);
+                    }
+                    else {
+                        // !两者不一致, 优先选择ownership_node
+                        result.smart_router_id = ownership_node;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossUnequal);
+                    }
+                }
+                else assert(false); // 不可能出现的情况
+            }
+            else if (ret_code == 3) {
+                // cross affinity, 多个page映射到多个节点, 并且有些page没有映射到节点
+                assert(!page_to_node_map.empty());
+                // 这个时候再检查一下ownership_table_的信息
+                if(node_count_basedon_page_access_last.empty()) {
+                    // ownership_table_中也没有任何page的映射信息, 即涉及到的页面第一次被访问
+                    result.smart_router_id = metis_decision_node;
+                    log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipMissing);
+                }
+                else if(node_count_basedon_page_access_last.size() == 1) {
+                    // ownership_table_中只有一个page的映射信息
+                    auto ownership_node = page_ownership_to_node_map.begin()->second;
+                    if(ownership_node == metis_decision_node) {
+                        // 两者一致
+                        result.smart_router_id = metis_decision_node;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyEqual);
+                    }
+                    else {
+                        // !两者不一致, 优先选择ownership_node
+                        result.smart_router_id = ownership_node; 
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyUnequal);
+                    }
+                }
+                else if(node_count_basedon_page_access_last.size() > 1) {
+                    // ownership_table_中有多个page的映射信息
+                    int max_count = 0;
+                    node_id_t candidate_node = -1;
+                    std::vector<node_id_t> candidates;
+                    for (const auto& [node, count] : node_count_basedon_page_access_last) {
+                        if (count > max_count) {
+                            max_count = count;
+                            candidates.clear();
+                            candidates.push_back(node);
+                        } else if (count == max_count) {
+                            candidates.push_back(node);
+                        }
+                    }
+                    assert(!candidates.empty());
+                    // 找到routed_txn_cnt_per_node中最小的节点
+                    node_id_t min_txn_node = -1;
+                    size_t min_txn_count = SIZE_MAX;
+                    for (int i=0; i<candidates.size(); i++) {
+                        auto node = candidates[i];
+                        if (routed_txn_cnt_per_node[node].load() < min_txn_count) {
+                            min_txn_count = routed_txn_cnt_per_node[node].load();
+                            min_txn_node = node;
+                        }
+                    }
+                    assert(min_txn_node != -1);
+                    node_id_t ownership_node = min_txn_node;
+                    if(ownership_node == metis_decision_node) {
+                        result.smart_router_id = metis_decision_node;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossEqual);
+                    }
+                    else {
+                        // !两者不一致, 优先选择ownership_node
+                        result.smart_router_id = ownership_node;
+                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossUnequal);
+                    }
+                }
+                else assert(false); // 不可能出现的情况
+            }
+            else assert(false);
+        }
+        else {
+            assert(false);
+        }
+
+        if(result.smart_router_id == -1) {
+            // 如果没有决定, 则随机选择一个节点
+            result.smart_router_id = rand() % cfg_.partition_nums; // 随机选择一个节点
+        }
+        result.success = true;
+    }
+    catch (const std::exception &e) {
+        result.error_message = std::string("Exception during partitioning: ") + e.what();
+    }
+    return result;
+}
+
+
 std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_primary_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch,
         std::vector<pqxx::connection *> &thread_conns) {
     
