@@ -62,6 +62,7 @@ public:
 
     // 不构建图，只是获取当前的分区结果
     void get_metis_partitioning_result(std::unordered_map<uint64_t, idx_t> &request_partition_node_map);
+    node_id_t get_metis_partitioning_result(uint64_t request_partition_node);
 
     void build_link_between_nodes_in_graph(uint64_t from_node, uint64_t to_node);
 
@@ -367,6 +368,16 @@ inline void NewMetis::get_metis_partitioning_result(std::unordered_map<uint64_t,
         } else {
             r.second = -1; // Indicate not found
         }
+    }
+}
+
+inline node_id_t NewMetis::get_metis_partitioning_result(uint64_t request_partition_node) {
+    std::shared_lock<std::shared_mutex> lock(partition_map_mutex_);
+    auto map_it = partition_node_map.find(request_partition_node);
+    if (map_it != partition_node_map.end()) {
+        return map_it->second; // Return PartitionIndex
+    } else {
+        return -1; // Indicate not found
     }
 }
 

@@ -36,11 +36,17 @@ public:
         TxnQueueEntry* entry = txn_queue_.front();
         txn_queue_.pop();
         current_queue_size_--;
+        if(current_queue_size_ + 1 >= max_queue_size_) {
+            queue_cv_.notify_one();
+        }
         return entry;
     }
 
     void push_txn(TxnQueueEntry* entry) {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        queue_cv_.wait(lock, [this]() {
+            return current_queue_size_ < max_queue_size_;
+        });
         txn_queue_.push(entry);
         current_queue_size_++;
         queue_cv_.notify_one();
@@ -85,6 +91,7 @@ private:
     std::condition_variable queue_cv_;
     node_id_t node_id_; // the compute node id this queue belongs to
     std::atomic<int> current_queue_size_ = 0;
+    int max_queue_size_ = 1000; // max queue size
     bool finished_ = false;
 
     int process_batch_id_ = 0;
@@ -150,8 +157,6 @@ public:
         stop_ = true;
         pool_cv_.notify_all();
     }
-
-private: 
     
 private:
     SmallBank* smallbank_; // pointer to the SmallBank instance

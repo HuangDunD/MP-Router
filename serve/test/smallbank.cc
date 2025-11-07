@@ -261,7 +261,9 @@ void generate_smallbank_txns_worker(thread_params* params) {
         zipfian_gen = new ZipfGen(smallbank->get_account_count(), params->zipfian_theta, zipf_seed & zipf_seed_mask);
     }
 
-    while(generated_txn_count < try_count * worker_threads * ComputeNodeCount + 100){
+    // 全局一共进行 MetisWarmupRound * PARTITION_INTERVAL的冷启动事务生成，每个工作节点具有worker_threads个线程，每个线程生成try_count个事务
+    int total_txn_to_generate = MetisWarmupRound * PARTITION_INTERVAL + try_count * worker_threads * ComputeNodeCount;
+    while(generated_txn_count < total_txn_to_generate) {
         generated_txn_count++;
         tx_id_t tx_id = tx_id_generator++; // global atomic transaction ID
         // Simulate some work
@@ -339,7 +341,6 @@ void run_smallbank_txns(thread_params* params) {
         itemkey_t account1 = txn_entry->accounts[0];
         itemkey_t account2 = txn_entry->accounts[1];
         int txn_decision_type = txn_entry->txn_decision_type;
-        delete txn_entry; // free the txn entry memory
         
         // Create a new transaction
         while (con->is_open() == false) {
@@ -487,11 +488,12 @@ void run_smallbank_txns(thread_params* params) {
             }
             txn->commit();
             // update the smart router page map if needed
-            if(smart_router) smart_router->update_key_page(const_cast<std::vector<table_id_t>&>(tables), keys, ctid_ret_page_ids, compute_node_id, txn_decision_type);
+            if(smart_router) smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables), keys, ctid_ret_page_ids, compute_node_id);
             
         } catch (const std::exception &e) {
             std::cerr << "Transaction failed: " << e.what() << std::endl;
         }
+        delete txn_entry; // free the txn entry memory
         delete txn;
         // std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -776,8 +778,8 @@ int main(int argc, char *argv[]) {
                 }
                 std::cout << "input try count is " << try_count << std::endl;
                 // try_count 是每个线程的尝试次数，总尝试次数要乘以线程数
-                try_count += MetisWarmupRound * PARTITION_INTERVAL / worker_threads; // add warmup rounds
-                std::cout << "Total try count (including warmup) is " << try_count << " per thread. " << std::endl;
+                // try_count += MetisWarmupRound * PARTITION_INTERVAL / worker_threads; // add warmup rounds
+                // std::cout << "Total try count (including warmup) is " << try_count << " per thread. " << std::endl;
             } else {
                 std::cerr << "Error: --try-count requires a value" << std::endl;
                 print_usage(argv[0]);
@@ -825,6 +827,9 @@ int main(int argc, char *argv[]) {
         break;
     case 9:
         std::cout << "\033[31m  2 phase switch \033[0m" << std::endl;
+        break;
+    case 10:
+        std::cout << "\033[31m  k-router \033[0m" << std::endl;
         break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;

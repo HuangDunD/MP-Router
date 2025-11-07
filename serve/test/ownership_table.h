@@ -8,7 +8,7 @@
 #include <cassert>
 #include <atomic>
 #include "common.h"
-
+#include "txn_queue.h"
 class OwnershipEntry {
 public:
     OwnershipEntry() : owner(-1) {}
@@ -53,27 +53,34 @@ public:
     }
 
     // 设置页面所有权, 如果所有权发生变化返回true，否则返回false
-    bool set_owner(table_id_t table_id, itemkey_t access_key, page_id_t page_id, node_id_t owner, int txn_type = -1) {
+    bool set_owner(TxnQueueEntry* txn, table_id_t table_id, itemkey_t access_key, page_id_t page_id, node_id_t owner) {
         if (table_id < 0 || table_id >= MAX_DB_TABLE_NUM) assert(false);
         if (page_id < 0 || page_id >= MAX_DB_PAGE_NUM) assert(false);
         auto& entry = table_[table_id][page_id];
+        int txn_decision_type = txn ? txn->txn_decision_type : -1;
+        int txn_id = txn ? txn->tx_id : -1;
+
         std::unique_lock lock(entry->mutex);
         if (entry->owner == owner) {
         #if LOG_OWNERSHIP_CHANGE
             uint64_t table_page_id = (static_cast<uint64_t>(table_id) << 32) | static_cast<uint64_t>(page_id);
             if(WarmupEnd) // 只在正式阶段记录
-                logger->info("# Ownership not change: (table_id=" + std::to_string(table_id) + ", access_key=" + std::to_string(access_key) + ", page_id=" + std::to_string(page_id) + 
+                logger->info("Txn id: "  + std::to_string(txn_id) + " txn_type: " + std::to_string(txn->txn_decision_type) +
+                        "# Ownership not change: (table_id=" + std::to_string(table_id) + ", access_key=" + std::to_string(access_key) + ", page_id=" + std::to_string(page_id) + 
                         ") --> " + std::to_string(table_page_id) + " owner remains: " + std::to_string(entry->owner));
         #endif
             return false;
         }
         if(entry->owner != -1) {
             ownership_changes++;
-            if(txn_type >=0) ownership_changes_per_txn_type[txn_type]++;
+            if(txn_decision_type >=0) {
+                ownership_changes_per_txn_type[txn_decision_type]++;
+            }
         #if LOG_OWNERSHIP_CHANGE
             uint64_t table_page_id = (static_cast<uint64_t>(table_id) << 32) | static_cast<uint64_t>(page_id);
             if(WarmupEnd) // 只在正式阶段记录
-                logger->info("! Ownership changed: (table_id=" + std::to_string(table_id) + ", access_key=" + std::to_string(access_key) + ", page_id=" + std::to_string(page_id) + 
+                logger->info("Txn id: " + std::to_string(txn_id) + " txn_type: " + std::to_string(txn->txn_decision_type) +
+                        "! Ownership changed: (table_id=" + std::to_string(table_id) + ", access_key=" + std::to_string(access_key) + ", page_id=" + std::to_string(page_id) + 
                         ") --> " + std::to_string(table_page_id) + " original owner: " + std::to_string(entry->owner) + ", new owner: " + std::to_string(owner));
         #endif
         }
@@ -97,6 +104,6 @@ public:
 private:
     std::vector<std::vector<OwnershipEntry*>> table_;
     std::atomic<int> ownership_changes;
-    std::vector<std::atomic<int>> ownership_changes_per_txn_type; // 按事务类型统计的所有权变更次数, for sys_8_decision_type
+    std::vector<std::atomic<int>> ownership_changes_per_txn_type; // 按事务类型统计的所有权变更次数, for sys_decision_type
     Logger* logger;
 };

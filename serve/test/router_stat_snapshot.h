@@ -94,32 +94,39 @@ struct RouterStatSnapshot {
         std::cout << "Metis missing decisions: " << missing_node_decisions << std::endl; 
 
         
-        if(SYSTEM_MODE != 8) {
-            std::cout << "*********************************************" << std::endl;
-            return;
+        if(SYSTEM_MODE == 3 || SYSTEM_MODE == 9 || SYSTEM_MODE == 10) {
+            // for SYSTEM_MODE 3
+            std::cout << "Metis decisions (for SYSTEM_MODE 3):" << std::endl;
+            std::cout << "  Metis No Decision Ownership Changes: " << ownership_changes_per_txn_type[0] << std::endl;
+            std::cout << "  Metis Missing : " << missing_node_decisions << " Ownership Changes: " << ownership_changes_per_txn_type[1] << std::endl;
+            std::cout << "  Metis Entirely : " << entire_affinity_decisions << " Ownership Changes: " << ownership_changes_per_txn_type[2] << std::endl;
+            std::cout << "  Metis Partial : " << partial_affinity_decisions << " Ownership Changes: " << ownership_changes_per_txn_type[3] << std::endl;
+            std::cout << "  Metis Cross : " << total_cross_partition_decisions << " Ownership Changes: " << ownership_changes_per_txn_type[4] << std::endl;
         }
-        // for SYSTEM_MODE 8
-        // Metis and Ownership combined statistics
-        std::cout << "Metis and Ownership combined decisions (for SYSTEM_MODE 8):" << std::endl;
-        std::cout << "  Metis No Decision: " << metis_no_decision << " Ownership Changes: " << ownership_changes_per_txn_type[0] << std::endl;
-        std::cout << "  Metis Missing & Ownership Missing: " << metis_missing_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[1] << std::endl;
-        std::cout << "  Metis Missing & Ownership Entirely: " << metis_missing_and_ownership_entirely << " Ownership Changes: " << ownership_changes_per_txn_type[2] << std::endl;
-        std::cout << "  Metis Missing & Ownership Cross: " << metis_missing_and_ownership_cross << " Ownership Changes: " << ownership_changes_per_txn_type[3] << std::endl;
-        std::cout << "  Metis Entirely & Ownership Missing: " << metis_entirely_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[4] << std::endl;
-        std::cout << "  Metis Entirely & Ownership Cross Equal: " << metis_entirely_and_ownership_cross_equal << " Ownership Changes: " << ownership_changes_per_txn_type[5] << std::endl;
-        std::cout << "  Metis Entirely & Ownership Cross Unequal: " << metis_entirely_and_ownership_cross_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[6] << std::endl;
-        std::cout << "  Metis Entirely & Ownership Entirely Equal: " << metis_entirely_and_ownership_entirely_equal << " Ownership Changes: " << ownership_changes_per_txn_type[7] << std::endl;
-        std::cout << "  Metis Entirely & Ownership Entirely Unequal: " << metis_entirely_and_ownership_entirely_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[8] << std::endl;
-        std::cout << "  Metis Cross & Ownership Missing: " << metis_cross_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[9] << std::endl;
-        std::cout << "  Metis Cross & Ownership Entirely Equal: " << metis_cross_and_ownership_entirely_equal << " Ownership Changes: " << ownership_changes_per_txn_type[10] << std::endl;
-        std::cout << "  Metis Cross & Ownership Entirely Unequal: " << metis_cross_and_ownership_entirely_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[11] << std::endl;
-        std::cout << "  Metis Cross & Ownership Cross Equal: " << metis_cross_and_ownership_cross_equal << " Ownership Changes: " << ownership_changes_per_txn_type[12] << std::endl;
-        std::cout << "  Metis Cross & Ownership Cross Unequal: " << metis_cross_and_ownership_cross_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[13] << std::endl;
-        std::cout << "  Metis Partial & Ownership Missing: " << metis_partial_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[14] << std::endl;
-        std::cout << "  Metis Partial & Ownership Entirely Equal: " << metis_partial_and_ownership_entirely_equal << " Ownership Changes: " << ownership_changes_per_txn_type[15] << std::endl;
-        std::cout << "  Metis Partial & Ownership Entirely Unequal: " << metis_partial_and_ownership_entirely_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[16] << std::endl;
-        std::cout << "  Metis Partial & Ownership Cross Equal: " << metis_partial_and_ownership_cross_equal << " Ownership Changes: " << ownership_changes_per_txn_type[17] << std::endl;
-        std::cout << "  Metis Partial & Ownership Cross Unequal: " << metis_partial_and_ownership_cross_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[18] << std::endl;
+        if(SYSTEM_MODE == 8) {
+            // for SYSTEM_MODE 8
+            // Metis and Ownership combined statistics
+            std::cout << "Metis and Ownership combined decisions (for SYSTEM_MODE 8):" << std::endl;
+            std::cout << "  Metis No Decision: " << metis_no_decision << " Ownership Changes: " << ownership_changes_per_txn_type[0] << std::endl;
+            std::cout << "  Metis Missing & Ownership Missing: " << metis_missing_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[1] << std::endl;
+            std::cout << "  Metis Missing & Ownership Entirely: " << metis_missing_and_ownership_entirely << " Ownership Changes: " << ownership_changes_per_txn_type[2] << std::endl;
+            std::cout << "  Metis Missing & Ownership Cross: " << metis_missing_and_ownership_cross << " Ownership Changes: " << ownership_changes_per_txn_type[3] << std::endl;
+            std::cout << "  Metis Entirely & Ownership Missing: " << metis_entirely_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[4] << std::endl;
+            std::cout << "  Metis Entirely & Ownership Cross Equal: " << metis_entirely_and_ownership_cross_equal << " Ownership Changes: " << ownership_changes_per_txn_type[5] << std::endl;
+            std::cout << "  Metis Entirely & Ownership Cross Unequal: " << metis_entirely_and_ownership_cross_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[6] << std::endl;
+            std::cout << "  Metis Entirely & Ownership Entirely Equal: " << metis_entirely_and_ownership_entirely_equal << " Ownership Changes: " << ownership_changes_per_txn_type[7] << std::endl;
+            std::cout << "  Metis Entirely & Ownership Entirely Unequal: " << metis_entirely_and_ownership_entirely_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[8] << std::endl;
+            std::cout << "  Metis Cross & Ownership Missing: " << metis_cross_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[9] << std::endl;
+            std::cout << "  Metis Cross & Ownership Entirely Equal: " << metis_cross_and_ownership_entirely_equal << " Ownership Changes: " << ownership_changes_per_txn_type[10] << std::endl;
+            std::cout << "  Metis Cross & Ownership Entirely Unequal: " << metis_cross_and_ownership_entirely_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[11] << std::endl;
+            std::cout << "  Metis Cross & Ownership Cross Equal: " << metis_cross_and_ownership_cross_equal << " Ownership Changes: " << ownership_changes_per_txn_type[12] << std::endl;
+            std::cout << "  Metis Cross & Ownership Cross Unequal: " << metis_cross_and_ownership_cross_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[13] << std::endl;
+            std::cout << "  Metis Partial & Ownership Missing: " << metis_partial_and_ownership_missing << " Ownership Changes: " << ownership_changes_per_txn_type[14] << std::endl;
+            std::cout << "  Metis Partial & Ownership Entirely Equal: " << metis_partial_and_ownership_entirely_equal << " Ownership Changes: " << ownership_changes_per_txn_type[15] << std::endl;
+            std::cout << "  Metis Partial & Ownership Entirely Unequal: " << metis_partial_and_ownership_entirely_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[16] << std::endl;
+            std::cout << "  Metis Partial & Ownership Cross Equal: " << metis_partial_and_ownership_cross_equal << " Ownership Changes: " << ownership_changes_per_txn_type[17] << std::endl;
+            std::cout << "  Metis Partial & Ownership Cross Unequal: " << metis_partial_and_ownership_cross_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[18] << std::endl;
+        }
         std::cout << "*********************************************" << std::endl;
         return;
     }

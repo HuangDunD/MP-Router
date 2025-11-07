@@ -29,6 +29,7 @@ extern int SYSTEM_MODE;
 #define LOG_METIS_DECISION 0 // 0: no log 1: log
 #define LOG_OWNERSHIP_CHANGE 0 // 0: no log 1: log
 #define LOG_PAGE_UPDATE 0 // 0: no log 1: log
+#define LOG_KROUTER_SCHEDULING_DEBUG 1 // 0: no log 1: log
 #define WORKLOAD_AFFINITY_MODE 1 // 0: key affinity 1: city-key affinity
 #define SYS_8_DECISION_TYPE_COUNT 19 // for SYSTEM_MODE 8, 17 types of ownership changes
 // for log
@@ -37,7 +38,6 @@ extern std::string partition_log_file_;
 extern std::vector<std::string> DBConnection;
 extern int ComputeNodeCount; // 计算节点数量
 extern uint64_t ATTEMPTED_NUM;
-extern double CrossNodeAccessRatio;
 extern int REGION_SIZE;
 extern double AffinitySampleRate;
 extern double AffinityTxnRatio;
