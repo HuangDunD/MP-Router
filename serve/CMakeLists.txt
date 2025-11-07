@@ -6,6 +6,10 @@ set(LOG_SRC
         log/Logger.cpp
 )
 
+set(METIS_SRC
+        metis_partitioner.cc
+)
+
 set(SERVER_SRC
         serve.cpp
         region/region_generator.cpp
@@ -17,6 +21,7 @@ set(SERVER_SRC
 add_executable(offline_analyzer offline_analyze.cc)
 add_executable(create_table create_table.cc)
 
+add_library(metis STATIC ${METIS_SRC})
 add_library(logger STATIC ${LOG_SRC})
 
 # Link libraries to 'serve'

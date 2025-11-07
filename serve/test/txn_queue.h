@@ -7,6 +7,7 @@
 #include <list>
 #include <condition_variable>
 #include "common.h"
+#include "smallbank.h"
 
 struct TxnQueueEntry {
     tx_id_t tx_id;
