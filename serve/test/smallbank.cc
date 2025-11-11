@@ -314,21 +314,17 @@ void run_smallbank_txns(thread_params* params) {
         // ! pay attention here, different system mode may have different txn fetching strategy, now all use pool front
         TxnQueueEntry* txn_entry = txn_queue->pop_txn();
         if (txn_entry == nullptr)  {
-            if(txn_queue->is_batch_finished()) {
-                // 说明该计算节点的该批事务已经均处理完成, 告诉smart router 该批次这个节点完成了
-                // std::cout << "Compute Node " << compute_node_id << " Thread " << params->thread_id 
-                        //   << " finished batch, notify SmartRouter." << std::endl;
-                smart_router->notify_batch_finished(compute_node_id);
-                // 等待下一批事务到来，即 batch_finished 标志被重置
-                smart_router->wait_for_next_batch(compute_node_id, con_batch_id);
-                // std::cout << "Compute Node " << compute_node_id << " Thread " << params->thread_id 
-                        //   << " starting next batch." << std::endl;
-                con_batch_id++;
-                continue; // 重新进入循环，处理下一批事务
-            }
-            else if(txn_queue->is_finished()) {
+            if(txn_queue->is_finished()) {
                 // 说明该计算节点的事务队列已经均处理完成, 可以退出线程了
                 break;
+            }
+            else if(txn_queue->is_batch_finished()) {
+                // 说明该计算节点的该批事务已经均处理完成, 告诉smart router 该批次这个节点完成了
+                smart_router->notify_batch_finished(compute_node_id, params->thread_id, con_batch_id);
+                // 等待下一批事务到来，即 batch_finished 标志被重置
+                smart_router->wait_for_next_batch(compute_node_id, params->thread_id, con_batch_id);
+                con_batch_id++;
+                continue; // 重新进入循环，处理下一批事务
             }
             else assert(false);
         }
@@ -830,6 +826,9 @@ int main(int argc, char *argv[]) {
         break;
     case 10:
         std::cout << "\033[31m  k-router \033[0m" << std::endl;
+        break;
+    case 11:
+        std::cout << "\033[31m  k-router-pipeline \033[0m" << std::endl;
         break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
