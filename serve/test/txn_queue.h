@@ -86,6 +86,11 @@ public:
         return finished_;
     }
 
+    int get_process_batch_id() {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        return process_batch_id_;
+    }
+    
 private:
     std::queue<TxnQueueEntry*> txn_queue_;
     std::mutex queue_mutex_;
@@ -95,7 +100,7 @@ private:
     int max_queue_size_ = 1000; // max queue size
     bool finished_ = false;
 
-    int process_batch_id_ = 0;
+    int process_batch_id_ = -1; // the batch id this queue is processing
     bool batch_finished_ = false;
 };
 

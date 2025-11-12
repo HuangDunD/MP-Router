@@ -156,6 +156,7 @@ public:
           txn_pool_(txn_pool),
           txn_queues_(txn_queue),
           db_con_worker_threads(worker_threads),
+          worker_threads_(worker_threads),
           logger(logger_ptr),
           btree_service_(btree_service),
           metis_(metis),
@@ -192,12 +193,21 @@ public:
                 router_thread.detach();
             }
         }
-        else if (SYSTEM_MODE >= 9) {
+        else if (SYSTEM_MODE == 9 || SYSTEM_MODE == 10) {
             // SYSTEM_MODE 9 的 SmartRouter 线程启动逻辑（如果有不同的话）
             std::thread router_thread([this]() {
                 std::string thread_name = "SmartRouter";
                 pthread_setname_np(pthread_self(), thread_name.c_str());
                 this->run_router_batch_worker();
+            });
+            router_thread.detach();
+        }
+        else if (SYSTEM_MODE == 11) {
+            // SYSTEM_MODE 11 的 SmartRouter 线程启动逻辑（如果有不同的话）
+            std::thread router_thread([this]() {
+                std::string thread_name = "SmartRouter";
+                pthread_setname_np(pthread_self(), thread_name.c_str());
+                this->run_router_batch_worker_pipeline();
             });
             router_thread.detach();
         }
@@ -560,7 +570,7 @@ public:
             thread_conns_vec.push_back(conn);
         }
         while (true) {
-            logger->info("Router Worker: Batch ID " + std::to_string(batch_id) + " processing started.");
+            logger->info("Router Worker: Fetching batch " + std::to_string(batch_id) + " from txn pool.");
             auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize);
             if (txn_batch == nullptr || txn_batch->empty()) {
                 // 说明事务池已经运行完成
@@ -624,24 +634,82 @@ public:
         std::cout << "Router worker thread finished." << std::endl; 
     }
     
+    void run_router_batch_worker_pipeline() {
+        assert(SYSTEM_MODE == 11); 
+        // for routing needed db connections, each routing thread has its own connections
+        std::vector<pqxx::connection*> thread_conns_vec;
+        for(int i=0; i<ComputeNodeCount; i++) {
+            pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
+            thread_conns_vec.push_back(conn);
+        }
+        batch_id = -1; // 对于流水线模式，初始batch_id为-1，因为同步点get_route_primary_batch_schedule_v2中会先+1
+        while (true) {
+            // pipeline 模式下，batch_id在get_route_primary_batch_schedule_v2中自增, 这里相当于是拿的下一个batch的事务
+            logger->info("Router Worker: Fetching batch " + std::to_string(batch_id + 1) + " from txn pool.");
+            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize);
+            if (txn_batch == nullptr || txn_batch->empty()) {
+                // 说明事务池已经运行完成
+                for(auto txn_queue : txn_queues_) {
+                    txn_queue->set_finished();
+                }
+                break;
+            }
+            assert(txn_batch->size() == BatchRouterProcessSize);
+            
+            std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> reorder_route_queues;
+            if(SYSTEM_MODE == 11) {
+                reorder_route_queues = this->get_route_primary_batch_schedule_v2(txn_batch, thread_conns_vec);
+                assert(reorder_route_queues && reorder_route_queues->size() == ComputeNodeCount);
+            }
+            else assert(false);
+
+            // 开几个线程把reorder_route_queues合并到txn_queues_，运用线程池
+            for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+                auto node_q = std::move((*reorder_route_queues)[node_id]);
+                
+                threadpool.enqueue([this, node_id, q = std::move(node_q)]() mutable {
+                    txn_queues_[node_id]->set_process_batch_id(batch_id);
+                    // 合并reorder_route_queues到txn_queues_
+                    while (!q.empty()) {
+                        // std::cout << "Routing txn " << q.front()->tx_id << " to node " << node_id << std::endl;
+                        // 将事务放入对应的TxnQueue中
+                        txn_queues_[node_id]->push_txn(q.front());
+                        q.pop();
+                        routed_txn_cnt_per_node[node_id]++;
+                    }
+                    // 把该批的事务都分发完成，设置batch处理完成标志
+                    txn_queues_[node_id]->set_batch_finished();
+                });
+            }
+        }
+        std::cout << "Router worker thread finished." << std::endl; 
+    }
+    
     // 计算节点通知
-    void notify_batch_finished(node_id_t compute_node_id) { 
+    void notify_batch_finished(node_id_t compute_node_id, int thread_id, int con_batch_id) { 
         std::lock_guard<std::mutex> lock(batch_mutex);
         // 累计该计算节点完成的线程数
         if(++batch_finished_flags[compute_node_id] >= db_con_worker_threads) {
             batch_cv.notify_all();
         }
+        // logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + " Thread: " + std::to_string(thread_id) +
+        //              " finished batch " + std::to_string(batch_id) + 
+        //              ", finished threads: " + std::to_string(batch_finished_flags[compute_node_id]));
     }
 
     // 计算节点等待
-    void wait_for_next_batch(node_id_t compute_node_id, int con_batch_id) {
+    void wait_for_next_batch(node_id_t compute_node_id, int thread_id, int con_batch_id) {
         std::unique_lock<std::mutex> lock(batch_mutex);
         batch_cv.wait(lock, [this, compute_node_id, con_batch_id]() { 
             // 如果该计算节点的所有线程还没有完成该批次的处理，则继续等待
             // 如果batch_finished_flags被重置为0，说明可以开始下一批次的处理
-            if(batch_finished_flags[compute_node_id] == 0 || con_batch_id < batch_id) return true; 
+            if(con_batch_id < batch_id || txn_queues_[compute_node_id]->is_finished()) return true;// 如果整个系统跑完了，也直接结束，这个对于pipeline来说是一个情况，因为会缺少一个batch++；
             else return false; 
         });
+        // 说明可以开始下一批次的处理
+        // logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + 
+        //              " Thread: " + std::to_string(thread_id) +
+        //              " starts processing batch " + std::to_string(batch_id));
     }
 
 
@@ -908,7 +976,8 @@ private:
     // 配置
     Config cfg_{};
     Logger* logger;
-    int db_con_worker_threads;
+    int worker_threads_; // 路由工作线程数
+    int db_con_worker_threads; // 每个计算节点的数据库连接线程数
 
     // 一级缓存: hot hash (key -> HotEntry)
     std::unordered_map<DataItemKey, HotEntry, DataItemKeyHash> hot_key_map;
@@ -946,6 +1015,6 @@ private:
     // for batch routing
     std::mutex batch_mutex;
     std::condition_variable batch_cv;
-    std::atomic<int> batch_id{0};
+    int batch_id = 0;
     std::vector<int> batch_finished_flags;
 };
