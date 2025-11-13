@@ -70,6 +70,13 @@ struct RouterStatSnapshot {
     uint64_t metis_partial_and_ownership_entirely_unequal = 0;
     uint64_t metis_partial_and_ownership_cross_equal = 0;
     uint64_t metis_partial_and_ownership_cross_unequal = 0; 
+    // for time breakdown
+    double total_time_ms = 0.0;
+    double fetch_txn_from_pool_ms = 0.0;
+    double schedule_batch_total_ms = 0.0;
+    double preprocess_txn_ms, wait_last_batch_finish_ms = 0.0;
+    double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
+    double ownership_retrieval_and_devide_unconflicted_txn_ms, process_conflicted_txn_ms = 0.0;
 
     // Helpers
     void print_snapshot() const {
@@ -128,6 +135,18 @@ struct RouterStatSnapshot {
             std::cout << "  Metis Partial & Ownership Cross Unequal: " << metis_partial_and_ownership_cross_unequal << " Ownership Changes: " << ownership_changes_per_txn_type[18] << std::endl;
         }
         std::cout << "*********************************************" << std::endl;
+
+        std::cout << "-----SmartRouter Time Statistics (ms)-----:" << std::endl;
+        std::cout << "  Total Time: " << total_time_ms << " ms" << std::endl;
+        std::cout << "  Fetch Txn From Pool Time: " <<fetch_txn_from_pool_ms << " ms" << std::endl;
+        std::cout << "  Schedule Batch Total Time: " << schedule_batch_total_ms << " ms" << std::endl;
+        std::cout << "    Preprocess Txn Time: " << preprocess_txn_ms << " ms" << std::endl;
+        std::cout << "      Compute Conflict Time: " << compute_conflict_ms << " ms" << std::endl;
+        std::cout << "    Wait Last Batch Finish Time: " << wait_last_batch_finish_ms << " ms" << std::endl;
+        std::cout << "    Ownership Retrieval And Devide Unconflicted Txn Time: " 
+                  << ownership_retrieval_and_devide_unconflicted_txn_ms << " ms" << std::endl;
+        std::cout << "    Process Conflicted Txn Time: " << process_conflicted_txn_ms << " ms" << std::endl;
+        std::cout << "------------------------------------------" << std::endl;
         return;
     }
 };
@@ -188,6 +207,17 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.metis_partial_and_ownership_entirely_unequal = s.metis_partial_and_ownership_entirely_unequal.load(std::memory_order_relaxed);
     snap.metis_partial_and_ownership_cross_equal = s.metis_partial_and_ownership_cross_equal.load(std::memory_order_relaxed);
     snap.metis_partial_and_ownership_cross_unequal = s.metis_partial_and_ownership_cross_unequal.load(std::memory_order_relaxed);
+
+    // time breakdown
+    SmartRouter::TimeBreakdown& tdb = router->get_time_breakdown();
+    snap.total_time_ms = tdb.total_time_ms;
+    snap.fetch_txn_from_pool_ms = tdb.fetch_txn_from_pool_ms;
+    snap.schedule_batch_total_ms = tdb.schedule_batch_total_ms;
+    snap.preprocess_txn_ms = tdb.preprocess_txn_ms;
+    snap.compute_conflict_ms = tdb.compute_conflict_ms;
+    snap.wait_last_batch_finish_ms = tdb.wait_last_batch_finish_ms;
+    snap.ownership_retrieval_and_devide_unconflicted_txn_ms = tdb.ownership_retrieval_and_devide_unconflicted_txn_ms;
+    snap.process_conflicted_txn_ms = tdb.process_conflicted_txn_ms;
     return snap;
 }
 
@@ -268,6 +298,16 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
                                             (b.metis_partial_and_ownership_cross_equal - a.metis_partial_and_ownership_cross_equal) : 0;
     d.metis_partial_and_ownership_cross_unequal = (b.metis_partial_and_ownership_cross_unequal >= a.metis_partial_and_ownership_cross_unequal) ? 
                                             (b.metis_partial_and_ownership_cross_unequal - a.metis_partial_and_ownership_cross_unequal) : 0;
+    
+    // time breakdown
+    d.total_time_ms = b.total_time_ms - a.total_time_ms;
+    d.fetch_txn_from_pool_ms = b.fetch_txn_from_pool_ms - a.fetch_txn_from_pool_ms;
+    d.schedule_batch_total_ms = b.schedule_batch_total_ms - a.schedule_batch_total_ms;
+    d.preprocess_txn_ms = b.preprocess_txn_ms - a.preprocess_txn_ms;
+    d.compute_conflict_ms = b.compute_conflict_ms - a.compute_conflict_ms;
+    d.wait_last_batch_finish_ms = b.wait_last_batch_finish_ms - a.wait_last_batch_finish_ms;
+    d.ownership_retrieval_and_devide_unconflicted_txn_ms = b.ownership_retrieval_and_devide_unconflicted_txn_ms - a.ownership_retrieval_and_devide_unconflicted_txn_ms;
+    d.process_conflicted_txn_ms = b.process_conflicted_txn_ms - a.process_conflicted_txn_ms;
     return d;
 }
 

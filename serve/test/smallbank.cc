@@ -283,7 +283,7 @@ void generate_smallbank_txns_worker(thread_params* params) {
 }
 
 // this function runs smallbank transactions for one compute node
-void run_smallbank_txns(thread_params* params) {
+void run_smallbank_txns(thread_params* params, Logger* logger_) {
     // 设置线程名
     pthread_setname_np(pthread_self(), ("dbcon_n" + std::to_string(params->compute_node_id_connecter)
                                                 + "_t_" + std::to_string(params->thread_id)).c_str());
@@ -488,6 +488,7 @@ void run_smallbank_txns(thread_params* params) {
             
         } catch (const std::exception &e) {
             std::cerr << "Transaction failed: " << e.what() << std::endl;
+            logger_->info("Transaction failed: " + std::string(e.what()));
         }
         delete txn_entry; // free the txn entry memory
         delete txn;
@@ -955,7 +956,7 @@ int main(int argc, char *argv[]) {
             params->thread_id = j;
             params->thread_count = worker_threads;
             params->zipfian_theta = zipfian_theta;
-            db_conn_threads.emplace_back(run_smallbank_txns, params);
+            db_conn_threads.emplace_back(run_smallbank_txns, params, logger_);
         }
     }
 
