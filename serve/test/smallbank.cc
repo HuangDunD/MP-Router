@@ -67,10 +67,10 @@ void create_table(pqxx::connection *conn0) {
         pqxx::work txn(*conn0);
         txn.exec("CREATE unlogged TABLE checking (id INT, balance INT, city INT, name CHAR(500)) WITH (FILLFACTOR = 50)");
         txn.exec("CREATE unlogged TABLE savings (id INT, balance INT, city INT, name CHAR(500)) WITH (FILLFACTOR = 50)");
-        std::cout << "Tables created successfully." << std::endl;
         // create index
         txn.exec("CREATE INDEX idx_checking_id ON checking (id)");
         txn.exec("CREATE INDEX idx_savings_id ON savings (id)");
+        std::cout << "Tables created successfully." << std::endl;
         txn.commit();
     } catch (const std::exception &e) {
         std::cerr << "Error while creating table: " << e.what() << std::endl;
@@ -79,7 +79,8 @@ void create_table(pqxx::connection *conn0) {
         // pg not support
         pqxx::work txn(*conn0);
         // pre-extend table to avoid frequent page extend during txn processing
-        txn.exec("SELECT sys_extend('checking', 1000000)");
+        // txn.exec("SELECT sys_extend('checking', 1000000)");
+        std::cout << "Pre-extended checking table." << std::endl;
         txn.commit();
     }
     catch (const std::exception &e) {
@@ -89,7 +90,8 @@ void create_table(pqxx::connection *conn0) {
         // pg not support
         pqxx::work txn(*conn0);
         // pre-extend table to avoid frequent page extend during txn processing
-        txn.exec("SELECT sys_extend('savings', 1000000)");
+        // txn.exec("SELECT sys_extend('savings', 1000000)");
+        std::cout << "Pre-extended savings table." << std::endl;
         txn.commit();
     }
     catch (const std::exception &e) {
@@ -229,7 +231,8 @@ int create_perf_kwr_snapshot(pqxx::connection *conn0){
 void generate_perf_kwr_report(pqxx::connection *conn0, int start_snapshot_id, int end_snapshot_id, std::string file_name) {
     std::cout << "Generating performance report for snapshot IDs: " << start_snapshot_id << " to " << end_snapshot_id << std::endl;
     std::string report_sql = "SELECT * FROM perf.kwr_report_to_file(" + std::to_string(start_snapshot_id) + ", " 
-            + std::to_string(end_snapshot_id) + ", 'html', '/home/kingbase/hcy/MP-Router/build/serve/test/" + file_name + "')";
+            // + std::to_string(end_snapshot_id) + ", 'html', '/home/hcy/MP-Router/build/serve/test/" + file_name + "')";
+            + std::to_string(end_snapshot_id) + ", 'html', '/home/kingbase/MP-Router/kwr/" + file_name + "')";
     std::cout << "Report SQL: " << report_sql << std::endl;
     // Execute the SQL to generate the report
     try {
@@ -282,6 +285,52 @@ void generate_smallbank_txns_worker(thread_params* params) {
     txn_pool->stop_pool();
 }
 
+void run_smallbank_empty(thread_params* params, Logger* logger_){
+    node_id_t compute_node_id = params->compute_node_id_connecter;
+    TxnQueue* txn_queue = txn_queues[compute_node_id];
+
+    // init the thread connection for this compute node
+    auto con_str = DBConnection[compute_node_id];
+    auto con = new pqxx::connection(con_str);
+    if(!con->is_open()) {
+        std::cerr << "Failed to connect to database: " << con_str << std::endl;
+        assert(false);
+        exit(-1);
+    }
+
+    // init the thread id
+    thread_gid = params->thread_id;
+
+    int con_batch_id = 0;
+    while (true) {
+        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        if (txn_entries.empty()) {
+            if(txn_queue->is_finished()) {
+                // 说明该计算节点的事务队列已经均处理完成, 可以退出线程了
+                break;
+            }
+            else if(txn_queue->is_batch_finished()) {
+                // 说明该计算节点的该批事务已经均处理完成, 告诉smart router 该批次这个节点完成了
+                smart_router->notify_batch_finished(compute_node_id, params->thread_id, con_batch_id);
+                // 等待下一批事务到来，即 batch_finished 标志被重置
+                smart_router->wait_for_next_batch(compute_node_id, params->thread_id, con_batch_id);
+                con_batch_id++;
+                continue; // 重新进入循环，处理下一批事务
+            }
+            else assert(false);
+        }
+        for(auto& txn_entry : txn_entries) {
+            // just for statistics
+            exe_count++;
+            // statistics
+            exec_txn_cnt_per_node[compute_node_id]++;
+            delete txn_entry; // 直接删除事务对象
+        }
+    }
+    std::cout << "Empty txn worker thread " << params->thread_id << " on compute node " 
+              << compute_node_id << " finished processing." << std::endl;
+}
+
 // this function runs smallbank transactions for one compute node
 void run_smallbank_txns(thread_params* params, Logger* logger_) {
     // 设置线程名
@@ -309,11 +358,10 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
     // for (int i = 0; i < try_count; ++i) {
     int con_batch_id = 0;
     while (true) {
-        exe_count++;
         // ! Fetch a transaction from the global transaction pool
         // ! pay attention here, different system mode may have different txn fetching strategy, now all use pool front
-        TxnQueueEntry* txn_entry = txn_queue->pop_txn();
-        if (txn_entry == nullptr)  {
+        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        if (txn_entries.empty()) {
             if(txn_queue->is_finished()) {
                 // 说明该计算节点的事务队列已经均处理完成, 可以退出线程了
                 break;
@@ -329,170 +377,174 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
             else assert(false);
         }
 
-        // statistics
-        exec_txn_cnt_per_node[compute_node_id]++;
+        // 执行std::list<TxnQueueEntry*> txn_entries中的每个事务
+        for (auto& txn_entry : txn_entries) {
+            exe_count++;
+            // statistics
+            exec_txn_cnt_per_node[compute_node_id]++;
 
-        tx_id_t tx_id = txn_entry->tx_id;
-        int txn_type = txn_entry->txn_type;
-        itemkey_t account1 = txn_entry->accounts[0];
-        itemkey_t account2 = txn_entry->accounts[1];
-        int txn_decision_type = txn_entry->txn_decision_type;
-        
-        // Create a new transaction
-        while (con->is_open() == false) {
-            std::cerr << "Connection is broken, reconnecting..." << std::endl;
-            delete con;
-            con = new pqxx::connection(con_str);
-        }
-        pqxx::work* txn = new pqxx::work(*con);
-
-        // init the table ids and keys
-        std::vector<table_id_t>& tables = smallbank->get_table_ids_by_txn_type(txn_type);
-        assert(tables.size() > 0);
-        std::vector<itemkey_t> keys;
-        smallbank->get_keys_by_txn_type(txn_type, account1, account2, keys);
-        assert(tables.size() == keys.size());
-        std::vector<page_id_t> ctid_ret_page_ids; 
-        try {  
-            switch(txn_type) {
-                case 0: { // TxAmagamate
-                    int checking_balance, savings_balance;
-                    pqxx::result result1 = txn->exec("UPDATE checking SET balance = 0 WHERE id = " + 
-                            std::to_string(account1) + " RETURNING ctid, id, balance");
-                    if (!result1.empty()) {
-                        std::string ctid = result1[0]["ctid"].as<std::string>();
-                        int id = result1[0]["id"].as<int>();
-                        assert(id == account1);
-                        checking_balance = result1[0]["balance"].as<int>();
-                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        ctid_ret_page_ids.push_back(page_id);
-                    }
-                    pqxx::result result2 = txn->exec("UPDATE savings SET balance = 0 WHERE id = " + 
-                            std::to_string(account1) + " RETURNING ctid, id, balance");
-                    if (!result2.empty()) {
-                        std::string ctid = result2[0]["ctid"].as<std::string>();
-                        int id = result2[0]["id"].as<int>();
-                        int balance = result2[0]["balance"].as<int>();
-                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        savings_balance = result2[0]["balance"].as<int>();
-                        ctid_ret_page_ids.push_back(page_id);
-                    }
-                    int total = checking_balance + savings_balance;
-                    pqxx::result result3 = txn->exec("UPDATE checking SET balance = " + 
-                            std::to_string(total) + " WHERE id = " + std::to_string(account2) + 
-                            " RETURNING ctid, id, balance");
-                    if (!result3.empty()) {
-                        std::string ctid = result3[0]["ctid"].as<std::string>();
-                        int id = result3[0]["id"].as<int>();
-                        int balance = result3[0]["balance"].as<int>();
-                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        ctid_ret_page_ids.push_back(page_id);
-                    }
-                    break;
-                }
-                case 1: {  // TxSendPayment
-                    // 第一次更新：减少余额并获取位置信息
-                    pqxx::result result1 = txn->exec("UPDATE checking SET balance = balance - 10 WHERE id = " + 
-                            std::to_string(account1) + " RETURNING ctid, id, balance");
-                    if (!result1.empty()) {
-                        std::string ctid = result1[0]["ctid"].as<std::string>();
-                        int id = result1[0]["id"].as<int>();
-                        int balance = result1[0]["balance"].as<int>();
-                        // get and update page_id
-                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        ctid_ret_page_ids.push_back(page_id);
-                    }
-                    
-                    // 第二次更新：增加余额并获取位置信息
-                    pqxx::result result2 = txn->exec("UPDATE checking SET balance = balance + 10 WHERE id = " + 
-                            std::to_string(account2) + " RETURNING ctid, id, balance");
-                    if (!result2.empty()) {
-                        std::string ctid = result2[0]["ctid"].as<std::string>();
-                        int id = result2[0]["id"].as<int>();
-                        int balance = result2[0]["balance"].as<int>();
-                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        ctid_ret_page_ids.push_back(page_id);
-                    }
-                    break;
-                }
-                case 2: {  // TxDepositChecking
-                    pqxx::result result = txn->exec("UPDATE checking SET balance = balance + 100 WHERE id = " + 
-                            std::to_string(account1) + " RETURNING ctid, id, balance");
-                    if (!result.empty()) {
-                        std::string ctid = result[0]["ctid"].as<std::string>();
-                        int id = result[0]["id"].as<int>();
-                        int balance = result[0]["balance"].as<int>();
-                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        ctid_ret_page_ids.push_back(page_id);
-                    }
-                    break;
-                }
-                case 3: {  // TxWriteCheck
-                    pqxx::result result = txn->exec("Select balance, ctid, id FROM savings WHERE id = " + 
-                            std::to_string(account1));
-                    pqxx::result result2 = txn->exec("Update checking SET balance = balance - 50 WHERE id = " + 
-                            std::to_string(account1) + " RETURNING ctid, id, balance");
-                    if (!result.empty()) {
-                        int balance = result[0]["balance"].as<int>();
-                        std::string ctid = result[0]["ctid"].as<std::string>();
-                        int id = result[0]["id"].as<int>();
-                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        ctid_ret_page_ids.push_back(page_id);
-                    }
-                    if (!result2.empty()) {
-                        std::string ctid = result2[0]["ctid"].as<std::string>();
-                        int id = result2[0]["id"].as<int>();
-                        int balance = result2[0]["balance"].as<int>();
-                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        ctid_ret_page_ids.push_back(page_id);
-                    }
-                    break;
-                }
-                case 4: { // TxBalance 
-                    pqxx::result result = txn->exec("SELECT id, balance, ctid FROM checking WHERE id = " + 
-                            std::to_string(account1));
-                    pqxx::result result2 = txn->exec("SELECT id, balance, ctid FROM savings WHERE id = " + 
-                            std::to_string(account1));
-                    if (!result.empty()) {
-                        std::string ctid = result[0]["ctid"].as<std::string>();
-                        int id = result[0]["id"].as<int>();
-                        int balance = result[0]["balance"].as<int>();
-                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        ctid_ret_page_ids.push_back(page_id);
-                    } 
-                    if (!result2.empty()) {
-                        std::string ctid = result2[0]["ctid"].as<std::string>();
-                        int id = result2[0]["id"].as<int>();
-                        int balance = result2[0]["balance"].as<int>();
-                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        ctid_ret_page_ids.push_back(page_id);
-                    }
-                    break;
-                }
-                case 5: { // TxTransactSavings
-                    pqxx::result result = txn->exec("UPDATE savings SET balance = balance + 20 WHERE id = " + 
-                            std::to_string(account1) + " RETURNING ctid, id, balance");
-                    if (!result.empty()) {
-                        std::string ctid = result[0]["ctid"].as<std::string>();
-                        int id = result[0]["id"].as<int>();
-                        int balance = result[0]["balance"].as<int>();
-                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                        ctid_ret_page_ids.push_back(page_id);
-                    }
-                    break;
-                }
-            }
-            txn->commit();
-            // update the smart router page map if needed
-            if(smart_router) smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables), keys, ctid_ret_page_ids, compute_node_id);
+            tx_id_t tx_id = txn_entry->tx_id;
+            int txn_type = txn_entry->txn_type;
+            itemkey_t account1 = txn_entry->accounts[0];
+            itemkey_t account2 = txn_entry->accounts[1];
+            int txn_decision_type = txn_entry->txn_decision_type;
             
-        } catch (const std::exception &e) {
-            std::cerr << "Transaction failed: " << e.what() << std::endl;
-            logger_->info("Transaction failed: " + std::string(e.what()));
+            // Create a new transaction
+            while (con->is_open() == false) {
+                std::cerr << "Connection is broken, reconnecting..." << std::endl;
+                delete con;
+                con = new pqxx::connection(con_str);
+            }
+            pqxx::work* txn = new pqxx::work(*con);
+
+            // init the table ids and keys
+            std::vector<table_id_t>& tables = smallbank->get_table_ids_by_txn_type(txn_type);
+            assert(tables.size() > 0);
+            std::vector<itemkey_t> keys;
+            smallbank->get_keys_by_txn_type(txn_type, account1, account2, keys);
+            assert(tables.size() == keys.size());
+            std::vector<page_id_t> ctid_ret_page_ids; 
+            try {  
+                switch(txn_type) {
+                    case 0: { // TxAmagamate
+                        int checking_balance, savings_balance;
+                        pqxx::result result1 = txn->exec("UPDATE checking SET balance = 0 WHERE id = " + 
+                                std::to_string(account1) + " RETURNING ctid, id, balance");
+                        if (!result1.empty()) {
+                            std::string ctid = result1[0]["ctid"].as<std::string>();
+                            int id = result1[0]["id"].as<int>();
+                            assert(id == account1);
+                            checking_balance = result1[0]["balance"].as<int>();
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                            ctid_ret_page_ids.push_back(page_id);
+                        }
+                        pqxx::result result2 = txn->exec("UPDATE savings SET balance = 0 WHERE id = " + 
+                                std::to_string(account1) + " RETURNING ctid, id, balance");
+                        if (!result2.empty()) {
+                            std::string ctid = result2[0]["ctid"].as<std::string>();
+                            int id = result2[0]["id"].as<int>();
+                            int balance = result2[0]["balance"].as<int>();
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                            savings_balance = result2[0]["balance"].as<int>();
+                            ctid_ret_page_ids.push_back(page_id);
+                        }
+                        int total = checking_balance + savings_balance;
+                        pqxx::result result3 = txn->exec("UPDATE checking SET balance = " + 
+                                std::to_string(total) + " WHERE id = " + std::to_string(account2) + 
+                                " RETURNING ctid, id, balance");
+                        if (!result3.empty()) {
+                            std::string ctid = result3[0]["ctid"].as<std::string>();
+                            int id = result3[0]["id"].as<int>();
+                            int balance = result3[0]["balance"].as<int>();
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                            ctid_ret_page_ids.push_back(page_id);
+                        }
+                        break;
+                    }
+                    case 1: {  // TxSendPayment
+                        // 第一次更新：减少余额并获取位置信息
+                        pqxx::result result1 = txn->exec("UPDATE checking SET balance = balance - 10 WHERE id = " + 
+                                std::to_string(account1) + " RETURNING ctid, id, balance");
+                        if (!result1.empty()) {
+                            std::string ctid = result1[0]["ctid"].as<std::string>();
+                            int id = result1[0]["id"].as<int>();
+                            int balance = result1[0]["balance"].as<int>();
+                            // get and update page_id
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                            ctid_ret_page_ids.push_back(page_id);
+                        }
+                        
+                        // 第二次更新：增加余额并获取位置信息
+                        pqxx::result result2 = txn->exec("UPDATE checking SET balance = balance + 10 WHERE id = " + 
+                                std::to_string(account2) + " RETURNING ctid, id, balance");
+                        if (!result2.empty()) {
+                            std::string ctid = result2[0]["ctid"].as<std::string>();
+                            int id = result2[0]["id"].as<int>();
+                            int balance = result2[0]["balance"].as<int>();
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                            ctid_ret_page_ids.push_back(page_id);
+                        }
+                        break;
+                    }
+                    case 2: {  // TxDepositChecking
+                        pqxx::result result = txn->exec("UPDATE checking SET balance = balance + 100 WHERE id = " + 
+                                std::to_string(account1) + " RETURNING ctid, id, balance");
+                        if (!result.empty()) {
+                            std::string ctid = result[0]["ctid"].as<std::string>();
+                            int id = result[0]["id"].as<int>();
+                            int balance = result[0]["balance"].as<int>();
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                            ctid_ret_page_ids.push_back(page_id);
+                        }
+                        break;
+                    }
+                    case 3: {  // TxWriteCheck
+                        pqxx::result result = txn->exec("Select balance, ctid, id FROM savings WHERE id = " + 
+                                std::to_string(account1));
+                        pqxx::result result2 = txn->exec("Update checking SET balance = balance - 50 WHERE id = " + 
+                                std::to_string(account1) + " RETURNING ctid, id, balance");
+                        if (!result.empty()) {
+                            int balance = result[0]["balance"].as<int>();
+                            std::string ctid = result[0]["ctid"].as<std::string>();
+                            int id = result[0]["id"].as<int>();
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                            ctid_ret_page_ids.push_back(page_id);
+                        }
+                        if (!result2.empty()) {
+                            std::string ctid = result2[0]["ctid"].as<std::string>();
+                            int id = result2[0]["id"].as<int>();
+                            int balance = result2[0]["balance"].as<int>();
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                            ctid_ret_page_ids.push_back(page_id);
+                        }
+                        break;
+                    }
+                    case 4: { // TxBalance 
+                        pqxx::result result = txn->exec("SELECT id, balance, ctid FROM checking WHERE id = " + 
+                                std::to_string(account1));
+                        pqxx::result result2 = txn->exec("SELECT id, balance, ctid FROM savings WHERE id = " + 
+                                std::to_string(account1));
+                        if (!result.empty()) {
+                            std::string ctid = result[0]["ctid"].as<std::string>();
+                            int id = result[0]["id"].as<int>();
+                            int balance = result[0]["balance"].as<int>();
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                            ctid_ret_page_ids.push_back(page_id);
+                        } 
+                        if (!result2.empty()) {
+                            std::string ctid = result2[0]["ctid"].as<std::string>();
+                            int id = result2[0]["id"].as<int>();
+                            int balance = result2[0]["balance"].as<int>();
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                            ctid_ret_page_ids.push_back(page_id);
+                        }
+                        break;
+                    }
+                    case 5: { // TxTransactSavings
+                        pqxx::result result = txn->exec("UPDATE savings SET balance = balance + 20 WHERE id = " + 
+                                std::to_string(account1) + " RETURNING ctid, id, balance");
+                        if (!result.empty()) {
+                            std::string ctid = result[0]["ctid"].as<std::string>();
+                            int id = result[0]["id"].as<int>();
+                            int balance = result[0]["balance"].as<int>();
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
+                            ctid_ret_page_ids.push_back(page_id);
+                        }
+                        break;
+                    }
+                }
+                txn->commit();
+                // update the smart router page map if needed
+                if(smart_router) smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables), keys, ctid_ret_page_ids, compute_node_id);
+                
+            } catch (const std::exception &e) {
+                std::cerr << "Transaction failed: " << e.what() << std::endl;
+                logger_->info("Transaction failed: " + std::string(e.what()));
+            }
+            delete txn_entry; // free the txn entry memory
+            delete txn;
+            // std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        delete txn_entry; // free the txn entry memory
-        delete txn;
-        // std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     std::cout << "Finished running smallbank transactions." << std::endl;
 }
@@ -868,6 +920,9 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
 
+    // DBConnection.push_back("host=10.10.2.41 port=54321 user=system password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
+
     DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
     DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
     ComputeNodeCount = DBConnection.size();
@@ -907,7 +962,7 @@ int main(int argc, char *argv[]) {
     txn_pool = new TxnPool(TxnPoolMaxSize); 
     // initialize the transaction queues for each compute node connection
     for (int i = 0; i < ComputeNodeCount; i++) {
-        txn_queues.push_back(new TxnQueue(i));
+        txn_queues.push_back(new TxnQueue(i, TxnQueueMaxSize));
     }
     // Initialize NewMetis
     NewMetis* metis = new NewMetis(logger_);
@@ -957,6 +1012,8 @@ int main(int argc, char *argv[]) {
             params->thread_count = worker_threads;
             params->zipfian_theta = zipfian_theta;
             db_conn_threads.emplace_back(run_smallbank_txns, params, logger_);
+            // 测试路由吞吐量
+            // db_conn_threads.emplace_back(run_smallbank_empty, params, logger_);
         }
     }
 

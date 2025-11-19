@@ -89,6 +89,7 @@ public:
         double fetch_txn_from_pool_ms = 0.0;
         double schedule_batch_total_ms = 0.0;
         double preprocess_txn_ms, wait_last_batch_finish_ms = 0.0;
+        double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
         double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
         double ownership_retrieval_and_devide_unconflicted_txn_ms, process_conflicted_txn_ms = 0.0;
     };
@@ -270,6 +271,8 @@ public:
     inline void update_key_page(TxnQueueEntry* txn, std::vector<table_id_t>& table_ids, std::vector<itemkey_t>& keys, 
             std::vector<page_id_t> ctid_ret_pages, node_id_t routed_node_id) { // txn_type for SYSTEM_MODE 8
         // 这个地方可能ctid_ret_pages的数量不等于keys, 因为这个事务可能触发了回滚, 此时需要将table_ids, keys截断一下
+        if(txn->accessed_page_ids.size() == 0) return; // 说明没有记录访问的页面，可能是system_mode 4无需维护key-page映射，直接返回
+        assert(txn->accessed_page_ids.size() == keys.size());
         if(table_ids.size() != ctid_ret_pages.size() || keys.size() != ctid_ret_pages.size()) {
             std::cerr << "Warning: Mismatched sizes in update_key_page. table_ids: " << table_ids.size() 
                       << ", keys: " << keys.size() << ", ctid_ret_pages: " << ctid_ret_pages.size() << std::endl;
@@ -280,12 +283,19 @@ public:
         }
         // assert(table_ids.size() == keys.size() && keys.size() == ctid_ret_pages.size());
         for(size_t i=0; i<table_ids.size(); i++) {
-            std::lock_guard<std::mutex> lock(hot_mutex_);
-            auto it = hot_key_map.find({table_ids[i], keys[i]});
-            if (it != hot_key_map.end()) {
-                auto original_page = it->second.page;
-                if(it->second.page != ctid_ret_pages[i]){ // 只有在page变化时才更新
-                    // 这个地方应该是访问了原来的页面和新的页面, 都变成了这个节点的所有                    
+            page_id_t original_page = txn->accessed_page_ids[i];
+            if(original_page == ctid_ret_pages[i]) {
+                // 说明访问的页面没有变化，直接更新所有权即可
+                // 仅访问了原来的页面, 仍然是这个节点的所有权
+                ownership_table_->set_owner(txn, table_ids[i], keys[i], original_page, routed_node_id); 
+                stats_.page_update_cnt++;
+            }
+            else {
+                // 数据所在位置发生了变化, 需要更新key-page映射
+                // 这个地方应该是访问了原来的页面和新的页面, 都变成了这个节点的所有                    
+                std::unique_lock<std::shared_mutex> lock(hot_mutex_);
+                auto it = hot_key_map.find({table_ids[i], keys[i]});
+                if (it != hot_key_map.end()) {
                     ownership_table_->set_owner(txn, table_ids[i], keys[i], ctid_ret_pages[i], routed_node_id);
                     ownership_table_->set_owner(txn, table_ids[i], keys[i], original_page, routed_node_id); 
                     it->second.page = ctid_ret_pages[i];
@@ -302,20 +312,15 @@ public:
                                     " at node " + std::to_string(routed_node_id));
                 #endif 
                 }
-                else{
-                    // 仅访问了原来的页面, 仍然是这个节点的所有权
-                    ownership_table_->set_owner(txn, table_ids[i], keys[i], original_page, routed_node_id); 
-                    stats_.page_update_cnt++;
-                }
-                // 更新 last_node
-                it->second.key_access_last_node = routed_node_id;
+
             }
+            // !pay attention: 这里不在更新key_access_last_node, 这个只是对SYSTEM_MODE 5有意义，这里先不考虑了
         }
     };
 
     // init key-page mapping when load data
     inline void initial_key_page(table_id_t table_id, itemkey_t key, page_id_t page) {
-        std::lock_guard<std::mutex> lock(hot_mutex_);
+        std::unique_lock<std::shared_mutex> lock(hot_mutex_);
         auto it = hot_key_map.find({table_id, key});
         if (it == hot_key_map.end()) {
             // 插入新条目
@@ -363,7 +368,7 @@ public:
 
     void getKeyOriginalPages(std::vector<table_id_t>& table_ids, std::vector<itemkey_t>& keys, std::vector<page_id_t>& original_pages) {
         original_pages.clear();
-        std::lock_guard<std::mutex> lock(hot_mutex_);
+        std::shared_lock<std::shared_mutex> lock(hot_mutex_);
         for(size_t i=0; i<keys.size(); i++) {
             auto it = hot_key_map.find({table_ids[i], keys[i]});
             if (it != hot_key_map.end()) {
@@ -376,7 +381,7 @@ public:
     }
 
     // 根据table_ids和keys进行路由，返回目标节点ID
-    SmartRouterResult get_route_primary(tx_id_t tx_id, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, 
+    SmartRouterResult get_route_primary(TxnQueueEntry* txn, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, 
             std::vector<pqxx::connection *> &thread_conns);
             
     // ! core code, propose the transaction scheduling
@@ -415,7 +420,7 @@ public:
             // 获取涉及的页面列表
             std::unordered_map<uint64_t, node_id_t> table_page_ids; // 高32位存table_id，低32位存page_id
             for (size_t i = 0; i < accounts_keys.size(); ++i) {
-                auto entry = lookup(table_ids[i], accounts_keys[i], thread_conns);
+                auto entry = lookup(txn, table_ids[i], accounts_keys[i], thread_conns);
                 // 计算page id
                 if (entry.page == kInvalidPageId) {
                     assert(false); // 这里不应该失败
@@ -466,8 +471,12 @@ public:
     struct SchedulingCandidateTxn {
         TxnQueueEntry* txn;
         std::vector<uint64_t> involved_pages;
+        // 在这里面存储对应页面的metis node和ownership node, 这样可以避免全局维护一个page_to_node_map，对map修改需要mutex锁
+        std::vector<node_id_t> page_to_metis_node_vec;
+        std::vector<node_id_t> page_to_ownership_node_vec;
         std::unordered_map<node_id_t, double> node_benefit_map;
         node_id_t will_route_node; // 最终决定路由到的节点
+        bool is_scheduled = false; // 是否已经被调度, 避免重复调度
     };
 
     std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> get_route_primary_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch,
@@ -486,85 +495,101 @@ public:
             thread_conns_vec.push_back(conn);
         }
         while (true) {
-            TxnQueueEntry* txn_entry = txn_pool_->fetch_txn_from_poolfront();
-            if (txn_entry == nullptr) {
+            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize);
+            if (txn_batch == nullptr || txn_batch->empty()) {
                 // 说明事务池已经运行完成
                 for(auto txn_queue : txn_queues_) {
                     txn_queue->set_finished();
                 }
                 break;
             }
-            tx_id_t tx_id = txn_entry->tx_id;
-            int txn_type = txn_entry->txn_type;
-            itemkey_t account1 = txn_entry->accounts[0];
-            itemkey_t account2 = txn_entry->accounts[1];
 
-            // Init the routed node id
-            int routed_node_id = 0; // Default node ID
-            
-            // ! decide the routed_node_id based on SYSTEM_MODE
-            // keys 只和 account1/account2有关，不能静态化，但可以用局部变量，每次只构造一份
-            std::vector<itemkey_t> keys; 
-            smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
-            // table_ids 静态化后只需引用
-            const std::vector<table_id_t>& table_ids = TABLE_IDS_ARR[txn_type < 6 ? txn_type : 0];
-            #if LOG_ACCESS_KEY
-                // 写日志记录一下
-                std::unique_lock<std::mutex> lock(log_mutex);
-                if(access_key_log_file.is_open()) {
-                    int i=0;
-                    for(i=0; i<table_ids.size()-1; i++) access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "},";
-                    access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "}" << std::endl;
-                    access_key_log_file.flush();
+            std::vector<std::vector<TxnQueueEntry*>> node_routed_txns(ComputeNodeCount);
+            for(auto& txn_entry : *txn_batch) {
+                tx_id_t tx_id = txn_entry->tx_id;
+                int txn_type = txn_entry->txn_type;
+                itemkey_t account1 = txn_entry->accounts[0];
+                itemkey_t account2 = txn_entry->accounts[1];
+
+                // Init the routed node id
+                int routed_node_id = 0; // Default node ID
+                
+                // ! decide the routed_node_id based on SYSTEM_MODE
+                // keys 只和 account1/account2有关，不能静态化，但可以用局部变量，每次只构造一份
+                std::vector<itemkey_t> keys; 
+                smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
+                // table_ids 静态化后只需引用
+                const std::vector<table_id_t>& table_ids = TABLE_IDS_ARR[txn_type < 6 ? txn_type : 0];
+                #if LOG_ACCESS_KEY
+                    // 写日志记录一下
+                    std::unique_lock<std::mutex> lock(log_mutex);
+                    if(access_key_log_file.is_open()) {
+                        int i=0;
+                        for(i=0; i<table_ids.size()-1; i++) access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "},";
+                        access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "}" << std::endl;
+                        access_key_log_file.flush();
+                    }
+                    for (auto key: keys) key_freq[key]++;
+                    lock.unlock();
+                #endif
+
+                if(SYSTEM_MODE == 0) {
+                    routed_node_id = rand() % 2; // Randomly select node ID for system mode 0
                 }
-                for (auto key: keys) key_freq[key]++;
-                lock.unlock();
-            #endif
-
-            if(SYSTEM_MODE == 0) {
-                routed_node_id = rand() % 2; // Randomly select node ID for system mode 0
-            }
-            else if(SYSTEM_MODE == 1){
-                if(txn_type == 0 || txn_type == 1) {
-                    int node1 = account1 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
-                    int node2 = account2 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
-                    if(node1 == node2) {
-                        routed_node_id = node1;
+                else if(SYSTEM_MODE == 1){
+                    if(txn_type == 0 || txn_type == 1) {
+                        int node1 = account1 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
+                        int node2 = account2 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
+                        if(node1 == node2) {
+                            routed_node_id = node1;
+                        }
+                        else {
+                            // randomly pick one
+                            routed_node_id = (rand() % 2 == 0) ? node1 : node2;
+                        }
                     }
                     else {
-                        // randomly pick one
-                        routed_node_id = (rand() % 2 == 0) ? node1 : node2;
+                        routed_node_id = account1 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
                     }
                 }
-                else {
-                    routed_node_id = account1 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
+                else if(SYSTEM_MODE == 2) {
+                    // get page_id from checking_page_map
+                    routed_node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
                 }
-            }
-            else if(SYSTEM_MODE == 2) {
-                // get page_id from checking_page_map
-                routed_node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
-            }
-            else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8) {
-                SmartRouter::SmartRouterResult result = this->get_route_primary(tx_id, const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
-                if(result.success) {
-                    routed_node_id = result.smart_router_id;
-                    if(SYSTEM_MODE == 3) txn_entry->txn_decision_type = result.sys_3_decision_type; 
-                    else if(SYSTEM_MODE == 8) txn_entry->txn_decision_type = result.sys_8_decision_type; 
+                else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8) {
+                    SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
+                    if(result.success) {
+                        routed_node_id = result.smart_router_id;
+                        if(SYSTEM_MODE == 3) txn_entry->txn_decision_type = result.sys_3_decision_type; 
+                        else if(SYSTEM_MODE == 8) txn_entry->txn_decision_type = result.sys_8_decision_type; 
+                    }
+                    else {
+                        // fallback to random
+                        routed_node_id = rand() % ComputeNodeCount;
+                        std::cerr << "Warning: SmartRouter get_route_primary failed: " << result.error_message << std::endl;
+                    }
                 }
-                else {
-                    // fallback to random
-                    routed_node_id = rand() % ComputeNodeCount;
-                    std::cerr << "Warning: SmartRouter get_route_primary failed: " << result.error_message << std::endl;
+                else if(SYSTEM_MODE == 4) {
+                    routed_node_id = 0; // All to node 0 for single
                 }
-            }
-            else if(SYSTEM_MODE == 4) {
-                routed_node_id = 0; // All to node 0 for single
-            }
-            else assert(false); // unknown mode
+                else assert(false); // unknown mode
 
-            // 将事务放入对应的TxnQueue中
-            txn_queues_[routed_node_id]->push_txn(txn_entry);
-            routed_txn_cnt_per_node[routed_node_id]++;
+                // 将事务放入对应的TxnQueue中
+                node_routed_txns[routed_node_id].push_back(txn_entry);
+                if(node_routed_txns[routed_node_id].size() >= BatchExecutorPOPTxnSize){
+                    txn_queues_[routed_node_id]->push_txn_back_batch(node_routed_txns[routed_node_id]);
+                    routed_txn_cnt_per_node[routed_node_id] += node_routed_txns[routed_node_id].size();
+                    node_routed_txns[routed_node_id].clear();
+                }
+            }
+            // push剩余的事务
+            for(int node_id = 0; node_id < ComputeNodeCount; node_id++){
+                if(!node_routed_txns[node_id].empty()){
+                    txn_queues_[node_id]->push_txn_back_batch(node_routed_txns[node_id]);
+                    routed_txn_cnt_per_node[node_id] += node_routed_txns[node_id].size();
+                    node_routed_txns[node_id].clear();
+                }
+            }
         }
         std::cout << "Router worker thread finished." << std::endl;
     }
@@ -675,6 +700,7 @@ public:
                 for(auto txn_queue : txn_queues_) {
                     txn_queue->set_finished();
                 }
+                batch_cv.notify_all(); // 通知所有等待的计算节点线程结束
                 break;
             }
             assert(txn_batch->size() == BatchRouterProcessSize);
@@ -698,25 +724,6 @@ public:
                 txn_queues_[node_id]->set_batch_finished();
             }
 
-            // // 开几个线程把reorder_route_queues合并到txn_queues_，运用线程池
-            // for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
-            //     auto node_q = std::move((*reorder_route_queues)[node_id]);
-                
-            //     threadpool.enqueue([this, node_id, q = std::move(node_q)]() mutable {
-            //         txn_queues_[node_id]->set_process_batch_id(batch_id);
-            //         // 合并reorder_route_queues到txn_queues_
-            //         while (!q.empty()) {
-            //             // std::cout << "Routing txn " << q.front()->tx_id << " to node " << node_id << std::endl;
-            //             // 将事务放入对应的TxnQueue中
-            //             txn_queues_[node_id]->push_txn(q.front());
-            //             q.pop();
-            //             routed_txn_cnt_per_node[node_id]++;
-            //         }
-            //         // 把该批的事务都分发完成，设置batch处理完成标志
-            //         txn_queues_[node_id]->set_batch_finished();
-            //     });
-            // }
-
             // 计时
             clock_gettime(CLOCK_REALTIME, &loop_end_time);
             time_stats_.total_time_ms +=
@@ -732,10 +739,10 @@ public:
         if(++batch_finished_flags[compute_node_id] >= db_con_worker_threads) {
             batch_cv.notify_all();
         }
-        if(WarmupEnd)
-        logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + " Thread: " + std::to_string(thread_id) +
-                     " finished batch " + std::to_string(batch_id) + 
-                     ", finished threads: " + std::to_string(batch_finished_flags[compute_node_id]));
+        // if(WarmupEnd)
+        // logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + " Thread: " + std::to_string(thread_id) +
+        //              " finished batch " + std::to_string(batch_id) + 
+        //              ", finished threads: " + std::to_string(batch_finished_flags[compute_node_id]));
     }
 
     // 计算节点等待
@@ -748,10 +755,10 @@ public:
             else return false; 
         });
         // 说明可以开始下一批次的处理
-        if(WarmupEnd)
-        logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + 
-                     " Thread: " + std::to_string(thread_id) +
-                     " starts processing batch " + std::to_string(batch_id));
+        // if(WarmupEnd)
+        // logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + 
+        //              " Thread: " + std::to_string(thread_id) +
+        //              " starts processing batch " + std::to_string(batch_id));
     }
 
 
@@ -792,6 +799,9 @@ public:
     }
 
 private:
+
+    std::vector<double> compute_load_balance_penalty_weights();
+
     // 重置事务/路由相关的统计信息（线程安全）
     void reset_txn_statistics() {
         stats_.change_page_cnt.store(0, std::memory_order_relaxed);
@@ -808,8 +818,8 @@ private:
 
     // 查找 key。若在 hot hash 中找到，立即返回 page。
     // 否则可能查 B+tree 提示（在 .cc 实现），未命中返回 std::nullopt。
-    inline HotEntry lookup(table_id_t table_id, itemkey_t key, std::vector<pqxx::connection *> &thread_conns) {
-        std::lock_guard<std::mutex> lock(hot_mutex_);
+    inline HotEntry lookup(TxnQueueEntry* txn, table_id_t table_id, itemkey_t key, std::vector<pqxx::connection *> &thread_conns) {
+        std::shared_lock<std::shared_mutex> lock(hot_mutex_);
         auto it = hot_key_map.find({table_id, key});
         if (it != hot_key_map.end()) {
             // hot hash 命中
@@ -819,6 +829,7 @@ private:
             if (it->second.lru_it != hot_lru_.begin()) {
                 hot_lru_.splice(hot_lru_.begin(), hot_lru_, it->second.lru_it);
             }
+            txn->accessed_page_ids.push_back(it->second.page); // 记录访问过的page id
             return it->second;
         } else {
             // hot hash 未命中
@@ -832,6 +843,7 @@ private:
                 entry = insert_or_victim_hot(table_id, key, btree_page);
             }
             insert_batch_bnode(table_id, return_node);
+            txn->accessed_page_ids.push_back(entry.page); // 记录访问过的page id
             return entry;
         }
     }
@@ -1028,7 +1040,7 @@ private:
     // 一级缓存: hot hash (key -> HotEntry)
     std::unordered_map<DataItemKey, HotEntry, DataItemKeyHash> hot_key_map;
     std::list<DataItemKey> hot_lru_; // 前端为最新，后端为最旧
-    std::mutex hot_mutex_;
+    std::shared_mutex hot_mutex_;
 
     // 二级缓存: B+ 树的非叶子节点, 在路由层通过维护B+树的中间节点，通过pageinspect插件访问B+树的叶子节点获取key->page的映射
     BtreeIndexService *btree_service_;

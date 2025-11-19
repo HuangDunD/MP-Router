@@ -80,9 +80,9 @@
             "program": "${workspaceFolder}/build/serve/test/smallbank_test",
             "args": [
                 "--system-mode",
-                "11", 
+                "4", 
                 "--access-pattern",
-                "1",
+                "0",
                 "--zipfian-theta",
                 "0.9",
                 "--account-count",

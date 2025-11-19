@@ -1,6 +1,7 @@
 #include "smart_router.h"
+#include "indexed_priority_queue.h"
 
-SmartRouter::SmartRouterResult SmartRouter::get_route_primary(tx_id_t tx_id, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, 
+SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, 
         std::vector<pqxx::connection *> &thread_conns) {
     SmartRouterResult result;
     if (table_ids.size() != keys.size() || table_ids.empty()) {
@@ -17,7 +18,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(tx_id_t tx_id, std
     page_to_node_map.reserve(keys.size());
     for (size_t i = 0; i < keys.size(); ++i) {
         if(SYSTEM_MODE == 3) {
-            auto entry = lookup(table_ids[i], keys[i], thread_conns);
+            auto entry = lookup(txn, table_ids[i], keys[i], thread_conns);
             // 计算page id
             if (entry.page == kInvalidPageId) {
                 result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
@@ -35,7 +36,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(tx_id_t tx_id, std
             // table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | region_id);
         }
         else if(SYSTEM_MODE == 5) {
-            auto entry = lookup(table_ids[i], keys[i], thread_conns);
+            auto entry = lookup(txn, table_ids[i], keys[i], thread_conns);
             // 如果是模式5，则统计key_access_last_node出现的次数, 按照上次key访问节点进行路由
             if (entry.key_access_last_node != -1) {
                 node_count_basedon_key_access_last[entry.key_access_last_node]++;
@@ -47,7 +48,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(tx_id_t tx_id, std
             table_key_id[table_key] = -1; // 初始化
         }
         else if(SYSTEM_MODE == 7) {
-            auto entry = lookup(table_ids[i], keys[i], thread_conns);
+            auto entry = lookup(txn, table_ids[i], keys[i], thread_conns);
             // 计算page id
             if (entry.page == kInvalidPageId) {
                 result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
@@ -63,7 +64,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(tx_id_t tx_id, std
         }
         else if(SYSTEM_MODE == 8) {
             // 计算page id
-            auto entry = lookup(table_ids[i], keys[i], thread_conns);
+            auto entry = lookup(txn, table_ids[i], keys[i], thread_conns);
             if (entry.page == kInvalidPageId) {
                 result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
                                     ", key=" + std::to_string(keys[i]) + ")";
@@ -461,7 +462,7 @@ std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_
     for (auto& txn : *txn_batch) { 
         auto txn_type = txn->txn_type;
         auto tx_id = txn->tx_id;
-        SchedulingCandidateTxn* scheduling_candidate_txn = new SchedulingCandidateTxn{txn, {}, {}, -1};
+        SchedulingCandidateTxn* scheduling_candidate_txn = new SchedulingCandidateTxn{txn, {}, {}, {}, {}, -1};
         txid_to_txn_map[tx_id] = scheduling_candidate_txn;
         itemkey_t account1 = txn->accounts[0];
         itemkey_t account2 = txn->accounts[1];
@@ -474,7 +475,7 @@ std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_
         // 获取涉及的页面列表
         std::unordered_map<uint64_t, node_id_t> table_page_ids; // 高32位存table_id，低32位存page_id
         for (size_t i = 0; i < accounts_keys.size(); ++i) {
-            auto entry = lookup(table_ids[i], accounts_keys[i], thread_conns);
+            auto entry = lookup(txn, table_ids[i], accounts_keys[i], thread_conns);
             // 计算page id
             if (entry.page == kInvalidPageId) {
                 assert(false); // 这里不应该失败
@@ -744,18 +745,13 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
     std::vector<std::unordered_map<tx_id_t, std::unique_ptr<SchedulingCandidateTxn>>> local_txid_maps(thread_count);
     std::vector<std::vector<std::pair<uint64_t, tx_id_t>>> local_page_pairs(thread_count);
 
-    // page_metis_to_node_map 可以不依赖上一个batch的信息，在上一个batch结束前构建
-    std::mutex page_metis_to_node_map_mutex;
-    std::unordered_map<uint64_t, node_id_t> page_metis_to_node_map;
-
     std::vector<std::future<void>> futs;
     futs.reserve(thread_count);
 
     for (size_t t = 0; t < thread_count; ++t) {
         size_t start = t * chunk;
         size_t end = std::min(n, start + chunk);
-        futs.push_back(threadpool.enqueue([this, &txn_batch, start, end, t, &local_txid_maps, &local_page_pairs, &thread_conns, 
-            &page_metis_to_node_map_mutex, &page_metis_to_node_map]() {
+        futs.push_back(threadpool.enqueue([this, &txn_batch, start, end, t, &local_txid_maps, &local_page_pairs, &thread_conns]() {
             auto &local_map = local_txid_maps[t];
             auto &local_pairs = local_page_pairs[t];
 
@@ -769,6 +765,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                 std::unique_ptr<SchedulingCandidateTxn> sc = std::make_unique<SchedulingCandidateTxn>();
                 sc->txn = txn;
                 sc->will_route_node = -1;
+                sc->is_scheduled = false; // !这里做出逻辑的更改，当一个事务调度完成之后，不再从 txid_to_txn_map 中删除，而是设置 is_scheduled 标志
 
                 // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
                 std::vector<itemkey_t> accounts_keys;
@@ -780,7 +777,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                 std::unordered_map<uint64_t, node_id_t> table_page_ids; // 高32位存table_id，低32位存page_id
                 // lookup（内部会加 hot_mutex_），构造 involved_pages，并收集 page->tx 映射对
                 for (size_t i = 0; i < accounts_keys.size(); ++i) {
-                    auto entry = lookup(table_ids[i], accounts_keys[i], const_cast<std::vector<pqxx::connection*>&>(thread_conns));
+                    auto entry = lookup(txn, table_ids[i], accounts_keys[i], const_cast<std::vector<pqxx::connection*>&>(thread_conns));
                     if (entry.page == kInvalidPageId) {
                         assert(false); // 这里不应该失败
                     }
@@ -789,7 +786,6 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                     sc->involved_pages.push_back(table_page_id);
                     local_pairs.emplace_back(table_page_id, tx_id);
                 }
-                local_map[tx_id] = std::move(sc);
 
                 // Warmup 阶段仍需要把 page 信息加入 metis 内部图，保留原有行为
                 if (!WarmupEnd) {
@@ -798,13 +794,14 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                 }
 
                 // 填充page_to_node_map
-                for (auto [table_page_id, _] : table_page_ids) {
-                    std::lock_guard<std::mutex> lock(page_metis_to_node_map_mutex);
-                    if(page_metis_to_node_map.find(table_page_id) == page_metis_to_node_map.end()) {
-                        node_id_t metis_node = metis_->get_metis_partitioning_result(table_page_id);
-                        page_metis_to_node_map[table_page_id] = metis_node;
-                    }
+                for (int i = 0; i < sc->involved_pages.size(); ++i) {
+                    uint64_t table_page_id = sc->involved_pages[i];
+                    // 这里不需要加锁，因为一个事务只会被一个线程处理   
+                    node_id_t metis_node = metis_->get_metis_partitioning_result(table_page_id);
+                    sc->page_to_metis_node_vec.push_back(metis_node);
                 }
+
+                local_map[tx_id] = std::move(sc); // 存储到 local map
             }
         }));
     }
@@ -812,10 +809,21 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
     // join workers
     for (auto &fut : futs) fut.get(); // get() 会抛异常并传播任务异常
 
+    // 计时
+    struct timespec merge_start_time, merge_end_time;
+    clock_gettime(CLOCK_REALTIME, &merge_start_time);
     // 合并 local 结果到全局结构（单线程执行）
-    std::mutex txid_to_txn_map_mutex;
     std::unordered_map<tx_id_t, std::unique_ptr<SchedulingCandidateTxn>> txid_to_txn_map; // 记录每个事务ID对应的事务对象, 还没调度的事务
     std::unordered_map<uint64_t, std::vector<tx_id_t>> page_to_txn_map; // 记录每个页面对应的事务ID
+    // 计算map需要的总大小，提前分配空间
+    size_t total_txn_count = 0;
+    size_t total_page_pair_count = 0;
+    for (size_t t = 0; t < thread_count; ++t) {
+        total_txn_count += local_txid_maps[t].size();
+        total_page_pair_count += local_page_pairs[t].size();
+    }
+    txid_to_txn_map.reserve(total_txn_count);
+    page_to_txn_map.reserve(total_page_pair_count);
     // 将 local maps/pairs 合并
     for (size_t t = 0; t < thread_count; ++t) {
         for (auto &p : local_txid_maps[t]) {
@@ -825,25 +833,25 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
             page_to_txn_map[pr.first].push_back(pr.second);
         }
     }
-
+    clock_gettime(CLOCK_REALTIME, &merge_end_time);
+    time_stats_.merge_global_txid_to_txn_map_ms += 
+        (merge_end_time.tv_sec - merge_start_time.tv_sec) * 1000.0 + (merge_end_time.tv_nsec - merge_start_time.tv_nsec) / 1000000.0;
 
     // 计时
     struct timespec compute_conflict_start_time, compute_conflict_end_time;
     clock_gettime(CLOCK_REALTIME, &compute_conflict_start_time);
     // 求解事务之间的页面冲突关系
-    std::unordered_map<tx_id_t, std::unordered_set<tx_id_t>> txn_conflict_map; // 记录事务之间的冲突关系
+    std::unordered_set<tx_id_t> conflicted_txns;
     std::unordered_set<tx_id_t> unconflicted_txns; // 记录没有冲突的事务
     for(const auto& [page, txn_ids] : page_to_txn_map) {
         if(txn_ids.size() <= 1) continue; // 只有一个事务访问该页面，不存在冲突
-        for(size_t i = 0; i < txn_ids.size(); i++) {
-            for(size_t j = i + 1; j < txn_ids.size(); j++) {
-                txn_conflict_map[txn_ids[i]].insert(txn_ids[j]);
-                txn_conflict_map[txn_ids[j]].insert(txn_ids[i]);
-            }
+        for (auto tx_id : txn_ids) {
+            conflicted_txns.insert(tx_id);
         }
     }
+
     for(const auto& [tx_id, scheduling_txn] : txid_to_txn_map) {
-        if(txn_conflict_map.find(tx_id) == txn_conflict_map.end()) {
+        if(conflicted_txns.find(tx_id) == conflicted_txns.end()) {
             unconflicted_txns.insert(tx_id);
         }
     }
@@ -923,57 +931,42 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
     clock_gettime(CLOCK_REALTIME, &start_time);
 
     // ownership_ok_txn_queues链表存储着完全满足ownership table的要求
-    std::mutex ownership_ok_txn_queues_mutex;
     std::vector<std::unordered_set<tx_id_t>> ownership_ok_txn_queues(ComputeNodeCount);
+    std::vector<std::vector<std::unordered_set<tx_id_t>>> ownership_ok_txn_queues_per_thread(thread_count, std::vector<std::unordered_set<tx_id_t>>(ComputeNodeCount));
     // candidate_txn_queues链表存储着候选事务
-    std::mutex candidate_txn_queues_mutex;
     std::unordered_set<tx_id_t> candidate_txn_ids;
-    // 路由给各个节点的事务计数
-    std::vector<int> routed_txn_cnt_per_node(ComputeNodeCount, 0);
+    std::vector<std::unordered_set<tx_id_t>> candidate_txn_queues_per_thread(thread_count);
+    // indexed_priority_queue.h
+    std::vector<IPQ<tx_id_t, double, std::greater<double>>> candidate_txn_benefit_ipq(ComputeNodeCount);
 
-    // // !实际事务执行编排的事务列表
-    // std::mutex scheduled_txn_queues_mutex;
-    // std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> scheduled_txn_queues(new std::vector<std::queue<TxnQueueEntry*>>(ComputeNodeCount));
-
-    // !1. 获取ownership信息，完成page_ownership_to_node_map的填充
-    std::mutex page_ownership_to_node_map_mutex;
-    std::unordered_map<uint64_t, node_id_t> page_ownership_to_node_map; // 记录每个页面对应的节点ID（Ownership表结果）
-
+    // !1. 获取ownership信息填充到page_to_ownership_node_vec，同时完成对非冲突事务的调度ownership_ok_txn_queues_per_thread, candidate_txn_queues_per_thread
     std::atomic<int> unconflict_and_ownership_ok_txn_cnt, unconflict_and_ownership_cross_txn_cnt;
     std::vector<std::atomic<int>> schedule_txn_cnt_per_node_this_batch(ComputeNodeCount);
-
-    // 多线程获取ownership信息
     futs.clear();
     futs.reserve(thread_count);
+    std::vector<double> compute_node_workload_benefit = compute_load_balance_penalty_weights();
+    
     for (size_t t = 0; t < thread_count; ++t) {
         size_t start = t * chunk;
         size_t end = std::min(n, start + chunk);
-        futs.push_back(threadpool.enqueue([this, &txn_batch, &txid_to_txn_map, &txid_to_txn_map_mutex, start, end, t, 
-                &page_ownership_to_node_map, &page_ownership_to_node_map_mutex, &ownership_ok_txn_queues, &candidate_txn_ids, 
-                &ownership_ok_txn_queues_mutex, &candidate_txn_queues_mutex, &page_metis_to_node_map, &unconflicted_txns, 
+        futs.push_back(threadpool.enqueue([this, &txn_batch, &txid_to_txn_map, start, end, t, &compute_node_workload_benefit,
+                &ownership_ok_txn_queues_per_thread, &candidate_txn_queues_per_thread, &unconflicted_txns, 
                 &unconflict_and_ownership_ok_txn_cnt, &unconflict_and_ownership_cross_txn_cnt, &schedule_txn_cnt_per_node_this_batch]() {
             for (size_t idx = start; idx < end; ++idx) {
                 tx_id_t tx_id = txn_batch->at(idx)->tx_id;
-                SchedulingCandidateTxn* sc = nullptr; {
-                    std::lock_guard<std::mutex> lock(txid_to_txn_map_mutex);
-                    sc = txid_to_txn_map[tx_id].get();
-                }
+                SchedulingCandidateTxn* sc = txid_to_txn_map[tx_id].get();
                 if(sc == nullptr) assert(false); // 不可能出现的情况
                 std::unordered_map<node_id_t, int> ownership_node_count;
-                for (const auto& page : sc->involved_pages) {
-                    node_id_t ownership_node;
-                    std::lock_guard<std::mutex> lock(page_ownership_to_node_map_mutex);
-                    auto it = page_ownership_to_node_map.find(page);
-                    if(it != page_ownership_to_node_map.end()) {
-                        ownership_node = it->second;
-                    }
-                    else {
-                        ownership_node = ownership_table_->get_owner(page);
+                for (int i = 0; i < sc->involved_pages.size(); ++i) {
+                    auto page = sc->involved_pages[i];
+                    node_id_t ownership_node = ownership_table_->get_owner(page); 
+                    if(ownership_node == -1) {
+                        ownership_node = sc->page_to_metis_node_vec[i];
                         if(ownership_node == -1) {
-                            ownership_node = rand() % ComputeNodeCount; // 如果没有owner，则随机分配一个节点
+                            ownership_node = page % ComputeNodeCount; // 如果没有owner，则随机分配一个节点
                         }
-                        page_ownership_to_node_map[page] = ownership_node;
                     }
+                    sc->page_to_ownership_node_vec.push_back(ownership_node);
                     ownership_node_count[ownership_node]++;
                 }
                 if(ownership_node_count.size() == 1) {
@@ -983,18 +976,14 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                     if(unconflicted_txns.count(tx_id) > 0) {
                         // ! 如果该事务没有冲突，直接加入txn_queues, 工作线程可以直接处理
                         txn_queues_[ownership_node]->push_txn(sc->txn); // txn_queues_ 是 SmartRouter 的成员变量, TxnQueue中的push_txn函数是线程安全的
-                        {
-                            std::lock_guard<std::mutex> lock(txid_to_txn_map_mutex);
-                            txid_to_txn_map.erase(tx_id);
-                        }
+                        sc->is_scheduled = true; // 标记该事务已经被调度
                         this->routed_txn_cnt_per_node[ownership_node]++;
                         unconflict_and_ownership_ok_txn_cnt++;
                         schedule_txn_cnt_per_node_this_batch[ownership_node]++;
                     } else {
                         // 有冲突的事务，加入ownership_ok_txn_queues
-                        // 再写一遍, ownership_ok_txn_queues 和 candidate_txn_queues 是并列的关系，他们的集合是所有还没有调度的事务，即 txid_to_txn_map
-                        std::lock_guard<std::mutex> lock(ownership_ok_txn_queues_mutex);
-                        ownership_ok_txn_queues[ownership_node].insert(tx_id); 
+                        // 再写一遍, ownership_ok_txn_queues 和 candidate_txn_queues 是并列的关系，他们的集合是所有还没有调度的事务，即 txid_to_txn_map 中is_scheduled为false的事务
+                        ownership_ok_txn_queues_per_thread[t][ownership_node].insert(tx_id);
                     }
                 } else {
                     // 记录为候选事务
@@ -1002,7 +991,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                     std::vector<double> metis_benefit(ComputeNodeCount, 0.0);
                     for(int i=0; i<sum_pages; i++) {
                         auto page = sc->involved_pages[i];
-                        node_id_t metis_node = page_metis_to_node_map[page];
+                        node_id_t metis_node = sc->page_to_metis_node_vec[i];
                         if(metis_node == -1) continue;
                         metis_benefit[metis_node] += 1.0 / sum_pages;
                     }
@@ -1011,8 +1000,10 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                         double benefit1 = static_cast<double>(count) / sum_pages;
                         // benefit 计算: 满足metis分区结果的页面比例
                         double benefit2 = metis_benefit[node_id];
-                        // todo benefit 计算: 负载均衡，当前节点路由的事务越少，benefit越高
-                        sc->node_benefit_map[node_id] = benefit1 + benefit2;
+                        // benefit 计算: 负载均衡，当前节点路由的事务越少，benefit越高
+                        double benefit3 = 2 * compute_node_workload_benefit[node_id];
+                        // 综合benefit
+                        sc->node_benefit_map[node_id] = benefit1 + benefit2 + benefit3;
                     }
                     if(unconflicted_txns.count(tx_id) > 0) {
                         // 如果该事务没有冲突，可以直接调度
@@ -1028,18 +1019,14 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                         sc->will_route_node = best_node;
                         // !直接加入txn_queues, 工作线程可以直接处理
                         txn_queues_[best_node]->push_txn(sc->txn); // txn_queues_ 是 SmartRouter 的成员变量, TxnQueue中的push_txn函数是线程安全的
-                        {
-                            std::lock_guard<std::mutex> lock(txid_to_txn_map_mutex);
-                            txid_to_txn_map.erase(tx_id);
-                        }
+                        sc->is_scheduled = true; // 标记该事务已经被调度
                         this->routed_txn_cnt_per_node[best_node]++;
                         unconflict_and_ownership_cross_txn_cnt++;
                         schedule_txn_cnt_per_node_this_batch[best_node]++;
                     }
                     else {
                         // 如果有事务冲突，则加入候选队列
-                        std::lock_guard<std::mutex> lock(candidate_txn_queues_mutex);
-                        candidate_txn_ids.insert(tx_id);
+                        candidate_txn_queues_per_thread[t].insert(tx_id);
                     }
                 }
             }
@@ -1048,26 +1035,45 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
 
     // join workers
     for (auto &fut : futs) fut.get(); // get() 会抛异常并传播任务异常
+
+    // 合并 local 结果到全局结构（单线程执行）
+    for (size_t t = 0; t < thread_count; ++t) {
+        for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+            ownership_ok_txn_queues[node_id].insert(
+                ownership_ok_txn_queues_per_thread[t][node_id].begin(), 
+                ownership_ok_txn_queues_per_thread[t][node_id].end());
+        }
+        candidate_txn_ids.insert(
+            candidate_txn_queues_per_thread[t].begin(), 
+            candidate_txn_queues_per_thread[t].end());
+    }
+    // 构造 candidate_txn_benefit_ipq
+    for(const auto& tx_id : candidate_txn_ids) {
+        SchedulingCandidateTxn* sc = txid_to_txn_map[tx_id].get();
+        for(const auto& [node_id, benefit] : sc->node_benefit_map) {
+            candidate_txn_benefit_ipq[node_id].insert(tx_id, benefit);
+        }
+    }
+
     
     // 计时结束
     clock_gettime(CLOCK_REALTIME, &end_time);
     time_stats_.ownership_retrieval_and_devide_unconflicted_txn_ms +=
         (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
 
-    // 校验 txid_to_txn_map 的大小是否等于 ownership_ok_txn_queues 和 candidate_txn_queues 的大小之和
     int ownership_ok_txn_total = 0;
     for(int i=0; i<ComputeNodeCount; i++) {
         ownership_ok_txn_total += ownership_ok_txn_queues[i].size();
     }
-    assert(txid_to_txn_map.size() == ownership_ok_txn_total + candidate_txn_ids.size());
-    assert(txn_conflict_map.size() == txid_to_txn_map.size());
+    // 校验 ownership_ok_txn_total + candidate_txn_ids.size() + unconflict_and_ownership_cross_txn_cnt + unconflict_and_ownership_ok_txn_cnt == txid_to_txn_map.size()
+    assert(txid_to_txn_map.size() == ownership_ok_txn_total + candidate_txn_ids.size() + unconflict_and_ownership_cross_txn_cnt.load() + unconflict_and_ownership_ok_txn_cnt.load());
 
     #if LOG_KROUTER_SCHEDULING_DEBUG
     if(WarmupEnd){
         // Parallel router processing including txn involved pages, conflict map, ownership info retrieval, parallel unconflicted txn scheduling done
         logger->info("Batch id: " + std::to_string(batch_id) + "Parallel router processing done.");
         // print txn_conflict_map_size and unconflicted_txns size 
-        logger->info("Txn conflict map size: " + std::to_string(txn_conflict_map.size())); 
+        logger->info("Txn conflict map size: " + std::to_string(conflicted_txns.size()));
         logger->info("Ownership ok txn total size: " + std::to_string(ownership_ok_txn_total));
         for(int i=0; i<ComputeNodeCount; i++){
             logger->info("Node " + std::to_string(i) + 
@@ -1082,47 +1088,46 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                             " scheduled unconflict txn count: " + std::to_string(schedule_txn_cnt_per_node_this_batch[i]));
         }
         // print txn_conflict_map
-        for(const auto& [tx_id, conflict_txns] : txn_conflict_map) {
-            auto iter = txid_to_txn_map.find(tx_id);
-            logger->info("Txn " + std::to_string(tx_id) + 
-                            " involves pages: " + [&]() {
-                                std::string pages_str;
-                                for(const auto& page : iter->second->involved_pages) {
-                                    pages_str += std::to_string(page) + " ";
-                                }
-                                return pages_str;
-                            }() +
-                            " conflicts with txns: " + [&]() {
-                                std::string txns_str;
-                                for(const auto& conflict_tx_id : conflict_txns) {
-                                    txns_str += std::to_string(conflict_tx_id) + " ";
-                                }
-                                return txns_str;
-                            }());
-        }
-        // print conflict page_to_txn_map
-        for(const auto& [page, txn_ids] : page_to_txn_map) {
-            if(txn_ids.size() <= 1) continue; // 说明是非冲突的页面，没必要输出，直接往下走
-            node_id_t metis_node = page_metis_to_node_map[page]; 
-            node_id_t ownership_node = page_ownership_to_node_map[page];
-            logger->info("Page " + std::to_string(page) + 
-                            " involved by txns: " + [&]() {
-                                std::string txns_str;
-                                for(const auto& tx_id : txn_ids) {
-                                    txns_str += std::to_string(tx_id) + " ";
-                                }
-                                return txns_str;
-                            }());
-        }
-        // print ownership_ok_txn_queues
-        for(int node_id = 0; node_id < ComputeNodeCount; node_id++){
-            std::string txns_str;
-            for(const auto& tx_id : ownership_ok_txn_queues[node_id]) {
-                txns_str += std::to_string(tx_id) + " ";
-            }
-            logger->info("Node " + std::to_string(node_id) + 
-                            " ownership_ok_txn_queues: " + txns_str);
-        }
+        // for(const auto& tx_id : conflicted_txns) {
+        //     auto iter = txid_to_txn_map.find(tx_id); 
+        //     logger->info("Txn " + std::to_string(tx_id) + 
+        //                     " involves pages: " + [&]() {
+        //                         std::string pages_str;
+        //                         for(const auto& page : iter->second->involved_pages) {
+        //                             pages_str += std::to_string(page) + " ";
+        //                         }
+        //                         pages_str += " page_to_metis_node: ";
+        //                         for(const auto& metis_node : iter->second->page_to_metis_node_vec) {
+        //                             pages_str += std::to_string(metis_node) + " ";
+        //                         }
+        //                         pages_str += " page_ownership_node: ";
+        //                         for(const auto& ownership_node : iter->second->page_to_ownership_node_vec) {
+        //                             pages_str += std::to_string(ownership_node) + " ";
+        //                         }
+        //                         return pages_str;
+        //                     }());
+        // }
+        // // print conflict page_to_txn_map
+        // for(const auto& [page, txn_ids] : page_to_txn_map) {
+        //     if(txn_ids.size() <= 1) continue; // 说明是非冲突的页面，没必要输出，直接往下走
+        //     logger->info("Page " + std::to_string(page) + 
+        //                     " involved by txns: " + [&]() {
+        //                         std::string txns_str;
+        //                         for(const auto& tx_id : txn_ids) {
+        //                             txns_str += std::to_string(tx_id) + " ";
+        //                         }
+        //                         return txns_str;
+        //                     }());
+        // }
+        // // print ownership_ok_txn_queues
+        // for(int node_id = 0; node_id < ComputeNodeCount; node_id++){
+        //     std::string txns_str;
+        //     for(const auto& tx_id : ownership_ok_txn_queues[node_id]) {
+        //         txns_str += std::to_string(tx_id) + " ";
+        //     }
+        //     logger->info("Node " + std::to_string(node_id) + 
+        //                     " ownership_ok_txn_queues: " + txns_str);
+        // }
     }
     #endif
 
@@ -1143,22 +1148,15 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
         }
         double max_benefit_score = -1;
         SchedulingCandidateTxn* selected_candidate_txn = nullptr;
-        for(auto& tx_id: candidate_txn_ids){
-            // 遍历candidate_txn_queues，找到可以迁移到min_txn_node节点的事务
-
-            // txid_to_txn_map 是ownership_ok_txn_queues和candidate_txn_queues的全集， 已经调度完成的事务会从中删除
-            auto it_map = txid_to_txn_map.find(tx_id);
-            if (it_map == txid_to_txn_map.end()) assert(false); // 不可能出现的情况
-            SchedulingCandidateTxn* txn = it_map->second.get();
-            auto nb_it = txn->node_benefit_map.find(min_txn_node);
-            if(nb_it != txn->node_benefit_map.end()){
-                double benefit_score = nb_it->second;
-                if(benefit_score > max_benefit_score){
-                    max_benefit_score = benefit_score;
-                    selected_candidate_txn = txn;
-                }
-            }
+        // ! 这里不再使用for循环遍历candidate_txn_queues来选择事务，而是使用candidate_txn_benefit_ipq来选择
+        assert(candidate_txn_benefit_ipq[min_txn_node].size() > 0); // 这里不可能为空
+        auto [best_tx_id, best_benefit] = candidate_txn_benefit_ipq[min_txn_node].pop();
+        selected_candidate_txn = txid_to_txn_map[best_tx_id].get();
+        if(selected_candidate_txn->is_scheduled == true) {
+            // 说明该事务已经被调度过了，继续下一个循环
+            continue;
         }
+        max_benefit_score = best_benefit;
 
     #if LOG_KROUTER_SCHEDULING_DEBUG
         if(WarmupEnd){
@@ -1176,10 +1174,10 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
         // 1.2 找到合适的不满足ownership entirely的事务，进行页面转移计划的制订
         std::vector<uint64_t> transfer_pages;
         if(selected_candidate_txn != nullptr){
-            auto tx_id = selected_candidate_txn->txn->tx_id;
-            // 找到需要迁移的页面, 这些页面将从owner_node转移到min_txn_node
-            for(const auto& page : selected_candidate_txn->involved_pages){
-                node_id_t owner_node = page_ownership_to_node_map[page];
+            assert(selected_candidate_txn->page_to_ownership_node_vec.size() == selected_candidate_txn->involved_pages.size());
+            for(int i=0; i<selected_candidate_txn->involved_pages.size(); i++){
+                auto page = selected_candidate_txn->involved_pages[i];
+                node_id_t owner_node = selected_candidate_txn->page_to_ownership_node_vec[i];
                 if(owner_node != min_txn_node){
                     transfer_pages.push_back(page);
                 }
@@ -1188,17 +1186,19 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
 
         // 1.3 进行事务的编排，找到转移页面后，原来可以满足ownership entirely的事务可能不满足的，将这些事务先执行
         for(auto transfer_page : transfer_pages){
-            page_ownership_to_node_map[transfer_page] = min_txn_node; // 更新ownership table中的页面归属信息
+            // page_ownership_to_node_map[transfer_page] = min_txn_node; // 更新ownership table中的页面归属信息
             #if LOG_KROUTER_SCHEDULING_DEBUG
                 if(WarmupEnd)
                 logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
                                 " ownership transferred to node " + std::to_string(min_txn_node) + 
                                 ", check affected txns:");
             #endif
+            std::vector<TxnQueueEntry*> schedule_txn;
+            node_id_t schedule_node = -1;
             for(auto affected_txn_id : page_to_txn_map[transfer_page]){
                 // 检查affected_txn_id是否在ownership_ok_txn_queues中
                 auto it = txid_to_txn_map.find(affected_txn_id);
-                if(it == txid_to_txn_map.end()) continue; // 说明这个事务已经被调度过了
+                if (it->second->is_scheduled) continue; // 说明这个事务已经被调度过了
                 node_id_t will_route_node = it->second->will_route_node;
                 if(will_route_node != -1) {
                     // 说明这个事务之前可以在will_route_node上执行， 但是这个transfer page转移到新的节点之后，他就不可以继续执行了
@@ -1206,11 +1206,17 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                     // 将该事务从ownership_ok_txn_queues中删除，表示已不能执行
                     ownership_ok_txn_queues[will_route_node].erase(affected_txn_id);
                     // !将该事务加入到txn_queues中, 可以执行
-                    txn_queues_[will_route_node]->push_txn(it->second->txn);
+                    schedule_txn.push_back(it->second->txn);
+                    if(schedule_node == -1) schedule_node = will_route_node; 
+                    else if(schedule_node != will_route_node) 
+                        logger->warning("[SmartRouter Scheduling] Warning: schedule_node " + std::to_string(schedule_node) + 
+                                        " different from will_route_node " + std::to_string(will_route_node) + 
+                                        " for affected txn " + std::to_string(affected_txn_id));
+                    // else assert(schedule_node == will_route_node); // 说明这些事务之前都是在同一个节点上执行的
                     this->routed_txn_cnt_per_node[will_route_node]++;
                     schedule_txn_cnt_per_node_this_batch[will_route_node]++;
-                    // 从txid_to_txn_map中删除该事务，表示已经调度完成
-                    txid_to_txn_map.erase(it);
+                    // !标记该事务已经被调度
+                    it->second->is_scheduled = true;
                 #if LOG_KROUTER_SCHEDULING_DEBUG
                     if(WarmupEnd)
                     logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
@@ -1220,10 +1226,19 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                 #endif
                 }
                 else {
+                    // 如果不能执行，首先更新迁移页面的owner信息
+                    for(int i=0; i<it->second->involved_pages.size(); i++){
+                        auto page = it->second->involved_pages[i];
+                        node_id_t owner_node = it->second->page_to_ownership_node_vec[i];
+                        if(page == transfer_page){
+                            it->second->page_to_ownership_node_vec[i] = min_txn_node;
+                        }
+                    }
                     // 确定当前事务在迁移页面后，能否执行
                     bool can_execute = true;
-                    for(const auto& page : it->second->involved_pages){
-                        node_id_t owner_node = page_ownership_to_node_map[page];
+                    for(int i=0; i<it->second->involved_pages.size(); i++){ 
+                        auto page = it->second->involved_pages[i];
+                        node_id_t owner_node = it->second->page_to_ownership_node_vec[i];
                         if(owner_node != min_txn_node){
                             // 说明当前事务仍然不能在min_txn_node上执行
                             can_execute = false;
@@ -1245,6 +1260,34 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                     }
                     else {
                         // 说明当前事务仍然不能在min_txn_node上执行，保持不变
+                        // 更新candidate_txn_benefit_ipq中的benefit值
+                        int sum_pages = it->second->involved_pages.size();
+                        std::vector<double> metis_benefit(ComputeNodeCount, 0.0);
+                        
+                        for(int i=0; i<sum_pages; i++) {
+                            auto page = it->second->involved_pages[i];
+                            node_id_t metis_node = it->second->page_to_metis_node_vec[i];
+                            if(metis_node == -1) continue;
+                            metis_benefit[metis_node] += 1.0 / sum_pages;
+                        }
+                        std::vector<double> ownership_benefit(ComputeNodeCount, 0.0);
+                        for(int i=0; i<sum_pages; i++) {
+                            auto page = it->second->involved_pages[i];
+                            node_id_t ownership_node = it->second->page_to_ownership_node_vec[i];
+                            ownership_benefit[ownership_node] += 1.0 / sum_pages;
+                        }
+                        for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+                            // benefit 计算：已经有ownership的页面比例
+                            double benefit1 = ownership_benefit[node_id];
+                            // benefit 计算: 满足metis分区结果的页面比例
+                            double benefit2 = metis_benefit[node_id];
+                            // benefit 计算: 负载均衡，当前节点路由的事务越少，benefit越高
+                            double benefit3 = 2 * compute_node_workload_benefit[node_id];
+                            // 综合benefit
+                            double total_benefit = benefit1 + benefit2 + benefit3;
+                            // 更新ipq中的benefit值
+                            candidate_txn_benefit_ipq[node_id].update(affected_txn_id, total_benefit);
+                        }
                 #if LOG_KROUTER_SCHEDULING_DEBUG
                     if(WarmupEnd)
                         logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
@@ -1254,6 +1297,8 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                     }
                 }
             }
+            // ! 将schedule_txn中的事务加入到txn_queues_头部先执行了
+            if(!schedule_txn.empty()) txn_queues_[schedule_node]->push_txn_front(schedule_txn);
         }
     }
 
@@ -1263,23 +1308,68 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
         (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
 
     // 2. 剩余的ownership_ok_txn_queues中的事务加入到txn_queues_中
-    for(auto txn_queue: ownership_ok_txn_queues) {
-        for(auto tx_id: txn_queue) {
-            auto it = txid_to_txn_map.find(tx_id);
-            assert(it != txid_to_txn_map.end());
-            node_id_t will_route_node = it->second->will_route_node;
-            txn_queues_[will_route_node]->push_txn(it->second->txn);
-            this->routed_txn_cnt_per_node[will_route_node]++;
-            schedule_txn_cnt_per_node_this_batch[will_route_node]++;
-            txid_to_txn_map.erase(it);
-        #if LOG_KROUTER_SCHEDULING_DEBUG
-            if(WarmupEnd)
-            logger->info("[SmartRouter Scheduling] Final Scheduling ownership_ok txn " + std::to_string(tx_id) + 
-                            " to execute on node " + std::to_string(will_route_node));
-        #endif
-        }
+    futs.clear();
+    futs.reserve(ComputeNodeCount);
+    for(int i=0; i<ComputeNodeCount; i++) {
+        auto& txn_queue = ownership_ok_txn_queues[i];
+        futs.push_back(threadpool.enqueue([this, i, &txn_queue, &txid_to_txn_map, &schedule_txn_cnt_per_node_this_batch]() {
+            std::vector<TxnQueueEntry*> to_schedule_txns;
+            // 构建to_schedule_txns
+            for(auto tx_id: txn_queue) {
+                auto it = txid_to_txn_map.find(tx_id);
+                assert(it != txid_to_txn_map.end());
+                assert(it->second->is_scheduled == false); // 说明这个事务还没有被调度
+                to_schedule_txns.push_back(it->second->txn);
+                this->routed_txn_cnt_per_node[i]++;
+                schedule_txn_cnt_per_node_this_batch[i]++;
+                it->second->is_scheduled = true; // 标记该事务已经被调度
+            }
+            // 批量加入txn_queues_
+            txn_queues_[i]->push_txn_back_batch(to_schedule_txns);
+            #if LOG_KROUTER_SCHEDULING_DEBUG
+                if(WarmupEnd)
+                logger->info("[SmartRouter Scheduling] Final Scheduling ownership_ok txn to execute on node " + std::to_string(i) + 
+                                ", count: " + std::to_string(to_schedule_txns.size()));
+            #endif
+        }));
     }
-    // 3. 构造返回结果
+    // join workers
+    for (auto &fut : futs) fut.get(); // get() 会抛异常并传播任务异常
     return ;
 }
 
+// 计算负载均衡相关的惩罚权重
+std::vector<double> SmartRouter::compute_load_balance_penalty_weights() {
+    std::vector<double> penalty_weights(ComputeNodeCount, 0.0);
+    // 计算平均事务
+    int total_routed_txn = 0;
+    for(int i=0; i<ComputeNodeCount; i++) {
+        total_routed_txn += this->routed_txn_cnt_per_node[i];
+    }
+    double average_routed_txn = static_cast<double>(total_routed_txn) / ComputeNodeCount;
+
+    // 计算标准差
+    double sum_squared_diff = 0.0;
+    for(int i=0; i<ComputeNodeCount; i++) {
+        double diff = static_cast<double>(this->routed_txn_cnt_per_node[i]) - average_routed_txn;
+        sum_squared_diff += diff * diff;
+    }
+    double stddev = std::sqrt(sum_squared_diff / ComputeNodeCount) + 1e-6; // 防止除以0
+
+    // 计算惩罚权重, 这里用Z-score的方法
+    for(int i=0; i<ComputeNodeCount; i++) {
+        double z_score = (static_cast<double>(this->routed_txn_cnt_per_node[i]) - average_routed_txn) / stddev;
+        
+        // Sigmoid函数映射到(0, 1)
+        penalty_weights[i] = 1.0 / (1.0 + std::exp(z_score));
+    }
+    logger->info("Compute node workload benefit: " + [&]() {
+        std::string s;
+        for (size_t i = 0; i < penalty_weights.size(); ++i) {
+            s += "Node " + std::to_string(i) + ": " + std::to_string(penalty_weights[i]) + ", ";
+        }
+        return s;
+    }());
+
+    return penalty_weights;
+}

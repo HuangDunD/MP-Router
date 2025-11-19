@@ -15,32 +15,55 @@ struct TxnQueueEntry {
     std::vector<uint64_t> accounts; // for smallbank, store involved account ids, the table id is generated based on txn_type
 
     int txn_decision_type = -1; // init to -1, and will be set during routing
+    std::vector<page_id_t> accessed_page_ids; // the page ids this txn will access, set during routing
+    int combine_next_txn_count = 0; // 这个字段的意思表示，pop事务执行的时候连带后面多少个事务一起pop到一个工作线程执行，这样可以避免一些死锁的问题
 };
 
 // for every compute node db connections, we have a txn queue to store incoming txns
 class TxnQueue {
 public:
-    TxnQueue(node_id_t node_id) : node_id_(node_id) {}
+    TxnQueue(node_id_t node_id, int max_queue_size) : node_id_(node_id), max_queue_size_(max_queue_size) {}
     ~TxnQueue() = default;
     
-    TxnQueueEntry* pop_txn() {
+    std::list<TxnQueueEntry*> pop_txn() {
         std::unique_lock<std::mutex> lock(queue_mutex_);
         queue_cv_.wait(lock, [this]() {
             return !txn_queue_.empty() || finished_ || batch_finished_;
         });
         if (finished_ && txn_queue_.empty()) {
-            return nullptr; // indicate finished
+            return {}; // indicate finished
         }
         if (batch_finished_ && txn_queue_.empty()) {
-            return nullptr; // indicate batch finished
+            return {}; // indicate batch finished
         }
+        std::list<TxnQueueEntry*> batch_entries;
         TxnQueueEntry* entry = txn_queue_.front();
-        txn_queue_.pop();
+        txn_queue_.pop_front();
         current_queue_size_--;
-        if(current_queue_size_ + 1 >= max_queue_size_) {
+        batch_entries.push_back(entry);
+        if(entry->combine_next_txn_count > 0) {
+            for(int i = 0; i < entry->combine_next_txn_count; i++) {
+                assert(!txn_queue_.empty());
+                TxnQueueEntry* next_entry = txn_queue_.front();
+                txn_queue_.pop_front();
+                current_queue_size_--;
+                batch_entries.push_back(next_entry);
+            }
+        }
+        else {
+            // pop batch txn to reduce mutex lock/unlock overhead
+            for(int i = 0; i < BatchExecutorPOPTxnSize - 1; i++) {
+                if(txn_queue_.empty()) break;
+                TxnQueueEntry* next_entry = txn_queue_.front();
+                txn_queue_.pop_front();
+                current_queue_size_--;
+                batch_entries.push_back(next_entry);
+            }
+        }
+        if(current_queue_size_ >= max_queue_size_ * 0.8) {
             queue_cv_.notify_one();
         }
-        return entry;
+        return batch_entries;
     }
 
     void push_txn(TxnQueueEntry* entry) {
@@ -48,8 +71,36 @@ public:
         queue_cv_.wait(lock, [this]() {
             return current_queue_size_ < max_queue_size_;
         });
-        txn_queue_.push(entry);
+        txn_queue_.push_back(entry);
         current_queue_size_++;
+        queue_cv_.notify_one();
+    }
+
+    void push_txn_front(std::vector<TxnQueueEntry*> entries) {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        queue_cv_.wait(lock, [this, &entries]() {
+            return current_queue_size_ + entries.size() < max_queue_size_;
+        });
+        auto first_entry = entries[0];
+        first_entry->combine_next_txn_count = entries.size() - 1;
+        // 从后往前放
+        for(int i = entries.size() - 1; i >=0; i--) {
+            txn_queue_.push_front(entries[i]);
+            current_queue_size_++;
+        }
+        queue_cv_.notify_one();
+    }
+
+    void push_txn_back_batch(std::vector<TxnQueueEntry*> entries) {
+        if(entries.empty()) return;
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        queue_cv_.wait(lock, [this, &entries]() {
+            return current_queue_size_ + entries.size() < max_queue_size_;
+        });
+        for(int i = 0; i < entries.size(); i++) {
+            txn_queue_.push_back(entries[i]);
+            current_queue_size_++;
+        }
         queue_cv_.notify_one();
     }
 
@@ -92,12 +143,12 @@ public:
     }
     
 private:
-    std::queue<TxnQueueEntry*> txn_queue_;
+    std::deque<TxnQueueEntry*> txn_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     node_id_t node_id_; // the compute node id this queue belongs to
     std::atomic<int> current_queue_size_ = 0;
-    int max_queue_size_ = 1000; // max queue size
+    int max_queue_size_; // max queue size
     bool finished_ = false;
 
     int process_batch_id_ = -1; // the batch id this queue is processing
@@ -121,6 +172,7 @@ public:
         pool_cv_.notify_one();
     }
 
+    // !not used, because we always fetch batch txns, fetch single txn may cause high mutex overhead
     TxnQueueEntry* fetch_txn_from_poolfront() {
         std::unique_lock<std::mutex> lock(pool_mutex_);
         pool_cv_.wait(lock, [this]() {
@@ -172,9 +224,6 @@ private:
     std::list<TxnQueueEntry*> txn_pool_; 
     std::mutex pool_mutex_;
     std::condition_variable pool_cv_;
-
-    // for reordering txns based on smart router's static affinity partitioning and dynamic ownership table
-    std::unordered_map<uint64_t, std::list<TxnQueueEntry*>> partitioned_txn_map_; // table page id (table id & page id) to txn list
 
     bool stop_ = false;
     // SmartRouter* smart_router_; 
