@@ -172,6 +172,19 @@ public:
         pool_cv_.notify_one();
     }
 
+    void receive_txn_from_client_batch(std::vector<TxnQueueEntry*> entry) {
+        int size = entry.size();
+        std::unique_lock<std::mutex> lock(pool_mutex_);
+        pool_cv_.wait(lock, [this, size]() {
+            return current_pool_size_ + size < max_pool_size_;
+        });
+        for(int i = 0; i < size; i++){
+            current_pool_size_++;
+            txn_pool_.push_back(entry[i]);
+        }
+        pool_cv_.notify_one();
+    }
+
     // !not used, because we always fetch batch txns, fetch single txn may cause high mutex overhead
     TxnQueueEntry* fetch_txn_from_poolfront() {
         std::unique_lock<std::mutex> lock(pool_mutex_);
@@ -205,8 +218,8 @@ public:
             txn_pool_.pop_front();
             batch_txns->push_back(entry);
         }
-        if(current_pool_size_ + batch_size >= max_pool_size_) {
-            pool_cv_.notify_one();
+        if(current_pool_size_ <= max_pool_size_ * 0.6) {
+            pool_cv_.notify_all();
         }
         return batch_txns;
     }
@@ -214,6 +227,10 @@ public:
     void stop_pool() {
         stop_ = true;
         pool_cv_.notify_all();
+    }
+
+    int size() {
+        return current_pool_size_.load();
     }
     
 private:

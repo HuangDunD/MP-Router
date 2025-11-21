@@ -35,6 +35,7 @@ extern int SYSTEM_MODE;
 // for log
 extern std::string partition_log_file_; 
 
+extern int worker_threads; // 工作线程数量, 路由和RAC节点建立的连接数
 extern std::vector<std::string> DBConnection;
 extern int ComputeNodeCount; // 计算节点数量
 extern uint64_t ATTEMPTED_NUM;

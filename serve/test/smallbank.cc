@@ -29,7 +29,6 @@ std::atomic<int> generated_txn_count = 0; // 这个是所有线程生成的总�
 
 SmallBank* smallbank = nullptr;
 
-int worker_threads = 16;
 SmartRouter* smart_router = nullptr;
 TxnPool* txn_pool = nullptr;
 std::vector<TxnQueue*> txn_queues; // one queue per compute node
@@ -79,7 +78,7 @@ void create_table(pqxx::connection *conn0) {
         // pg not support
         pqxx::work txn(*conn0);
         // pre-extend table to avoid frequent page extend during txn processing
-        // txn.exec("SELECT sys_extend('checking', 1000000)");
+        txn.exec("SELECT sys_extend('checking', 300000)");
         std::cout << "Pre-extended checking table." << std::endl;
         txn.commit();
     }
@@ -90,7 +89,7 @@ void create_table(pqxx::connection *conn0) {
         // pg not support
         pqxx::work txn(*conn0);
         // pre-extend table to avoid frequent page extend during txn processing
-        // txn.exec("SELECT sys_extend('savings', 1000000)");
+        txn.exec("SELECT sys_extend('savings', 300000)");
         std::cout << "Pre-extended savings table." << std::endl;
         txn.commit();
     }
@@ -267,20 +266,25 @@ void generate_smallbank_txns_worker(thread_params* params) {
     // 全局一共进行 MetisWarmupRound * PARTITION_INTERVAL的冷启动事务生成，每个工作节点具有worker_threads个线程，每个线程生成try_count个事务
     int total_txn_to_generate = MetisWarmupRound * PARTITION_INTERVAL + try_count * worker_threads * ComputeNodeCount;
     while(generated_txn_count < total_txn_to_generate) {
-        generated_txn_count++;
-        tx_id_t tx_id = tx_id_generator++; // global atomic transaction ID
-        // Simulate some work
-        // Randomly select a transaction type and accounts
-        int txn_type = smallbank->generate_txn_type();
-        if(txn_type == 0 || txn_type == 1) { // TxAmagamate or TxSendPayment
-            smallbank->generate_two_account_ids(accounts_vec[0], accounts_vec[1], zipfian_gen);
-        } else {
-            smallbank->generate_account_id(accounts_vec[0], zipfian_gen);
+        std::vector<TxnQueueEntry*> txn_batch;
+        for (int i = 0; i < 100; i++){
+            generated_txn_count++;
+            tx_id_t tx_id = tx_id_generator++; // global atomic transaction ID
+            // Simulate some work
+            // Randomly select a transaction type and accounts
+            int txn_type = smallbank->generate_txn_type();
+            if(txn_type == 0 || txn_type == 1) { // TxAmagamate or TxSendPayment
+                smallbank->generate_two_account_ids(accounts_vec[0], accounts_vec[1], zipfian_gen);
+            } else {
+                smallbank->generate_account_id(accounts_vec[0], zipfian_gen);
+            }
+            // Create a new transaction object
+            TxnQueueEntry* txn_entry = new TxnQueueEntry(tx_id, txn_type, accounts_vec);
+            txn_batch.push_back(txn_entry);
         }
-        // Create a new transaction object
-        TxnQueueEntry* txn_entry = new TxnQueueEntry(tx_id, txn_type, accounts_vec);
         // Enqueue the transaction into the global transaction pool
-        txn_pool->receive_txn_from_client(txn_entry);
+        // txn_pool->receive_txn_from_client(txn_entry);
+        txn_pool->receive_txn_from_client_batch(txn_batch);
     }
     txn_pool->stop_pool();
 }
@@ -549,6 +553,143 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
     std::cout << "Finished running smallbank transactions." << std::endl;
 }
 
+// Run transactions using stored procedures
+void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
+    // 设置线程名
+    pthread_setname_np(pthread_self(), ("dbconsp_n" + std::to_string(params->compute_node_id_connecter)
+                                                + "_t_" + std::to_string(params->thread_id)).c_str());
+
+    std::cout << "Running smallbank transactions via stored procedures..." << std::endl;
+
+    node_id_t compute_node_id = params->compute_node_id_connecter;
+    TxnQueue* txn_queue = txn_queues[compute_node_id];
+
+    // init the thread connection for this compute node
+    auto con_str = DBConnection[compute_node_id];
+    auto con = new pqxx::connection(con_str);
+    if(!con->is_open()) {
+        std::cerr << "Failed to connect to database: " << con_str << std::endl;
+        assert(false);
+        exit(-1);
+    }
+
+    // init the thread id
+    thread_gid = params->thread_id;
+
+    int con_batch_id = 0;
+    while (true) {
+        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        if (txn_entries.empty()) {
+            if(txn_queue->is_finished()) {
+                break;
+            } else if(txn_queue->is_batch_finished()) {
+                smart_router->notify_batch_finished(compute_node_id, params->thread_id, con_batch_id);
+                smart_router->wait_for_next_batch(compute_node_id, params->thread_id, con_batch_id);
+                con_batch_id++;
+                continue;
+            } else assert(false);
+        }
+
+        for (auto& txn_entry : txn_entries) {
+            exe_count++;
+            exec_txn_cnt_per_node[compute_node_id]++;
+
+            tx_id_t tx_id = txn_entry->tx_id;
+            int txn_type = txn_entry->txn_type;
+            itemkey_t account1 = txn_entry->accounts[0];
+            itemkey_t account2 = txn_entry->accounts[1];
+
+            while (con->is_open() == false) {
+                std::cerr << "Connection is broken, reconnecting..." << std::endl;
+                delete con;
+                con = new pqxx::connection(con_str);
+            }
+
+            std::vector<table_id_t>& tables = smallbank->get_table_ids_by_txn_type(txn_type);
+            assert(tables.size() > 0);
+            std::vector<itemkey_t> keys;
+            smallbank->get_keys_by_txn_type(txn_type, account1, account2, keys);
+            assert(tables.size() == keys.size());
+            std::vector<page_id_t> ctid_ret_page_ids;
+
+            // 计时
+            timespec start_time, end_time;
+            clock_gettime(CLOCK_REALTIME, &start_time);
+
+            // Create a new transaction
+            pqxx::work* txn = new pqxx::work(*con);
+
+            try {
+                pqxx::result res;
+                switch(txn_type) {
+                    case 0: { // Amalgamate
+                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_amalgamate(" +
+                                          std::to_string(account1) + "," + std::to_string(account2) + ")";
+                        res = txn->exec(sql);
+                        break;
+                    }
+                    case 1: { // SendPayment
+                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_send_payment(" +
+                                          std::to_string(account1) + "," + std::to_string(account2) + ")";
+                        res = txn->exec(sql);
+                        break;
+                    }
+                    case 2: { // DepositChecking
+                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_deposit_checking(" +
+                                          std::to_string(account1) + ")";
+                        res = txn->exec(sql);
+                        break;
+                    }
+                    case 3: { // WriteCheck
+                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_write_check(" +
+                                          std::to_string(account1) + ")";
+                        res = txn->exec(sql);
+                        break;
+                    }
+                    case 4: { // Balance
+                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_balance(" +
+                                          std::to_string(account1) + ")";
+                        res = txn->exec(sql);
+                        break;
+                    }
+                    case 5: { // TransactSavings
+                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_transact_savings(" +
+                                          std::to_string(account1) + ")";
+                        res = txn->exec(sql);
+                        break;
+                    }
+                }
+
+                for (const auto& row : res) {
+                    std::string ctid_str = row["ctid"].as<std::string>();
+                    auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid_str);
+                    ctid_ret_page_ids.push_back(page_id);
+                }
+
+                txn->commit();
+
+                if(smart_router) {
+                    smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
+                                                  keys, ctid_ret_page_ids, compute_node_id);
+                }
+            } catch (const std::exception &e) {
+                std::cerr << "Transaction (SP) failed: " << e.what() << std::endl;
+                logger_->info("Transaction (SP) failed: " + std::string(e.what()));
+            }
+
+            // 计时结束
+            clock_gettime(CLOCK_REALTIME, &end_time);
+            double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                               (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_exec_time(params->thread_id, exec_time);
+
+            delete txn_entry;
+            delete txn;
+        }
+    }
+    std::cout << "Finished running smallbank transactions via stored procedures." << std::endl;
+}
+
 void signal_handler(int signum) {
     std::cout << "\nCaught signal " << signum << " (SIGINT)" << std::endl;
     std::cout << "Printing final statistics before exit..." << std::endl;
@@ -650,6 +791,8 @@ void print_tps_loop() {
             exec_txn_cnt_per_node_last_snapshot[i] = exec_txn_cnt_per_node_snapshot[i];
             printf("Node %d: %d queue remain: %d ", i, routed_cnt, txn_queue_size_snapshot[i]);
         } 
+        int pool_size = txn_pool->size();
+        printf(" Txn pool size: %d ", pool_size);
         printf("\n");
         // reset for next interval
         exec_last_count = exec_cur_count;
@@ -670,6 +813,8 @@ int main(int argc, char *argv[]) {
     double zipfian_theta = 0.99; // Zipfian distribution parameter
     double hotspot_fraction = 0.2; // Fraction of accounts that are hot
     double hotspot_access_prob = 0.8; // Probability of accessing hot accounts
+    // execution mode
+    bool use_sp = true; // default: use stored procedures
     
     // for smallbank
     int smallbank_account = 300000; // Number of accounts to load
@@ -804,6 +949,17 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--use-sp") {
+            if (i + 1 < argc) {
+                int v = std::stoi(argv[++i]);
+                use_sp = (v != 0);
+                std::cout << "Use stored procedures: " << (use_sp ? "yes" : "no") << std::endl;
+            } else {
+                std::cerr << "Error: --use-sp requires 0 or 1" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else if (arg == "--partition-interval") {
             if (i + 1 < argc) {
                 PARTITION_INTERVAL = std::stoi(argv[++i]);
@@ -897,6 +1053,7 @@ int main(int argc, char *argv[]) {
         default: access_pattern_name = "Unknown"; break;
     }
     std::cout << "Access pattern: " << access_pattern << " (" << access_pattern_name << ")" << std::endl;
+    std::cout << "Use stored procedures: " << (use_sp ? "yes" : "no") << std::endl;
     
     if (access_pattern == 1) {
         std::cout << "Zipfian theta: " << zipfian_theta << std::endl;
@@ -920,11 +1077,11 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
 
-    // DBConnection.push_back("host=10.10.2.41 port=54321 user=system password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.41 port=54321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
 
-    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
-    DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
     ComputeNodeCount = DBConnection.size();
     std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
 
@@ -953,6 +1110,8 @@ int main(int argc, char *argv[]) {
 
     // Create table and indexes
     create_table(conn0);
+    // Create stored procedures for SP-based execution (only if enabled)
+    if (use_sp) create_smallbank_stored_procedures(conn0);
 
     // Initialize Smart Router anyway
     std::cout << "Initializing Smart Router..." << std::endl;
@@ -1011,11 +1170,17 @@ int main(int argc, char *argv[]) {
             params->thread_id = j;
             params->thread_count = worker_threads;
             params->zipfian_theta = zipfian_theta;
-            db_conn_threads.emplace_back(run_smallbank_txns, params, logger_);
+            if (use_sp)
+                db_conn_threads.emplace_back(run_smallbank_txns_sp, params, logger_);
+            else
+                db_conn_threads.emplace_back(run_smallbank_txns, params, logger_);
             // 测试路由吞吐量
             // db_conn_threads.emplace_back(run_smallbank_empty, params, logger_);
         }
     }
+
+    // !begin RUN Router
+    smart_router->start_router();
 
     // Start a separate thread to print TPS periodically
     std::thread tps_thread(print_tps_loop);
@@ -1056,6 +1221,12 @@ int main(int argc, char *argv[]) {
     if(smart_router) {
         snapshot2 = take_router_snapshot(smart_router);
         print_diff_snapshot(snapshot1, snapshot2);
+    }
+    {
+        double exec_txn_sum_ms = smart_router->sum_worker_thread_exec_time();
+        std::cout << "exec txn sum ms: " << exec_txn_sum_ms << " ms" << std::endl;
+        std::cout << "Average txn exec ms per thread: " << (worker_threads > 0 ? exec_txn_sum_ms / worker_threads : 0.0) << " ms" << std::endl;
+        std::cout << "Average txn exec ms: " << (exe_count > 0 ? exec_txn_sum_ms / exe_count : 0.0) << " ms" << std::endl;
     }
     std::cout << "All transaction threads completed." << std::endl;
     for(int i =0; i<DBConnection.size(); i++){

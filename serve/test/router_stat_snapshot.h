@@ -4,6 +4,7 @@
 #include <string>
 #include <iostream>
 #include "smart_router.h"
+#include "config.h"
 
 // RouterStatSnapshot: a lightweight snapshot of SmartRouter statistics
 // Purpose: capture a point-in-time copy of counters (non-atomic types) so
@@ -73,11 +74,12 @@ struct RouterStatSnapshot {
     // for time breakdown
     double total_time_ms = 0.0;
     double fetch_txn_from_pool_ms = 0.0;
-    double schedule_batch_total_ms = 0.0;
+    double schedule_total_ms = 0.0;
     double preprocess_txn_ms, wait_last_batch_finish_ms = 0.0;
     double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double ownership_retrieval_and_devide_unconflicted_txn_ms, process_conflicted_txn_ms = 0.0;
+    double sum_worker_thread_exec_time_ms = 0.0;
 
     // Helpers
     void print_snapshot() const {
@@ -140,7 +142,7 @@ struct RouterStatSnapshot {
         std::cout << "-----SmartRouter Time Statistics (ms)-----:" << std::endl;
         std::cout << "  Total Time: " << total_time_ms << " ms" << std::endl;
         std::cout << "  Fetch Txn From Pool Time: " <<fetch_txn_from_pool_ms << " ms" << std::endl;
-        std::cout << "  Schedule Batch Total Time: " << schedule_batch_total_ms << " ms" << std::endl;
+        std::cout << "  Schedule Batch Total Time: " << schedule_total_ms << " ms" << std::endl;
         std::cout << "    Preprocess Txn Time: " << preprocess_txn_ms << " ms" << std::endl;
         std::cout << "      Merge Global Txid To Txn Map Time: " << merge_global_txid_to_txn_map_ms << " ms" << std::endl;
         std::cout << "      Compute Conflict Time: " << compute_conflict_ms << " ms" << std::endl;
@@ -148,6 +150,8 @@ struct RouterStatSnapshot {
         std::cout << "    Ownership Retrieval And Devide Unconflicted Txn Time: " 
                   << ownership_retrieval_and_devide_unconflicted_txn_ms << " ms" << std::endl;
         std::cout << "    Process Conflicted Txn Time: " << process_conflicted_txn_ms << " ms" << std::endl;
+        // std::cout << "  Sum Worker Thread Exec Time: " << sum_worker_thread_exec_time_ms << " ms" << std::endl;
+        std::cout << "  Average Worker Thread Exec Time: " << sum_worker_thread_exec_time_ms / worker_threads << " ms" << std::endl;
         std::cout << "------------------------------------------" << std::endl;
         return;
     }
@@ -211,16 +215,22 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.metis_partial_and_ownership_cross_unequal = s.metis_partial_and_ownership_cross_unequal.load(std::memory_order_relaxed);
 
     // time breakdown
+    router->sum_worker_thread_exec_time(); // update the sum
+    if(SYSTEM_MODE >= 0 && SYSTEM_MODE <= 8) {
+        // 对于这些模式, 是使用多线程router的，因此需要计算平均
+        router->Record_time_ms();
+    }
     SmartRouter::TimeBreakdown& tdb = router->get_time_breakdown();
     snap.total_time_ms = tdb.total_time_ms;
     snap.fetch_txn_from_pool_ms = tdb.fetch_txn_from_pool_ms;
-    snap.schedule_batch_total_ms = tdb.schedule_batch_total_ms;
+    snap.schedule_total_ms = tdb.schedule_total_ms;
     snap.preprocess_txn_ms = tdb.preprocess_txn_ms;
     snap.merge_global_txid_to_txn_map_ms = tdb.merge_global_txid_to_txn_map_ms;
     snap.compute_conflict_ms = tdb.compute_conflict_ms;
     snap.wait_last_batch_finish_ms = tdb.wait_last_batch_finish_ms;
     snap.ownership_retrieval_and_devide_unconflicted_txn_ms = tdb.ownership_retrieval_and_devide_unconflicted_txn_ms;
     snap.process_conflicted_txn_ms = tdb.process_conflicted_txn_ms;
+    snap.sum_worker_thread_exec_time_ms = tdb.sum_worker_thread_exec_time_ms;
     return snap;
 }
 
@@ -305,13 +315,14 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     // time breakdown
     d.total_time_ms = b.total_time_ms - a.total_time_ms;
     d.fetch_txn_from_pool_ms = b.fetch_txn_from_pool_ms - a.fetch_txn_from_pool_ms;
-    d.schedule_batch_total_ms = b.schedule_batch_total_ms - a.schedule_batch_total_ms;
+    d.schedule_total_ms = b.schedule_total_ms - a.schedule_total_ms;
     d.preprocess_txn_ms = b.preprocess_txn_ms - a.preprocess_txn_ms;
     d.merge_global_txid_to_txn_map_ms = b.merge_global_txid_to_txn_map_ms - a.merge_global_txid_to_txn_map_ms;
     d.compute_conflict_ms = b.compute_conflict_ms - a.compute_conflict_ms;
     d.wait_last_batch_finish_ms = b.wait_last_batch_finish_ms - a.wait_last_batch_finish_ms;
     d.ownership_retrieval_and_devide_unconflicted_txn_ms = b.ownership_retrieval_and_devide_unconflicted_txn_ms - a.ownership_retrieval_and_devide_unconflicted_txn_ms;
     d.process_conflicted_txn_ms = b.process_conflicted_txn_ms - a.process_conflicted_txn_ms;
+    d.sum_worker_thread_exec_time_ms = b.sum_worker_thread_exec_time_ms - a.sum_worker_thread_exec_time_ms;
     return d;
 }
 

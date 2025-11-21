@@ -12,6 +12,7 @@
 #include "util/zipf.h"
 #include "common.h"
 #include "config.h"
+#include <pqxx/pqxx>
 
 /* STORED PROCEDURE EXECUTION FREQUENCIES (0-100) */
 #define FREQUENCY_AMALGAMATE 15
@@ -252,3 +253,174 @@ private:
   std::vector<std::vector<std::pair<int, float>>> user_friend_graph; // 每个用户的朋友图, 模拟亲和性
   std::string friend_graph_export_file = "friend_graph.csv"; // 导出社交图 CSV 文件
 };
+
+// Create or replace SmallBank stored procedures
+static void create_smallbank_stored_procedures(pqxx::connection* conn) {
+        std::cout << "Creating stored procedures..." << std::endl;
+        try {
+                pqxx::work txn(*conn);
+
+                // Amalgamate: zero checking/savings of a1, deposit total into a2.checking
+                        txn.exec(R"SQL(
+                CREATE OR REPLACE FUNCTION sp_amalgamate(a1 INT, a2 INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                LANGUAGE plpgsql AS $$
+                DECLARE
+                    c1_ctid TID;
+                    s1_ctid TID;
+                    c2_ctid TID;
+                    c1_bal INT;
+                    s1_bal INT;
+                    total_bal INT;
+                BEGIN
+                -- ① update checking(a1)
+                UPDATE checking c
+                SET balance = 0
+                WHERE c.id = a1
+                RETURNING c.ctid, c.balance INTO c1_ctid, c1_bal;
+
+                -- ② update savings(a1)
+                UPDATE savings s
+                SET balance = 0
+                WHERE s.id = a1
+                RETURNING s.ctid, s.balance INTO s1_ctid, s1_bal;
+
+                -- ③ 合并
+                total_bal := COALESCE(c1_bal,0) + COALESCE(s1_bal,0);
+
+                -- ④ deposit into checking(a2)
+                UPDATE checking c2
+                SET balance = total_bal
+                WHERE c2.id = a2
+                RETURNING c2.ctid, c2.balance INTO c2_ctid, balance;
+
+                --------------------------------------------------------------------
+                --  最终一次性返回三个修改结果（每个 tuple 的最终 ctid) 
+                --------------------------------------------------------------------
+                RETURN QUERY 
+                    SELECT 'checking', a1, c1_ctid, 0;      -- 更新后的 checking(a1)
+                RETURN QUERY 
+                    SELECT 'savings', a1, s1_ctid, 0;       -- 更新后的 savings(a1)
+                RETURN QUERY 
+                    SELECT 'checking', a2, c2_ctid, balance;-- checking(a2) 的最终余额
+                END;
+                $$;
+                )SQL");
+
+                // SendPayment: a1.checking -= 10, a2.checking += 10
+                txn.exec(R"SQL(
+                CREATE OR REPLACE FUNCTION sp_send_payment(a1 INT, a2 INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                LANGUAGE plpgsql AS $$
+                DECLARE
+                    c1_ctid TID;
+                    c2_ctid TID;
+                    c1_bal INT;
+                    c2_bal INT;
+                BEGIN
+                    UPDATE checking c1
+                    SET balance = c1.balance - 10
+                    WHERE c1.id = a1
+                    RETURNING c1.ctid, c1.balance INTO c1_ctid, c1_bal;
+
+                    UPDATE checking c2
+                    SET balance = c2.balance + 10
+                    WHERE c2.id = a2
+                    RETURNING c2.ctid, c2.balance INTO c2_ctid, c2_bal;
+
+                    RETURN QUERY SELECT 'checking'::text, a1, c1_ctid, c1_bal;
+                    RETURN QUERY SELECT 'checking'::text, a2, c2_ctid, c2_bal;
+                END; $$;
+                )SQL");
+
+                // DepositChecking: a1.checking += 100
+                txn.exec(R"SQL(
+                CREATE OR REPLACE FUNCTION sp_deposit_checking(a1 INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                LANGUAGE plpgsql AS $$
+                DECLARE
+                    c_ctid TID;
+                    c_bal INT;
+                BEGIN
+                    UPDATE checking c
+                    SET balance = c.balance + 100
+                    WHERE c.id = a1
+                    RETURNING c.ctid, c.balance INTO c_ctid, c_bal;
+
+                    RETURN QUERY SELECT 'checking'::text, a1, c_ctid, c_bal;
+                END; $$;
+                )SQL");
+
+                // WriteCheck: read savings(a1), update checking(a1) -= 50
+                txn.exec(R"SQL(
+                CREATE OR REPLACE FUNCTION sp_write_check(a1 INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                LANGUAGE plpgsql AS $$
+                DECLARE
+                    s_ctid TID;
+                    s_bal  INT;
+                    c_ctid TID;
+                    c_bal  INT;
+                BEGIN
+                    SELECT s.ctid, s.balance INTO s_ctid, s_bal
+                    FROM savings s WHERE s.id = a1;
+
+                    UPDATE checking c
+                    SET balance = c.balance - 50
+                    WHERE c.id = a1
+                    RETURNING c.ctid, c.balance INTO c_ctid, c_bal;
+
+                    RETURN QUERY SELECT 'savings'::text,  a1, s_ctid, s_bal;
+                    RETURN QUERY SELECT 'checking'::text, a1, c_ctid, c_bal;
+                END; $$;
+                )SQL");
+
+                // Balance: read checking(a1), savings(a1)
+                txn.exec(R"SQL(
+                CREATE OR REPLACE FUNCTION sp_balance(a1 INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                LANGUAGE plpgsql AS $$
+                DECLARE
+                    c_ctid TID;
+                    c_bal  INT;
+                    s_ctid TID;
+                    s_bal  INT;
+                BEGIN
+                    SELECT c.ctid, c.balance INTO c_ctid, c_bal
+                    FROM checking c WHERE c.id = a1;
+
+                    SELECT s.ctid, s.balance INTO s_ctid, s_bal
+                    FROM savings s WHERE s.id = a1;
+
+                    RETURN QUERY SELECT 'checking'::text, a1, c_ctid, c_bal;
+                    RETURN QUERY SELECT 'savings'::text,  a1, s_ctid, s_bal;
+                END; $$;
+                )SQL");
+
+                // TransactSavings: a1.savings += 20
+                txn.exec(R"SQL(
+                CREATE OR REPLACE FUNCTION sp_transact_savings(a1 INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                LANGUAGE plpgsql AS $$
+                DECLARE
+                    s_ctid TID;
+                    s_bal  INT;
+                BEGIN
+                    UPDATE savings s
+                    SET balance = s.balance + 20
+                    WHERE s.id = a1
+                    RETURNING s.ctid, s.balance INTO s_ctid, s_bal;
+
+                    RETURN QUERY SELECT 'savings'::text, a1, s_ctid, s_bal;
+                END; $$;
+                )SQL");
+
+                txn.commit();
+                std::cout << "Stored procedures created." << std::endl;
+        } catch (const std::exception &e) {
+                std::cerr << "Error creating stored procedures: " << e.what() << std::endl;
+        }
+}
+
+// Run SmallBank transactions using stored procedures (similar to run_smallbank_txns)
+void run_smallbank_txns_sp(thread_params* params, class Logger* logger_);

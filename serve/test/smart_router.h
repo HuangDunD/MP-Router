@@ -85,13 +85,23 @@ public:
 
     // 统计时间开销
     struct TimeBreakdown {
+        // 每个线程的总时间开销, for system mode 0-8, 因为这些模式下路由是多线程处理模式
+        std::vector<double> total_time_ms_per_thread;
+        std::vector<double> fetch_txn_from_pool_ms_per_thread;
+        std::vector<double> schedule_decision_ms_per_thread;
+
+        // 时间开销细分
         double total_time_ms = 0.0;
         double fetch_txn_from_pool_ms = 0.0;
-        double schedule_batch_total_ms = 0.0;
+        double schedule_total_ms = 0.0;
         double preprocess_txn_ms, wait_last_batch_finish_ms = 0.0;
         double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
         double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
         double ownership_retrieval_and_devide_unconflicted_txn_ms, process_conflicted_txn_ms = 0.0;
+
+        // 工作线程的执行时间
+        std::vector<double> worker_thread_exec_time_ms;
+        double sum_worker_thread_exec_time_ms; 
     };
 
     struct Stats {
@@ -178,6 +188,10 @@ public:
         metis_->set_thread_pool(&threadpool);
         metis_->init_node_nums(cfg.partition_nums);
         ownership_table_ = new OwnershipTable(logger);
+        time_stats_.worker_thread_exec_time_ms.resize(worker_threads_, 0.0);
+        time_stats_.total_time_ms_per_thread.resize(worker_threads_, 0.0);
+        time_stats_.fetch_txn_from_pool_ms_per_thread.resize(worker_threads_, 0.0);
+        time_stats_.schedule_decision_ms_per_thread.resize(worker_threads_, 0.0);
 
         // for logging access key
         #if LOG_ACCESS_KEY
@@ -194,17 +208,19 @@ public:
 
         // start the router thread
         if(SYSTEM_MODE <= 8){
-            for(int i=0; i<worker_threads; i++) {
+            router_worker_threads_ = worker_threads_;
+            for(int i=0; i<worker_threads_; i++) {
                 std::thread router_thread([this, i]() {
                     std::string thread_name = "SmartRouter_" + std::to_string(i);
                     pthread_setname_np(pthread_self(), thread_name.c_str());
-                    this->run_router_worker();
+                    this->run_router_worker(i);
                 });
                 pthread_setname_np(router_thread.native_handle(), ("SmartRouter_" + std::to_string(i)).c_str());
                 router_thread.detach();
             }
         }
         else if (SYSTEM_MODE == 9 || SYSTEM_MODE == 10) {
+            router_worker_threads_ = 1; // SYSTEM_MODE 9 和 10 只启动一个路由线程
             // SYSTEM_MODE 9 的 SmartRouter 线程启动逻辑（如果有不同的话）
             std::thread router_thread([this]() {
                 std::string thread_name = "SmartRouter";
@@ -214,6 +230,7 @@ public:
             router_thread.detach();
         }
         else if (SYSTEM_MODE == 11) {
+            router_worker_threads_ = 1; // SYSTEM_MODE 11 只启动一个路由线程
             // SYSTEM_MODE 11 的 SmartRouter 线程启动逻辑（如果有不同的话）
             std::thread router_thread([this]() {
                 std::string thread_name = "SmartRouter";
@@ -264,6 +281,12 @@ public:
             std::cout << "前10% key 占总访问比例:  " << r10 << "%\n";
             std::cout << "前50% key 占总访问比例:  " << r50 << "%\n";
         #endif
+    }
+
+    void start_router(){
+        std::unique_lock<std::mutex> lock(start_router_mutex);
+        start_router_ = true;
+        start_router_cv.notify_all();
     }
 
     // 可能Update SQL执行之后数据页所在的位置, 根据returning ctid 进行更新key-page映射
@@ -486,7 +509,7 @@ public:
 
     // 这个是路由层的主循环, 他不断从txn_pool中取出事务进行路由
     // 进行的路由决策会放入txn_queue中，供执行层消费
-    void run_router_worker() {
+    void run_router_worker(int thread_id) {
         assert(SYSTEM_MODE >=0 && SYSTEM_MODE <=8); 
         // for routing needed db connections, each routing thread has its own connections
         std::vector<pqxx::connection*> thread_conns_vec;
@@ -494,7 +517,24 @@ public:
             pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
             thread_conns_vec.push_back(conn);
         }
+
+        // wait for router start work
+        std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
+        start_router_cv.wait(start_router_lock, [this]() { 
+            return start_router_; 
+        });
+        start_router_lock.unlock();
+
         while (true) {
+            // 计时
+            struct timespec loop_begin_time, loop_end_time;
+            clock_gettime(CLOCK_REALTIME, &loop_begin_time);
+
+            // 计时
+            struct timespec fetch_begin_time, fetch_end_time;
+            clock_gettime(CLOCK_REALTIME, &fetch_begin_time);
+
+            // 从事务池中获取一批事务
             auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize);
             if (txn_batch == nullptr || txn_batch->empty()) {
                 // 说明事务池已经运行完成
@@ -504,8 +544,17 @@ public:
                 break;
             }
 
+            clock_gettime(CLOCK_REALTIME, &fetch_end_time);
+            time_stats_.fetch_txn_from_pool_ms_per_thread[thread_id] += 
+                (fetch_end_time.tv_sec - fetch_begin_time.tv_sec) * 1000.0 + 
+                (fetch_end_time.tv_nsec - fetch_begin_time.tv_nsec) / 1000000.0;
+
             std::vector<std::vector<TxnQueueEntry*>> node_routed_txns(ComputeNodeCount);
             for(auto& txn_entry : *txn_batch) {
+                // 计时
+                struct timespec decision_begin_time, decision_end_time;
+                clock_gettime(CLOCK_REALTIME, &decision_begin_time);
+
                 tx_id_t tx_id = txn_entry->tx_id;
                 int txn_type = txn_entry->txn_type;
                 itemkey_t account1 = txn_entry->accounts[0];
@@ -574,6 +623,11 @@ public:
                 }
                 else assert(false); // unknown mode
 
+                clock_gettime(CLOCK_REALTIME, &decision_end_time);
+                time_stats_.schedule_decision_ms_per_thread[thread_id] += 
+                    (decision_end_time.tv_sec - decision_begin_time.tv_sec) * 1000.0 + 
+                    (decision_end_time.tv_nsec - decision_begin_time.tv_nsec) / 1000000.0;
+
                 // 将事务放入对应的TxnQueue中
                 node_routed_txns[routed_node_id].push_back(txn_entry);
                 if(node_routed_txns[routed_node_id].size() >= BatchExecutorPOPTxnSize){
@@ -590,6 +644,12 @@ public:
                     node_routed_txns[node_id].clear();
                 }
             }
+
+            // 计时
+            clock_gettime(CLOCK_REALTIME, &loop_end_time);
+            time_stats_.total_time_ms_per_thread[thread_id] += 
+                (loop_end_time.tv_sec - loop_begin_time.tv_sec) * 1000.0 + 
+                (loop_end_time.tv_nsec - loop_begin_time.tv_nsec) / 1000000.0;
         }
         std::cout << "Router worker thread finished." << std::endl;
     }
@@ -603,6 +663,14 @@ public:
             pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
             thread_conns_vec.push_back(conn);
         }
+
+        // wait for router start work
+        std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
+        start_router_cv.wait(start_router_lock, [this]() { 
+            return start_router_; 
+        });
+        start_router_lock.unlock();
+
         while (true) {
             logger->info("Router Worker: Fetching batch " + std::to_string(batch_id) + " from txn pool.");
             auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize);
@@ -676,6 +744,14 @@ public:
             pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
             thread_conns_vec.push_back(conn);
         }
+
+        // wait for router start work
+        std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
+        start_router_cv.wait(start_router_lock, [this]() { 
+            return start_router_; 
+        });
+        start_router_lock.unlock();
+
         batch_id = -1; // 对于流水线模式，初始batch_id为-1，因为同步点get_route_primary_batch_schedule_v2中会先+1
         while (true) {
             // 计时
@@ -715,7 +791,7 @@ public:
 
             // 计时
             clock_gettime(CLOCK_REALTIME, &end_time);
-            time_stats_.schedule_batch_total_ms += 
+            time_stats_.schedule_total_ms += 
                 (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
 
             // 使用pipeline模式时，事务已经在get_route_primary_batch_schedule_v2中被放入txn_queues_，这里不需要再做一次放入操作
@@ -776,6 +852,42 @@ public:
 
     TimeBreakdown& get_time_breakdown() {
         return time_stats_;
+    }
+
+    void add_worker_thread_exec_time(int thread_id, double exec_time_ms) {
+        time_stats_.worker_thread_exec_time_ms[thread_id] += exec_time_ms;
+    }
+
+    void Record_time_ms() {
+        for (const auto& t : time_stats_.total_time_ms_per_thread) {
+            time_stats_.total_time_ms += t;
+        }
+        time_stats_.total_time_ms /= router_worker_threads_; // 取平均
+        for (const auto& t : time_stats_.fetch_txn_from_pool_ms_per_thread) {
+            time_stats_.fetch_txn_from_pool_ms += t;
+        }
+        time_stats_.fetch_txn_from_pool_ms /= router_worker_threads_; // 取平均
+        for (const auto& t : time_stats_.schedule_decision_ms_per_thread) {
+            time_stats_.schedule_total_ms += t;
+        }
+        time_stats_.schedule_total_ms /= router_worker_threads_; // 取平均
+    }
+
+    double sum_worker_thread_exec_time() {
+        int total_time = 0;
+        for (const auto& t : time_stats_.worker_thread_exec_time_ms) {
+            total_time += t;
+        }
+        time_stats_.sum_worker_thread_exec_time_ms = total_time;
+        return time_stats_.sum_worker_thread_exec_time_ms;
+    }
+
+    double get_average_worker_thread_exec_time() const {
+        return time_stats_.sum_worker_thread_exec_time_ms / static_cast<double>(db_con_worker_threads);
+    }   
+
+    int get_db_connections_worker_thread() const {
+        return db_con_worker_threads;
     }
 
     const NewMetis::Stats& get_metis_stats() const {
@@ -1035,6 +1147,7 @@ private:
     Config cfg_{};
     Logger* logger;
     int worker_threads_; // 路由工作线程数
+    int router_worker_threads_; // 实际路由工作线程数
     int db_con_worker_threads; // 每个计算节点的数据库连接线程数
 
     // 一级缓存: hot hash (key -> HotEntry)
@@ -1076,4 +1189,9 @@ private:
     std::condition_variable batch_cv;
     int batch_id = 0;
     std::vector<int> batch_finished_flags;
+
+    // start router flag
+    bool start_router_ = false;
+    std::condition_variable start_router_cv;
+    std::mutex start_router_mutex;
 };
