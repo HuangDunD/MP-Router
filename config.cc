@@ -15,5 +15,5 @@ int MetisWarmupRound = 10;
 bool WarmupEnd = false;
 int TxnPoolMaxSize = 100000;
 int TxnQueueMaxSize = 10000;
-int BatchRouterProcessSize = 1000;
+int BatchRouterProcessSize = 10000;
 int BatchExecutorPOPTxnSize = 20;

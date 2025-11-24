@@ -71,10 +71,10 @@ enum class SmallBankCityType : uint64_t {
 // Thread parameters structure
 struct thread_params
 {
+    node_id_t compute_node_id_connecter; // the compute node id this thread connects to
     int thread_id;
     int thread_count;
     double zipfian_theta;
-	node_id_t compute_node_id_connecter; // the compute node id this thread connects to
 };
 
 static const std::vector<table_id_t> TABLE_IDS_ARR[] = {
@@ -261,9 +261,9 @@ static void create_smallbank_stored_procedures(pqxx::connection* conn) {
                 pqxx::work txn(*conn);
 
                 // Amalgamate: zero checking/savings of a1, deposit total into a2.checking
-                        txn.exec(R"SQL(
+                txn.exec(R"SQL(
                 CREATE OR REPLACE FUNCTION sp_amalgamate(a1 INT, a2 INT)
-                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
                 LANGUAGE plpgsql AS $$
                 DECLARE
                     c1_ctid TID;
@@ -298,11 +298,11 @@ static void create_smallbank_stored_procedures(pqxx::connection* conn) {
                 --  最终一次性返回三个修改结果（每个 tuple 的最终 ctid) 
                 --------------------------------------------------------------------
                 RETURN QUERY 
-                    SELECT 'checking', a1, c1_ctid, 0;      -- 更新后的 checking(a1)
+                    SELECT 'checking'::text, a1, c1_ctid, 0, txid_current();      -- 更新后的 checking(a1)
                 RETURN QUERY 
-                    SELECT 'savings', a1, s1_ctid, 0;       -- 更新后的 savings(a1)
+                    SELECT 'savings'::text, a1, s1_ctid, 0, txid_current();       -- 更新后的 savings(a1)
                 RETURN QUERY 
-                    SELECT 'checking', a2, c2_ctid, balance;-- checking(a2) 的最终余额
+                    SELECT 'checking'::text, a2, c2_ctid, balance, txid_current();-- checking(a2) 的最终余额
                 END;
                 $$;
                 )SQL");
@@ -310,7 +310,7 @@ static void create_smallbank_stored_procedures(pqxx::connection* conn) {
                 // SendPayment: a1.checking -= 10, a2.checking += 10
                 txn.exec(R"SQL(
                 CREATE OR REPLACE FUNCTION sp_send_payment(a1 INT, a2 INT)
-                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
                 LANGUAGE plpgsql AS $$
                 DECLARE
                     c1_ctid TID;
@@ -328,15 +328,15 @@ static void create_smallbank_stored_procedures(pqxx::connection* conn) {
                     WHERE c2.id = a2
                     RETURNING c2.ctid, c2.balance INTO c2_ctid, c2_bal;
 
-                    RETURN QUERY SELECT 'checking'::text, a1, c1_ctid, c1_bal;
-                    RETURN QUERY SELECT 'checking'::text, a2, c2_ctid, c2_bal;
+                    RETURN QUERY SELECT 'checking'::text, a1, c1_ctid, c1_bal, txid_current();
+                    RETURN QUERY SELECT 'checking'::text, a2, c2_ctid, c2_bal, txid_current();
                 END; $$;
                 )SQL");
 
                 // DepositChecking: a1.checking += 100
                 txn.exec(R"SQL(
                 CREATE OR REPLACE FUNCTION sp_deposit_checking(a1 INT)
-                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
                 LANGUAGE plpgsql AS $$
                 DECLARE
                     c_ctid TID;
@@ -347,14 +347,14 @@ static void create_smallbank_stored_procedures(pqxx::connection* conn) {
                     WHERE c.id = a1
                     RETURNING c.ctid, c.balance INTO c_ctid, c_bal;
 
-                    RETURN QUERY SELECT 'checking'::text, a1, c_ctid, c_bal;
+                    RETURN QUERY SELECT 'checking'::text, a1, c_ctid, c_bal, txid_current();
                 END; $$;
                 )SQL");
 
                 // WriteCheck: read savings(a1), update checking(a1) -= 50
                 txn.exec(R"SQL(
                 CREATE OR REPLACE FUNCTION sp_write_check(a1 INT)
-                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
                 LANGUAGE plpgsql AS $$
                 DECLARE
                     s_ctid TID;
@@ -370,15 +370,15 @@ static void create_smallbank_stored_procedures(pqxx::connection* conn) {
                     WHERE c.id = a1
                     RETURNING c.ctid, c.balance INTO c_ctid, c_bal;
 
-                    RETURN QUERY SELECT 'savings'::text,  a1, s_ctid, s_bal;
-                    RETURN QUERY SELECT 'checking'::text, a1, c_ctid, c_bal;
+                    RETURN QUERY SELECT 'savings'::text,  a1, s_ctid, s_bal, txid_current();
+                    RETURN QUERY SELECT 'checking'::text, a1, c_ctid, c_bal, txid_current();
                 END; $$;
                 )SQL");
 
                 // Balance: read checking(a1), savings(a1)
                 txn.exec(R"SQL(
                 CREATE OR REPLACE FUNCTION sp_balance(a1 INT)
-                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
                 LANGUAGE plpgsql AS $$
                 DECLARE
                     c_ctid TID;
@@ -392,15 +392,15 @@ static void create_smallbank_stored_procedures(pqxx::connection* conn) {
                     SELECT s.ctid, s.balance INTO s_ctid, s_bal
                     FROM savings s WHERE s.id = a1;
 
-                    RETURN QUERY SELECT 'checking'::text, a1, c_ctid, c_bal;
-                    RETURN QUERY SELECT 'savings'::text,  a1, s_ctid, s_bal;
+                    RETURN QUERY SELECT 'checking'::text, a1, c_ctid, c_bal, txid_current();
+                    RETURN QUERY SELECT 'savings'::text,  a1, s_ctid, s_bal, txid_current();
                 END; $$;
                 )SQL");
 
                 // TransactSavings: a1.savings += 20
                 txn.exec(R"SQL(
                 CREATE OR REPLACE FUNCTION sp_transact_savings(a1 INT)
-                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT)
+                RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
                 LANGUAGE plpgsql AS $$
                 DECLARE
                     s_ctid TID;
@@ -411,7 +411,7 @@ static void create_smallbank_stored_procedures(pqxx::connection* conn) {
                     WHERE s.id = a1
                     RETURNING s.ctid, s.balance INTO s_ctid, s_bal;
 
-                    RETURN QUERY SELECT 'savings'::text, a1, s_ctid, s_bal;
+                    RETURN QUERY SELECT 'savings'::text, a1, s_ctid, s_bal, txid_current();
                 END; $$;
                 )SQL");
 

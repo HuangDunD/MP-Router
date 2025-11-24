@@ -72,14 +72,18 @@ struct RouterStatSnapshot {
     uint64_t metis_partial_and_ownership_cross_equal = 0;
     uint64_t metis_partial_and_ownership_cross_unequal = 0; 
     // for time breakdown
+    timespec snapshot_ts;
     double total_time_ms = 0.0;
     double fetch_txn_from_pool_ms = 0.0;
     double schedule_total_ms = 0.0;
+    double push_txn_to_queue_ms = 0.0;
     double preprocess_txn_ms, wait_last_batch_finish_ms = 0.0;
     double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double ownership_retrieval_and_devide_unconflicted_txn_ms, process_conflicted_txn_ms = 0.0;
-    double sum_worker_thread_exec_time_ms = 0.0;
+    std::vector<double> pop_txn_total_ms_per_node;
+    std::vector<double> wait_next_batch_total_ms_per_node;
+    std::vector<double> sum_worker_thread_exec_time_ms_per_node;
 
     // Helpers
     void print_snapshot() const {
@@ -139,8 +143,9 @@ struct RouterStatSnapshot {
         }
         std::cout << "*********************************************" << std::endl;
 
-        std::cout << "-----SmartRouter Time Statistics (ms)-----:" << std::endl;
-        std::cout << "  Total Time: " << total_time_ms << " ms" << std::endl;
+        std::cout << "----- Time Statistics (ms)-----:" << std::endl;
+        std::cout << "Total Time Elapsed: " << total_time_ms << " ms" << std::endl;
+        std::cout << "[Router Thread Time Breakdown] " << std::endl;
         std::cout << "  Fetch Txn From Pool Time: " <<fetch_txn_from_pool_ms << " ms" << std::endl;
         std::cout << "  Schedule Batch Total Time: " << schedule_total_ms << " ms" << std::endl;
         std::cout << "    Preprocess Txn Time: " << preprocess_txn_ms << " ms" << std::endl;
@@ -150,8 +155,15 @@ struct RouterStatSnapshot {
         std::cout << "    Ownership Retrieval And Devide Unconflicted Txn Time: " 
                   << ownership_retrieval_and_devide_unconflicted_txn_ms << " ms" << std::endl;
         std::cout << "    Process Conflicted Txn Time: " << process_conflicted_txn_ms << " ms" << std::endl;
-        // std::cout << "  Sum Worker Thread Exec Time: " << sum_worker_thread_exec_time_ms << " ms" << std::endl;
-        std::cout << "  Average Worker Thread Exec Time: " << sum_worker_thread_exec_time_ms / worker_threads << " ms" << std::endl;
+        std::cout << "  Push Txn To Queue Time: " << push_txn_to_queue_ms << " ms" << std::endl;
+
+        std::cout << "[Worker Thread Time Breakdown] " << std::endl;
+        for(int i=0; i< ComputeNodeCount; i++) {
+            std::cout << "Node " << i << ":" << std::endl;
+            std::cout << "  Average Pop Txn From Queue Time: " << pop_txn_total_ms_per_node[i] / worker_threads << " ms" << std::endl; 
+            std::cout << "  Average Wait Next Batch Time: " << wait_next_batch_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            std::cout << "  Average Worker Thread Exec Time: " << sum_worker_thread_exec_time_ms_per_node[i] / worker_threads << " ms" << std::endl;
+        }
         std::cout << "------------------------------------------" << std::endl;
         return;
     }
@@ -215,13 +227,13 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.metis_partial_and_ownership_cross_unequal = s.metis_partial_and_ownership_cross_unequal.load(std::memory_order_relaxed);
 
     // time breakdown
-    router->sum_worker_thread_exec_time(); // update the sum
+    clock_gettime(CLOCK_MONOTONIC, &snap.snapshot_ts);
+    router->sum_worker_thread_stat_time(); // update the sum
     if(SYSTEM_MODE >= 0 && SYSTEM_MODE <= 8) {
         // 对于这些模式, 是使用多线程router的，因此需要计算平均
         router->Record_time_ms();
     }
     SmartRouter::TimeBreakdown& tdb = router->get_time_breakdown();
-    snap.total_time_ms = tdb.total_time_ms;
     snap.fetch_txn_from_pool_ms = tdb.fetch_txn_from_pool_ms;
     snap.schedule_total_ms = tdb.schedule_total_ms;
     snap.preprocess_txn_ms = tdb.preprocess_txn_ms;
@@ -230,7 +242,10 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.wait_last_batch_finish_ms = tdb.wait_last_batch_finish_ms;
     snap.ownership_retrieval_and_devide_unconflicted_txn_ms = tdb.ownership_retrieval_and_devide_unconflicted_txn_ms;
     snap.process_conflicted_txn_ms = tdb.process_conflicted_txn_ms;
-    snap.sum_worker_thread_exec_time_ms = tdb.sum_worker_thread_exec_time_ms;
+    snap.pop_txn_total_ms_per_node = tdb.pop_txn_total_ms_per_node;
+    snap.wait_next_batch_total_ms_per_node = tdb.wait_next_batch_total_ms_per_node;
+    snap.sum_worker_thread_exec_time_ms_per_node = tdb.sum_worker_thread_exec_time_ms_per_node;
+    snap.push_txn_to_queue_ms = tdb.push_txn_to_queue_ms;
     return snap;
 }
 
@@ -313,7 +328,7 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
                                             (b.metis_partial_and_ownership_cross_unequal - a.metis_partial_and_ownership_cross_unequal) : 0;
     
     // time breakdown
-    d.total_time_ms = b.total_time_ms - a.total_time_ms;
+    d.total_time_ms = (b.snapshot_ts.tv_sec - a.snapshot_ts.tv_sec) * 1000.0 + (b.snapshot_ts.tv_nsec - a.snapshot_ts.tv_nsec) / 1e6;
     d.fetch_txn_from_pool_ms = b.fetch_txn_from_pool_ms - a.fetch_txn_from_pool_ms;
     d.schedule_total_ms = b.schedule_total_ms - a.schedule_total_ms;
     d.preprocess_txn_ms = b.preprocess_txn_ms - a.preprocess_txn_ms;
@@ -322,7 +337,12 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.wait_last_batch_finish_ms = b.wait_last_batch_finish_ms - a.wait_last_batch_finish_ms;
     d.ownership_retrieval_and_devide_unconflicted_txn_ms = b.ownership_retrieval_and_devide_unconflicted_txn_ms - a.ownership_retrieval_and_devide_unconflicted_txn_ms;
     d.process_conflicted_txn_ms = b.process_conflicted_txn_ms - a.process_conflicted_txn_ms;
-    d.sum_worker_thread_exec_time_ms = b.sum_worker_thread_exec_time_ms - a.sum_worker_thread_exec_time_ms;
+    for(int i=0; i< ComputeNodeCount; i++) {
+        d.pop_txn_total_ms_per_node.push_back( b.pop_txn_total_ms_per_node[i] - a.pop_txn_total_ms_per_node[i] );
+        d.wait_next_batch_total_ms_per_node.push_back( b.wait_next_batch_total_ms_per_node[i] - a.wait_next_batch_total_ms_per_node[i] );
+        d.sum_worker_thread_exec_time_ms_per_node.push_back( b.sum_worker_thread_exec_time_ms_per_node[i] - a.sum_worker_thread_exec_time_ms_per_node[i] );
+    }
+    d.push_txn_to_queue_ms = b.push_txn_to_queue_ms - a.push_txn_to_queue_ms;
     return d;
 }
 

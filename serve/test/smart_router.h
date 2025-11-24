@@ -85,23 +85,30 @@ public:
 
     // 统计时间开销
     struct TimeBreakdown {
+        // ! router worker 时间分解
         // 每个线程的总时间开销, for system mode 0-8, 因为这些模式下路由是多线程处理模式
-        std::vector<double> total_time_ms_per_thread;
         std::vector<double> fetch_txn_from_pool_ms_per_thread;
         std::vector<double> schedule_decision_ms_per_thread;
+        std::vector<double> push_txn_to_queue_ms_per_thread;
 
         // 时间开销细分
-        double total_time_ms = 0.0;
         double fetch_txn_from_pool_ms = 0.0;
         double schedule_total_ms = 0.0;
-        double preprocess_txn_ms, wait_last_batch_finish_ms = 0.0;
-        double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
-        double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
-        double ownership_retrieval_and_devide_unconflicted_txn_ms, process_conflicted_txn_ms = 0.0;
+        double push_txn_to_queue_ms = 0.0;
+            // for batch scheduling
+            double preprocess_txn_ms, wait_last_batch_finish_ms = 0.0;
+            double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
+            double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
+            double ownership_retrieval_and_devide_unconflicted_txn_ms, process_conflicted_txn_ms = 0.0;
+        
+        // ! txn worker 时间分解
+        std::vector<std::vector<double>> worker_thread_exec_time_ms;
+        std::vector<std::vector<double>> pop_txn_from_queue_ms_per_thread;
+        std::vector<std::vector<double>> wait_next_batch_ms_per_thread;
 
-        // 工作线程的执行时间
-        std::vector<double> worker_thread_exec_time_ms;
-        double sum_worker_thread_exec_time_ms; 
+        std::vector<double> pop_txn_total_ms_per_node;
+        std::vector<double> wait_next_batch_total_ms_per_node;
+        std::vector<double> sum_worker_thread_exec_time_ms_per_node;
     };
 
     struct Stats {
@@ -188,10 +195,17 @@ public:
         metis_->set_thread_pool(&threadpool);
         metis_->init_node_nums(cfg.partition_nums);
         ownership_table_ = new OwnershipTable(logger);
-        time_stats_.worker_thread_exec_time_ms.resize(worker_threads_, 0.0);
-        time_stats_.total_time_ms_per_thread.resize(worker_threads_, 0.0);
         time_stats_.fetch_txn_from_pool_ms_per_thread.resize(worker_threads_, 0.0);
         time_stats_.schedule_decision_ms_per_thread.resize(worker_threads_, 0.0);
+        time_stats_.push_txn_to_queue_ms_per_thread.resize(worker_threads_, 0.0);
+
+        time_stats_.pop_txn_from_queue_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.wait_next_batch_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.worker_thread_exec_time_ms.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+
+        time_stats_.pop_txn_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.wait_next_batch_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.sum_worker_thread_exec_time_ms_per_node.resize(ComputeNodeCount, 0.0); 
 
         // for logging access key
         #if LOG_ACCESS_KEY
@@ -527,12 +541,8 @@ public:
 
         while (true) {
             // 计时
-            struct timespec loop_begin_time, loop_end_time;
-            clock_gettime(CLOCK_REALTIME, &loop_begin_time);
-
-            // 计时
             struct timespec fetch_begin_time, fetch_end_time;
-            clock_gettime(CLOCK_REALTIME, &fetch_begin_time);
+            clock_gettime(CLOCK_MONOTONIC, &fetch_begin_time);
 
             // 从事务池中获取一批事务
             auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize);
@@ -544,7 +554,7 @@ public:
                 break;
             }
 
-            clock_gettime(CLOCK_REALTIME, &fetch_end_time);
+            clock_gettime(CLOCK_MONOTONIC, &fetch_end_time);
             time_stats_.fetch_txn_from_pool_ms_per_thread[thread_id] += 
                 (fetch_end_time.tv_sec - fetch_begin_time.tv_sec) * 1000.0 + 
                 (fetch_end_time.tv_nsec - fetch_begin_time.tv_nsec) / 1000000.0;
@@ -553,7 +563,7 @@ public:
             for(auto& txn_entry : *txn_batch) {
                 // 计时
                 struct timespec decision_begin_time, decision_end_time;
-                clock_gettime(CLOCK_REALTIME, &decision_begin_time);
+                clock_gettime(CLOCK_MONOTONIC, &decision_begin_time);
 
                 tx_id_t tx_id = txn_entry->tx_id;
                 int txn_type = txn_entry->txn_type;
@@ -623,11 +633,14 @@ public:
                 }
                 else assert(false); // unknown mode
 
-                clock_gettime(CLOCK_REALTIME, &decision_end_time);
+                clock_gettime(CLOCK_MONOTONIC, &decision_end_time);
                 time_stats_.schedule_decision_ms_per_thread[thread_id] += 
                     (decision_end_time.tv_sec - decision_begin_time.tv_sec) * 1000.0 + 
                     (decision_end_time.tv_nsec - decision_begin_time.tv_nsec) / 1000000.0;
 
+                // 计时
+                struct timespec push_begin_time, push_end_time;
+                clock_gettime(CLOCK_MONOTONIC, &push_begin_time);
                 // 将事务放入对应的TxnQueue中
                 node_routed_txns[routed_node_id].push_back(txn_entry);
                 if(node_routed_txns[routed_node_id].size() >= BatchExecutorPOPTxnSize){
@@ -635,8 +648,14 @@ public:
                     routed_txn_cnt_per_node[routed_node_id] += node_routed_txns[routed_node_id].size();
                     node_routed_txns[routed_node_id].clear();
                 }
+                clock_gettime(CLOCK_MONOTONIC, &push_end_time);
+                time_stats_.push_txn_to_queue_ms_per_thread[thread_id] += 
+                    (push_end_time.tv_sec - push_begin_time.tv_sec) * 1000.0 + 
+                    (push_end_time.tv_nsec - push_begin_time.tv_nsec) / 1000000.0;
             }
             // push剩余的事务
+            struct timespec push_begin_time, push_end_time;
+            clock_gettime(CLOCK_MONOTONIC, &push_begin_time);
             for(int node_id = 0; node_id < ComputeNodeCount; node_id++){
                 if(!node_routed_txns[node_id].empty()){
                     txn_queues_[node_id]->push_txn_back_batch(node_routed_txns[node_id]);
@@ -644,12 +663,10 @@ public:
                     node_routed_txns[node_id].clear();
                 }
             }
-
-            // 计时
-            clock_gettime(CLOCK_REALTIME, &loop_end_time);
-            time_stats_.total_time_ms_per_thread[thread_id] += 
-                (loop_end_time.tv_sec - loop_begin_time.tv_sec) * 1000.0 + 
-                (loop_end_time.tv_nsec - loop_begin_time.tv_nsec) / 1000000.0;
+            clock_gettime(CLOCK_MONOTONIC, &push_end_time);
+            time_stats_.push_txn_to_queue_ms_per_thread[thread_id] += 
+                (push_end_time.tv_sec - push_begin_time.tv_sec) * 1000.0 + 
+                (push_end_time.tv_nsec - push_begin_time.tv_nsec) / 1000000.0;
         }
         std::cout << "Router worker thread finished." << std::endl;
     }
@@ -755,18 +772,14 @@ public:
         batch_id = -1; // 对于流水线模式，初始batch_id为-1，因为同步点get_route_primary_batch_schedule_v2中会先+1
         while (true) {
             // 计时
-            struct timespec loop_begin_time, loop_end_time;
-            clock_gettime(CLOCK_REALTIME, &loop_begin_time);
-
-            // 计时
             struct timespec start_time, end_time;
-            clock_gettime(CLOCK_REALTIME, &start_time);
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             // pipeline 模式下，batch_id在get_route_primary_batch_schedule_v2中自增, 这里相当于是拿的下一个batch的事务
             auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize);
 
             // 计时
-            clock_gettime(CLOCK_REALTIME, &end_time);
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
             time_stats_.fetch_txn_from_pool_ms +=
                 (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
 
@@ -782,7 +795,7 @@ public:
             assert(txn_batch->size() == BatchRouterProcessSize);
             
             // 计时
-            clock_gettime(CLOCK_REALTIME, &start_time);
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             if(SYSTEM_MODE == 11) {
                 this->get_route_primary_batch_schedule_v2(txn_batch, thread_conns_vec);
@@ -790,7 +803,7 @@ public:
             else assert(false);
 
             // 计时
-            clock_gettime(CLOCK_REALTIME, &end_time);
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
             time_stats_.schedule_total_ms += 
                 (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
 
@@ -799,11 +812,6 @@ public:
                 // 把该批的事务都分发完成，设置batch处理完成标志
                 txn_queues_[node_id]->set_batch_finished();
             }
-
-            // 计时
-            clock_gettime(CLOCK_REALTIME, &loop_end_time);
-            time_stats_.total_time_ms +=
-                (loop_end_time.tv_sec - loop_begin_time.tv_sec) * 1000.0 + (loop_end_time.tv_nsec - loop_begin_time.tv_nsec) / 1000000.0;
         }
         std::cout << "Router worker thread finished." << std::endl; 
     }
@@ -815,10 +823,10 @@ public:
         if(++batch_finished_flags[compute_node_id] >= db_con_worker_threads) {
             batch_cv.notify_all();
         }
-        // if(WarmupEnd)
-        // logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + " Thread: " + std::to_string(thread_id) +
-        //              " finished batch " + std::to_string(batch_id) + 
-        //              ", finished threads: " + std::to_string(batch_finished_flags[compute_node_id]));
+        if(WarmupEnd)
+        logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + " Thread: " + std::to_string(thread_id) +
+                     " finished batch " + std::to_string(batch_id) + 
+                     ", finished threads: " + std::to_string(batch_finished_flags[compute_node_id]));
     }
 
     // 计算节点等待
@@ -854,15 +862,23 @@ public:
         return time_stats_;
     }
 
-    void add_worker_thread_exec_time(int thread_id, double exec_time_ms) {
-        time_stats_.worker_thread_exec_time_ms[thread_id] += exec_time_ms;
+    void add_worker_thread_exec_time(node_id_t node_id, int thread_id, double exec_time_ms) {
+        time_stats_.worker_thread_exec_time_ms[node_id][thread_id] += exec_time_ms;
+    }
+
+    void add_worker_thread_pop_time(node_id_t node_id, int thread_id, double pop_time_ms) {
+        time_stats_.pop_txn_from_queue_ms_per_thread[node_id][thread_id] += pop_time_ms;
+    }
+
+    void add_worker_thread_wait_next_batch_time(node_id_t node_id, int thread_id, double wait_time_ms) {
+        time_stats_.wait_next_batch_ms_per_thread[node_id][thread_id] += wait_time_ms;
     }
 
     void Record_time_ms() {
-        for (const auto& t : time_stats_.total_time_ms_per_thread) {
-            time_stats_.total_time_ms += t;
-        }
-        time_stats_.total_time_ms /= router_worker_threads_; // 取平均
+        time_stats_.fetch_txn_from_pool_ms = 0.0; // 重置
+        time_stats_.schedule_total_ms = 0.0; // 重置
+        time_stats_.push_txn_to_queue_ms = 0.0; // 重置
+
         for (const auto& t : time_stats_.fetch_txn_from_pool_ms_per_thread) {
             time_stats_.fetch_txn_from_pool_ms += t;
         }
@@ -871,20 +887,32 @@ public:
             time_stats_.schedule_total_ms += t;
         }
         time_stats_.schedule_total_ms /= router_worker_threads_; // 取平均
-    }
-
-    double sum_worker_thread_exec_time() {
-        int total_time = 0;
-        for (const auto& t : time_stats_.worker_thread_exec_time_ms) {
-            total_time += t;
+        for (const auto& t : time_stats_.push_txn_to_queue_ms_per_thread) {
+            time_stats_.push_txn_to_queue_ms += t;
         }
-        time_stats_.sum_worker_thread_exec_time_ms = total_time;
-        return time_stats_.sum_worker_thread_exec_time_ms;
+        time_stats_.push_txn_to_queue_ms /= router_worker_threads_; // 取平均
     }
 
-    double get_average_worker_thread_exec_time() const {
-        return time_stats_.sum_worker_thread_exec_time_ms / static_cast<double>(db_con_worker_threads);
-    }   
+    void sum_worker_thread_stat_time() {
+        for(int i=0; i<ComputeNodeCount; i++) {
+            time_stats_.sum_worker_thread_exec_time_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.worker_thread_exec_time_ms[i]) {
+                time_stats_.sum_worker_thread_exec_time_ms_per_node[i] += t;
+            }
+
+            time_stats_.pop_txn_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_from_queue_ms_per_thread[i]) {
+                time_stats_.pop_txn_total_ms_per_node[i] += t; 
+            }
+
+            time_stats_.wait_next_batch_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.wait_next_batch_ms_per_thread[i]) {
+                time_stats_.wait_next_batch_total_ms_per_node[i] += t;
+            }
+        }
+
+        return ;
+    } 
 
     int get_db_connections_worker_thread() const {
         return db_con_worker_threads;

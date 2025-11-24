@@ -12,3 +12,4 @@ perf.data.old
 offlineLoad_tpcc.txt
 *.png
 *.log
+result/*

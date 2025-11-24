@@ -12,6 +12,9 @@
 #include <atomic>
 #include <cmath>
 #include <random>
+#include <fstream>
+#include <streambuf>
+#include <iomanip>
 
 #include "smallbank.h"
 #include "common.h"
@@ -38,6 +41,27 @@ thread_local uint64_t thread_gid;
 thread_local ZipfGen* zipfian_gen = nullptr;
 
 std::vector<std::atomic<int>> exec_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
+
+// A streambuf that tees output to two destinations (console + file)
+class TeeBuf : public std::streambuf {
+public:
+    TeeBuf(std::streambuf* sb1, std::streambuf* sb2) : sb1_(sb1), sb2_(sb2) {}
+protected:
+    int overflow(int c) override {
+        if (c == EOF) return !EOF;
+        int const r1 = sb1_ ? sb1_->sputc(c) : c;
+        int const r2 = sb2_ ? sb2_->sputc(c) : c;
+        return (r1 == EOF || r2 == EOF) ? EOF : c;
+    }
+    int sync() override {
+        int const r1 = sb1_ ? sb1_->pubsync() : 0;
+        int const r2 = sb2_ ? sb2_->pubsync() : 0;
+        return (r1 == 0 && r2 == 0) ? 0 : -1;
+    }
+private:
+    std::streambuf* sb1_;
+    std::streambuf* sb2_;
+};
 
 void create_table(pqxx::connection *conn0) {
     std::cout << "Create table..." << std::endl;
@@ -74,6 +98,33 @@ void create_table(pqxx::connection *conn0) {
     } catch (const std::exception &e) {
         std::cerr << "Error while creating table: " << e.what() << std::endl;
     }   
+    try {
+        pqxx::work txn(*conn0);
+        txn.exec(R"SQL(
+        ALTER TABLE checking SET ( 
+            autovacuum_enabled = on,
+            autovacuum_vacuum_scale_factor = 0.05,   
+            autovacuum_vacuum_threshold = 500,       
+            autovacuum_analyze_scale_factor = 0.05,
+            autovacuum_analyze_threshold = 500
+        );
+        )SQL");
+        std::cout << "Set checking table autovacuum parameters." << std::endl;
+        txn.exec(R"SQL(
+        ALTER TABLE savings SET ( 
+            autovacuum_enabled = on,
+            autovacuum_vacuum_scale_factor = 0.05,   
+            autovacuum_vacuum_threshold = 500,       
+            autovacuum_analyze_scale_factor = 0.05,
+            autovacuum_analyze_threshold = 500
+        );
+        )SQL");
+        std::cout << "Set savings table autovacuum parameters." << std::endl;
+        txn.commit();
+    }
+    catch (const std::exception &e) {
+        std::cerr << "Error while setting checking table autovacuum: " << e.what() << std::endl;
+    }
     try{
         // pg not support
         pqxx::work txn(*conn0);
@@ -578,13 +629,30 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
 
     int con_batch_id = 0;
     while (true) {
+        // 计时 
+        timespec pop_start_time, pop_end_time;
+        clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
+
         std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+
+        clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
+        double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
+                          (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
+        smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+
         if (txn_entries.empty()) {
             if(txn_queue->is_finished()) {
                 break;
             } else if(txn_queue->is_batch_finished()) {
                 smart_router->notify_batch_finished(compute_node_id, params->thread_id, con_batch_id);
+                // 计时
+                timespec wait_start_time, wait_end_time;
+                clock_gettime(CLOCK_MONOTONIC, &wait_start_time);
                 smart_router->wait_for_next_batch(compute_node_id, params->thread_id, con_batch_id);
+                clock_gettime(CLOCK_MONOTONIC, &wait_end_time);
+                double wait_time = (wait_end_time.tv_sec - wait_start_time.tv_sec) * 1000.0 +
+                                   (wait_end_time.tv_nsec - wait_start_time.tv_nsec) / 1000000.0;
+                smart_router->add_worker_thread_wait_next_batch_time(params->compute_node_id_connecter, params->thread_id, wait_time);
                 con_batch_id++;
                 continue;
             } else assert(false);
@@ -614,48 +682,48 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
 
             // 计时
             timespec start_time, end_time;
-            clock_gettime(CLOCK_REALTIME, &start_time);
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-            // Create a new transaction
-            pqxx::work* txn = new pqxx::work(*con);
+            // !不需要外层事务
+            pqxx::nontransaction txn(*con);
 
             try {
                 pqxx::result res;
                 switch(txn_type) {
                     case 0: { // Amalgamate
-                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_amalgamate(" +
+                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_amalgamate(" +
                                           std::to_string(account1) + "," + std::to_string(account2) + ")";
-                        res = txn->exec(sql);
+                        res = txn.exec(sql);
                         break;
                     }
                     case 1: { // SendPayment
-                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_send_payment(" +
+                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_send_payment(" +
                                           std::to_string(account1) + "," + std::to_string(account2) + ")";
-                        res = txn->exec(sql);
+                        res = txn.exec(sql);
                         break;
                     }
                     case 2: { // DepositChecking
-                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_deposit_checking(" +
+                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_deposit_checking(" +
                                           std::to_string(account1) + ")";
-                        res = txn->exec(sql);
+                        res = txn.exec(sql);
                         break;
                     }
                     case 3: { // WriteCheck
-                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_write_check(" +
+                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_write_check(" +
                                           std::to_string(account1) + ")";
-                        res = txn->exec(sql);
+                        res = txn.exec(sql);
                         break;
                     }
                     case 4: { // Balance
-                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_balance(" +
+                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_balance(" +
                                           std::to_string(account1) + ")";
-                        res = txn->exec(sql);
+                        res = txn.exec(sql);
                         break;
                     }
                     case 5: { // TransactSavings
-                        std::string sql = "SELECT rel, id, ctid, balance FROM sp_transact_savings(" +
+                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_transact_savings(" +
                                           std::to_string(account1) + ")";
-                        res = txn->exec(sql);
+                        res = txn.exec(sql);
                         break;
                     }
                 }
@@ -666,7 +734,8 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                     ctid_ret_page_ids.push_back(page_id);
                 }
 
-                txn->commit();
+                // ! 无需commit 外层事务
+                // txn->commit();
 
                 if(smart_router) {
                     smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
@@ -678,13 +747,12 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             }
 
             // 计时结束
-            clock_gettime(CLOCK_REALTIME, &end_time);
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
             double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
-            smart_router->add_worker_thread_exec_time(params->thread_id, exec_time);
+            smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             delete txn_entry;
-            delete txn;
         }
     }
     std::cout << "Finished running smallbank transactions via stored procedures." << std::endl;
@@ -775,25 +843,26 @@ void print_tps_loop() {
             route_cur_count += routed_txn_cnt_per_node_snapshot[i];
         }
         double route_tps = (route_cur_count - route_last_count) / seconds;
-        printf("[Routed TPS] %.2f txn/sec (total: %lu). ", route_tps, exec_cur_count); 
-        for(int i=0; i<ComputeNodeCount; i++) { 
+        std::cout << "[Routed TPS] " << std::fixed << std::setprecision(2) << route_tps
+                  << " txn/sec (total: " << exec_cur_count << "). ";
+        for(int i=0; i<ComputeNodeCount; i++) {
             int routed_cnt = routed_txn_cnt_per_node_snapshot[i] - routed_txn_cnt_per_node_last_snapshot[i];
             routed_txn_cnt_per_node_last_snapshot[i] = routed_txn_cnt_per_node_snapshot[i];
-            printf("Node %d: %d ", i, routed_cnt);
+            std::cout << "Node " << i << ": " << routed_cnt << ' ';
         }
-        printf("\n");
-        // print exec txn count per node 
-        for(int i=0; i<ComputeNodeCount; i++) exec_txn_cnt_per_node_snapshot[i] = exec_txn_cnt_per_node[i].load(std::memory_order_relaxed); 
+        std::cout << '\n';
+        // print exec txn count per node
+        for(int i=0; i<ComputeNodeCount; i++) exec_txn_cnt_per_node_snapshot[i] = exec_txn_cnt_per_node[i].load(std::memory_order_relaxed);
         for(int i=0; i<ComputeNodeCount; i++) txn_queue_size_snapshot[i] = txn_queues[i]->size();
-        printf("[Exec TPS] %.2f txn/sec (total: %lu). ", exec_tps, exec_cur_count); 
-        for(int i=0; i<ComputeNodeCount; i++) { 
+        std::cout << "[Exec TPS] " << std::fixed << std::setprecision(2) << exec_tps
+                  << " txn/sec (total: " << exec_cur_count << "). ";
+        for(int i=0; i<ComputeNodeCount; i++) {
             int routed_cnt = exec_txn_cnt_per_node_snapshot[i] - exec_txn_cnt_per_node_last_snapshot[i];
             exec_txn_cnt_per_node_last_snapshot[i] = exec_txn_cnt_per_node_snapshot[i];
-            printf("Node %d: %d queue remain: %d ", i, routed_cnt, txn_queue_size_snapshot[i]);
-        } 
+            std::cout << "Node " << i << ": " << routed_cnt << " queue remain: " << txn_queue_size_snapshot[i] << ' ';
+        }
         int pool_size = txn_pool->size();
-        printf(" Txn pool size: %d ", pool_size);
-        printf("\n");
+        std::cout << " Txn pool size: " << pool_size << ' ' << '\n';
         // reset for next interval
         exec_last_count = exec_cur_count;
         route_last_count = route_cur_count;
@@ -802,6 +871,15 @@ void print_tps_loop() {
 }
 
 int main(int argc, char *argv[]) {
+    // Tee std::cout/std::cerr to both console and output.txt for easy collection
+    static std::ofstream output_file("result.txt", std::ios::out | std::ios::trunc);
+    static TeeBuf cout_tbuf(std::cout.rdbuf(), output_file.rdbuf());
+    static TeeBuf cerr_tbuf(std::cerr.rdbuf(), output_file.rdbuf());
+    std::streambuf* old_cout = std::cout.rdbuf(&cout_tbuf);
+    std::streambuf* old_cerr = std::cerr.rdbuf(&cerr_tbuf);
+    // Make cout auto-flush after each insertion to keep file updated
+    std::cout.setf(std::ios::unitbuf);
+
     Logger* logger_ = new Logger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::INFO, partition_log_file_, 4096);
     // Register signal handler for SIGINT (Ctrl+C)
     signal(SIGINT, signal_handler);
@@ -822,6 +900,9 @@ int main(int argc, char *argv[]) {
     // btree read parameters
     int read_btree_mode = 0; // 0: read from conn0, 1: read from random conn
     int read_frequency = 5; // seconds
+
+    // kwr report name
+    std::string kwr_report_name = "kwr_report";
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -991,6 +1072,23 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--kwr-name") {
+            if (i + 1 < argc) {
+                kwr_report_name = argv[++i];
+                std::cout << "KWR report name set to: " << kwr_report_name << std::endl;
+            }
+            else{
+                // get the current time as a string
+                auto now = std::chrono::system_clock::now();
+                std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+                std::tm* now_tm = std::localtime(&now_time);
+                char buffer[100];
+                std::strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", now_tm);
+                std::string timestamp(buffer);  
+                kwr_report_name = "smallbank_report_" + timestamp + "_mode" + std::to_string(SYSTEM_MODE);
+                std::cout << "KWR report name set to: " << kwr_report_name << std::endl;
+            }
+        }
         else {
             std::cerr << "Error: Unknown argument " << arg << std::endl;
             print_usage(argv[0]);
@@ -1077,8 +1175,11 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
 
-    DBConnection.push_back("host=10.10.2.41 port=54321 user=system password=123456 dbname=smallbank");
-    DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.10.2.41 port=54321 user=system password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
+
+    DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
 
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
@@ -1223,10 +1324,15 @@ int main(int argc, char *argv[]) {
         print_diff_snapshot(snapshot1, snapshot2);
     }
     {
-        double exec_txn_sum_ms = smart_router->sum_worker_thread_exec_time();
-        std::cout << "exec txn sum ms: " << exec_txn_sum_ms << " ms" << std::endl;
-        std::cout << "Average txn exec ms per thread: " << (worker_threads > 0 ? exec_txn_sum_ms / worker_threads : 0.0) << " ms" << std::endl;
-        std::cout << "Average txn exec ms: " << (exe_count > 0 ? exec_txn_sum_ms / exe_count : 0.0) << " ms" << std::endl;
+        smart_router->sum_worker_thread_stat_time();
+        std::vector<double> exec_txn_sum_ms = smart_router->get_time_breakdown().sum_worker_thread_exec_time_ms_per_node;
+        double total_exec_time = 0.0;
+        for(int i =0; i<exec_txn_sum_ms.size(); i++){
+            total_exec_time += exec_txn_sum_ms[i];
+        }
+        std::cout << "exec txn sum ms: " << total_exec_time << " ms" << std::endl;
+        std::cout << "Average txn exec ms per thread: " << (worker_threads > 0 ? total_exec_time / (worker_threads * ComputeNodeCount) : 0.0) << " ms" << std::endl;
+        std::cout << "Average txn exec ms: " << (exe_count > 0 ? total_exec_time / exe_count : 0.0) << " ms" << std::endl;
     }
     std::cout << "All transaction threads completed." << std::endl;
     for(int i =0; i<DBConnection.size(); i++){
@@ -1240,16 +1346,10 @@ int main(int argc, char *argv[]) {
     std::cout << "Throughput: " << exe_count / s << " transactions per second" << std::endl;
 
     // Generate performance report, file name inluding the timestamp
-    // get the current time as a string
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-    std::tm* now_tm = std::localtime(&now_time);
-    char buffer[100];
-    std::strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", now_tm);
-    std::string timestamp(buffer);  
-    std::string report_file_warm_phase = "smallbank_report_" + timestamp + "_mode" + std::to_string(SYSTEM_MODE) + "_fisrt.html";
+
+    std::string report_file_warm_phase = kwr_report_name +  "_fisrt.html";
     generate_perf_kwr_report(conn0, start_snapshot_id, mid_snapshot_id, report_file_warm_phase);
-    std::string report_file_run_phase = "smallbank_report_" + timestamp + "_mode" + std::to_string(SYSTEM_MODE) + "_end.html";
+    std::string report_file_run_phase = kwr_report_name +  "_end.html";
     generate_perf_kwr_report(conn0, start_snapshot_id, end_snapshot_id, report_file_run_phase);
 
     // 关闭连接
@@ -1262,5 +1362,10 @@ int main(int argc, char *argv[]) {
         zipfian_gen = nullptr;
     }
 
+    // restore streams (best-effort; program may exit via signal handler earlier)
+    std::cout.rdbuf(old_cout);
+    std::cerr.rdbuf(old_cerr);
+    output_file.flush();
+    output_file.close();
     return 0;
 }
