@@ -47,8 +47,8 @@ kwr_report_path = "/home/kingbase/MP-Router/kwr/"
 
 # dynamic
 # RunModeType = [0, 3, 8, 11, 4]
-RunModeType = [11, 3, 8]
-AccessPattern = [0]
+RunModeType = [0, 3, 8, 11, 4]
+AccessPattern = [0, 1, 2]
 # AccessPattern = [0]
 ZipfianTheta = [0.3, 0.6, 0.75, 0.9]
 AccountCount = [300000]

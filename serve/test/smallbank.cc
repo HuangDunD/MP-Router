@@ -1175,14 +1175,24 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
 
+    // kes 双机, 旧版本
     // DBConnection.push_back("host=10.10.2.41 port=54321 user=system password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
 
-    DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
-    DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
+    // kes 双机, 新版本
+    DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
 
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    // kes 单机
+    // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
+
+    // 147 本机 pg
+    // DBConnection.push_back("host=127.0.0.1 port=6432 user=hcy password=123456 dbname=smallbank"); // pg12
+    // DBConnection.push_back("host=127.0.0.1 port=6432 user=hcy password=123456 dbname=smallbank"); // pg12 
+
+    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
+    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
     ComputeNodeCount = DBConnection.size();
     std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
 
