@@ -6,11 +6,11 @@
 
 #include "util/fast_random.h"
 
-static inline unsigned long GetCPUCycle() {
-  unsigned a, d;
-  __asm __volatile("rdtsc"
-                   : "=a"(a), "=d"(d));
-  return ((unsigned long)a) | (((unsigned long)d) << 32);
+inline long unsigned int GetCPUCycle() {
+  // 使用高精度时钟获取纳秒级时间戳来模拟 CPU 周期
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::high_resolution_clock::now().time_since_epoch()
+  ).count();
 }
 
 class ZipfGen {
