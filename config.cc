@@ -17,3 +17,4 @@ int TxnPoolMaxSize = 100000;
 int TxnQueueMaxSize = 10000;
 int BatchRouterProcessSize = 10000;
 int BatchExecutorPOPTxnSize = 20;
+int PreExtendPageSize = 1000000; // 预分配页面大小

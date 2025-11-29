@@ -129,7 +129,8 @@ void create_table(pqxx::connection *conn0) {
         // pg not support
         pqxx::work txn(*conn0);
         // pre-extend table to avoid frequent page extend during txn processing
-        txn.exec("SELECT sys_extend('checking', 300000)");
+        std::string extend_sql = "SELECT sys_extend('checking', " + std::to_string(PreExtendPageSize) + ")";
+        txn.exec(extend_sql);
         std::cout << "Pre-extended checking table." << std::endl;
         txn.commit();
     }
@@ -140,7 +141,8 @@ void create_table(pqxx::connection *conn0) {
         // pg not support
         pqxx::work txn(*conn0);
         // pre-extend table to avoid frequent page extend during txn processing
-        txn.exec("SELECT sys_extend('savings', 300000)");
+        std::string extend_sql = "SELECT sys_extend('savings', " + std::to_string(PreExtendPageSize) + ")";
+        txn.exec(extend_sql);
         std::cout << "Pre-extended savings table." << std::endl;
         txn.commit();
     }

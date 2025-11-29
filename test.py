@@ -33,6 +33,25 @@ def build():
         subprocess.run("cd ./build && make -j8", shell=True)
     time.sleep(1)
 
+def set_system_extend_size(size):
+    # 读取文件内容并查找特定行
+    with open('config.cc', 'r') as file:
+        lines = file.readlines()
+
+    # 查找要修改的行
+    target_line = None
+    for i, line in enumerate(lines):
+        if line.startswith('int PreExtendPageSize'):
+            target_line = i
+            break
+
+    # 修改目标行
+    if target_line is not None:
+        lines[target_line] = f'int PreExtendPageSize = {size}; // 预分配页面大小\n'
+
+    # 将更新后的内容写回文件
+    with open('config.cc', 'w') as file:
+        file.writelines(lines)
 
 # run settings
 # const
@@ -51,9 +70,9 @@ RunModeType = [0, 3, 8, 11, 4]
 AccessPattern = [0, 1, 2]
 # AccessPattern = [0]
 ZipfianTheta = [0.3, 0.6, 0.75, 0.9]
-AccountCount = [300000]
-WorkerThreadCount = [32]
-try_count = 50000
+AccountCount = [3000000]
+WorkerThreadCount = [200]
+try_count = 10000
 
 if __name__ == "__main__":
 
@@ -71,6 +90,11 @@ if __name__ == "__main__":
 
     # !开始本次的测试
     os.chdir(workspace)
+
+    if AccountCount[0] < 1000000:
+        set_system_extend_size(300000) # 预分配页面大小
+    else:
+        set_system_extend_size(1000000) # 预分配页面大小
 
     kill_server()
     build()

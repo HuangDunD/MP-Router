@@ -49,5 +49,6 @@ extern int TxnPoolMaxSize; // 事务池的最大大小
 extern int TxnQueueMaxSize; // 事务队列的最大大小
 extern int BatchRouterProcessSize; // 每次批量路由处理的事务数量
 extern int BatchExecutorPOPTxnSize; // 每次批量执行pop的事务数量
+extern int PreExtendPageSize; // 预分配页面大小
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;
