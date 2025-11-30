@@ -125,30 +125,46 @@ void create_table(pqxx::connection *conn0) {
     catch (const std::exception &e) {
         std::cerr << "Error while setting checking table autovacuum: " << e.what() << std::endl;
     }
-    try{
-        // pg not support
-        pqxx::work txn(*conn0);
-        // pre-extend table to avoid frequent page extend during txn processing
-        std::string extend_sql = "SELECT sys_extend('checking', " + std::to_string(PreExtendPageSize) + ")";
-        txn.exec(extend_sql);
-        std::cout << "Pre-extended checking table." << std::endl;
-        txn.commit();
-    }
-    catch (const std::exception &e) {
-        std::cerr << "Error while pre-extending table: " << e.what() << std::endl;
-    }
-    try{
-        // pg not support
-        pqxx::work txn(*conn0);
-        // pre-extend table to avoid frequent page extend during txn processing
-        std::string extend_sql = "SELECT sys_extend('savings', " + std::to_string(PreExtendPageSize) + ")";
-        txn.exec(extend_sql);
-        std::cout << "Pre-extended savings table." << std::endl;
-        txn.commit();
-    }
-    catch (const std::exception &e) {
-        std::cerr << "Error while pre-extending table: " << e.what() << std::endl;
-    }
+    std::thread extend_thread1([](){
+        pqxx::connection conn_extend(DBConnection[0]);
+        if (!conn_extend.is_open()) {
+            std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+            return;
+        }
+        try{
+            // pg not support
+            pqxx::nontransaction txn(conn_extend);
+            // pre-extend table to avoid frequent page extend during txn processing
+            std::string extend_sql = "SELECT sys_extend('checking', " + std::to_string(PreExtendPageSize) + ")";
+            txn.exec(extend_sql);
+            std::cout << "Pre-extended checking table." << std::endl;
+        }
+        catch (const std::exception &e) {
+            std::cerr << "Error while pre-extending checking table: " << e.what() << std::endl;
+        }
+    });
+
+    std::thread extend_thread2([](){
+        pqxx::connection conn_extend(DBConnection[0]);
+        if (!conn_extend.is_open()) {
+            std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+            return;
+        }
+        try{
+            // pg not support
+            pqxx::nontransaction txn(conn_extend);
+            // pre-extend table to avoid frequent page extend during txn processing
+            std::string extend_sql = "SELECT sys_extend('savings', " + std::to_string(PreExtendPageSize) + ")";
+            txn.exec(extend_sql);
+            std::cout << "Pre-extended savings table." << std::endl;
+        }
+        catch (const std::exception &e) {
+            std::cerr << "Error while pre-extending savings table: " << e.what() << std::endl;
+        }
+    });
+    extend_thread1.join();
+    extend_thread2.join();
+    std::cout << "Table creation and pre-extension completed." << std::endl;
 }
 
 void load_data(pqxx::connection *conn0) {
@@ -1138,6 +1154,9 @@ int main(int argc, char *argv[]) {
         break;
     case 11:
         std::cout << "\033[31m  k-router-pipeline \033[0m" << std::endl;
+        break;
+    case 13: 
+        std::cout << "\033[31m  score-based router \033[0m" << std::endl;
         break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;

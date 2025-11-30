@@ -190,7 +190,8 @@ public:
           metis_(metis),
           threadpool(worker_threads, *logger), 
           routed_txn_cnt_per_node(MaxComputeNodeCount), 
-          batch_finished_flags(MaxComputeNodeCount, 0)
+          batch_finished_flags(MaxComputeNodeCount, 0),
+          workload_balance_penalty_weights_(MaxComputeNodeCount, 0)
     {
         metis_->set_thread_pool(&threadpool);
         metis_->init_node_nums(cfg.partition_nums);
@@ -221,7 +222,7 @@ public:
         #endif
 
         // start the router thread
-        if(SYSTEM_MODE <= 8){
+        if(SYSTEM_MODE <= 8 || SYSTEM_MODE == 13){
             router_worker_threads_ = worker_threads_;
             for(int i=0; i<worker_threads_; i++) {
                 std::thread router_thread([this, i]() {
@@ -257,6 +258,16 @@ public:
             std::cerr << "Unsupported SYSTEM_MODE for SmartRouter: " << SYSTEM_MODE << std::endl;
             assert(false);
         }
+
+        std::thread compute_workload_balance_thread([this]() {
+            std::string thread_name = "ComputeLoadBalance";
+            pthread_setname_np(pthread_self(), thread_name.c_str());
+            while(true){
+                this->compute_load_balance_penalty_weights();
+                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 每100ms计算一次负载均衡惩罚权重
+            }
+        });
+        compute_workload_balance_thread.detach();
     }
 
     ~SmartRouter() {
@@ -524,7 +535,7 @@ public:
     // 这个是路由层的主循环, 他不断从txn_pool中取出事务进行路由
     // 进行的路由决策会放入txn_queue中，供执行层消费
     void run_router_worker(int thread_id) {
-        assert(SYSTEM_MODE >=0 && SYSTEM_MODE <=8); 
+        assert((SYSTEM_MODE >=0 && SYSTEM_MODE <=8) || SYSTEM_MODE == 13); 
         // for routing needed db connections, each routing thread has its own connections
         std::vector<pqxx::connection*> thread_conns_vec;
         for(int i=0; i<ComputeNodeCount; i++) {
@@ -615,7 +626,7 @@ public:
                     // get page_id from checking_page_map
                     routed_node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
                 }
-                else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8) {
+                else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13) {
                     SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
                     if(result.success) {
                         routed_node_id = result.smart_router_id;
@@ -1205,6 +1216,9 @@ private:
     std::vector<TxnQueue*> txn_queues_;
 
     std::vector<std::atomic<int>> routed_txn_cnt_per_node;
+
+    // 负载均衡权重
+    std::vector<double> workload_balance_penalty_weights_; 
 
     // log access key
     std::mutex log_mutex;

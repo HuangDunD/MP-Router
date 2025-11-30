@@ -62,7 +62,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
             debug_info += "(table_id=" + std::to_string(table_ids[i]) + ", key=" + std::to_string(keys[i]) + 
                             ", page=" + std::to_string(entry.page) + ", last_node=" + std::to_string(last_node) + "); ";
         }
-        else if(SYSTEM_MODE == 8) {
+        else if(SYSTEM_MODE == 8 || SYSTEM_MODE == 13) {
             // 计算page id
             auto entry = lookup(txn, table_ids[i], keys[i], thread_conns);
             if (entry.page == kInvalidPageId) {
@@ -420,6 +420,60 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
             if(table_ids.size() != txn->accessed_page_ids.size()) assert(false);
             for (int i=0; i<keys.size(); i++) {
                 ownership_table_->set_owner(txn, table_ids[i], keys[i], txn->accessed_page_ids[i], result.smart_router_id);
+            }
+        }
+        else if(SYSTEM_MODE == 13) {
+            // 基于page Metis的结果进行分区, 同时返回page到node的映射
+            if (!WarmupEnd) {
+                node_id_t metis_decision_node;
+                metis_->build_internal_graph(page_to_node_map, &metis_decision_node);
+            }
+            else {
+                // 填充page_to_node_map
+                for (auto &[table_page_id, _] : page_to_node_map) {
+                    node_id_t metis_node = metis_->get_metis_partitioning_result(table_page_id);
+                    page_to_node_map[table_page_id] = metis_node;
+                }
+            }
+            std::unordered_map<node_id_t, double> node_benefit_map;
+            int sum_page = page_to_node_map.size();
+            // 计算Metis带来的好处
+            std::vector<double> metis_benefit(ComputeNodeCount, 0.0);
+            for (const auto& [table_page_id, metis_node] : page_to_node_map) {
+                if (metis_node == -1) continue;
+                metis_benefit[metis_node] += 1.0 / sum_page;
+            }
+            std::string debug_info;
+            double benefit1, benefit2, benefit3;
+            for (const auto& [node_id, count] : node_count_basedon_page_access_last) {
+                // benefit 计算：已经有ownership的页面比例
+                benefit1 = static_cast<double>(count) / sum_page;
+                // benefit 计算：满足metis分区结果的页面比例
+                benefit2 = 0 * metis_benefit[node_id];
+                // benefit 计算： 负载均衡, 当前节点路由的事务越少，benefit越高
+                benefit3 = 2 * workload_balance_penalty_weights_[node_id];
+                double total_benefit = benefit1 + benefit2 + benefit3;
+                node_benefit_map[node_id] = total_benefit;
+                debug_info += "(node=" + std::to_string(node_id) + 
+                                ", benefit1=" + std::to_string(benefit1) + 
+                                ", benefit2=" + std::to_string(benefit2) + 
+                                ", benefit3=" + std::to_string(benefit3) + 
+                                ", total_benefit=" + std::to_string(total_benefit) + "); ";
+            }
+            // 选择benefit最大的节点
+            double max_benefit = -1.0;
+            node_id_t best_node = -1;
+            for (const auto& [node_id, benefit] : node_benefit_map) {
+                if (benefit > max_benefit) {
+                    max_benefit = benefit;
+                    best_node = node_id;
+                }
+            }
+            if (best_node != -1) {
+                result.smart_router_id = best_node;
+            }
+            if (WarmupEnd) {
+                logger->info("[SmartRouter Mode 13] " + debug_info + " selected node " + std::to_string(result.smart_router_id));
             }
         }
         else {
@@ -995,7 +1049,6 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                     int sum_pages = sc->involved_pages.size();
                     std::vector<double> metis_benefit(ComputeNodeCount, 0.0);
                     for(int i=0; i<sum_pages; i++) {
-                        auto page = sc->involved_pages[i];
                         node_id_t metis_node = sc->page_to_metis_node_vec[i];
                         if(metis_node == -1) continue;
                         metis_benefit[metis_node] += 1.0 / sum_pages;
@@ -1343,35 +1396,126 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
     return ;
 }
 
-// 计算负载均衡相关的惩罚权重
-std::vector<double> SmartRouter::compute_load_balance_penalty_weights() {
-    std::vector<double> penalty_weights(ComputeNodeCount, 0.0);
-    // 计算平均事务
-    int total_routed_txn = 0;
-    for(int i=0; i<ComputeNodeCount; i++) {
-        total_routed_txn += this->routed_txn_cnt_per_node[i];
-    }
-    double average_routed_txn = static_cast<double>(total_routed_txn) / ComputeNodeCount;
+// // 计算负载均衡相关的惩罚权重
+// std::vector<double> SmartRouter::compute_load_balance_penalty_weights() {
+//     std::vector<double> penalty_weights(ComputeNodeCount, 0.0);
+//     std::vector<int> compute_vector(ComputeNodeCount, 0);
+//     // for(int i=0; i<ComputeNodeCount; i++) {
+//     //     compute_vector[i] = this->txn_queues_[i]->size();
+//     // }
 
-    // 计算标准差
-    double sum_squared_diff = 0.0;
-    for(int i=0; i<ComputeNodeCount; i++) {
-        double diff = static_cast<double>(this->routed_txn_cnt_per_node[i]) - average_routed_txn;
-        sum_squared_diff += diff * diff;
-    }
-    double stddev = std::sqrt(sum_squared_diff / ComputeNodeCount) + 1e-6; // 防止除以0
+//     for(int i=0; i<ComputeNodeCount; i++) {
+//         compute_vector[i] = this->routed_txn_cnt_per_node[i];
+//     }
+//     // 计算平均事务
+//     int total_routed_txn = 0;
+//     for(int i=0; i<ComputeNodeCount; i++) {
+//         total_routed_txn += compute_vector[i];
+//     }
+//     double average_routed_txn = static_cast<double>(total_routed_txn) / ComputeNodeCount;
 
-    // 计算惩罚权重, 这里用Z-score的方法
-    for(int i=0; i<ComputeNodeCount; i++) {
-        double z_score = (static_cast<double>(this->routed_txn_cnt_per_node[i]) - average_routed_txn) / stddev;
+//     // 计算标准差
+//     double sum_squared_diff = 0.0;
+//     for(int i=0; i<ComputeNodeCount; i++) {
+//         double diff = static_cast<double>(compute_vector[i]) - average_routed_txn;
+//         sum_squared_diff += diff * diff;
+//     }
+//     double stddev = std::sqrt(sum_squared_diff / ComputeNodeCount) + 10.0; // 防止除以0
+
+//     // 计算惩罚权重, 这里用Z-score的方法
+//     for(int i=0; i<ComputeNodeCount; i++) {
+//         double z_score = (static_cast<double>(compute_vector[i]) - average_routed_txn) / stddev;
         
-        // Sigmoid函数映射到(0, 1)
-        penalty_weights[i] = 1.0 / (1.0 + std::exp(z_score));
+//         // Sigmoid函数映射到(0, 1)
+//         penalty_weights[i] = 1.0 / (1.0 + std::exp(z_score));
+//     }
+//     logger->info("Compute node workload benefit: " + [&]() {
+//         std::string s;
+//         for (size_t i = 0; i < penalty_weights.size(); ++i) {
+//             s += "Node " + std::to_string(i) + ": " + std::to_string(penalty_weights[i]) + ", ";
+//         }
+//         return s;
+//     }());
+
+//     workload_balance_penalty_weights_ = penalty_weights; // 更新成员变量
+
+//     return penalty_weights;
+// }
+
+
+// smoothstep: 3t^2 - 2t^3, t in [0,1]
+static double smoothstep(double t) {
+    if (t <= 0.0) return 0.0;
+    if (t >= 1.0) return 1.0;
+    return t * t * (3.0 - 2.0 * t);
+}
+
+/*
+ * 说明：
+ *  - ComputeNodeCount: 节点数（类成员或全局）
+ *  - routed_txn_cnt_per_node: 各节点已路由事务计数（类成员）
+ */
+std::vector<double> SmartRouter::compute_load_balance_penalty_weights() {
+    const double EPS = 0.10;     // 小变动阈值 10%
+    const double THR = 0.30;     // 明显区分阈值 30%
+    const double small_m = 0.02; // 在 <=EPS 时的最大微小幅度（可调）
+    const double large_m = 0.30; // 在 >=THR 时的最大幅度（可调）
+    const double base = 0.5;     // 中心值
+
+    std::vector<double> penalty_weights(ComputeNodeCount, base);
+    std::vector<int> compute_vector(ComputeNodeCount, 0);
+
+    // 复制计数
+    long long total = 0;
+    for(int i=0; i<ComputeNodeCount; i++) {
+        compute_vector[i] = this->txn_queues_[i]->size();
+        total += compute_vector[i];
     }
-    logger->info("Compute node workload benefit: " + [&]() {
+    // for (int i = 0; i < ComputeNodeCount; ++i) {
+    //     compute_vector[i] = this->routed_txn_cnt_per_node[i];
+    //     total += compute_vector[i];
+    // }
+    double avg = (ComputeNodeCount > 0) ? static_cast<double>(total) / ComputeNodeCount : 0.0;
+    if (avg <= 0.0) {
+        // 避免除0：都返回base
+        std::fill(penalty_weights.begin(), penalty_weights.end(), base);
+        workload_balance_penalty_weights_ = penalty_weights;
+        return penalty_weights;
+    }
+
+    for (int i = 0; i < ComputeNodeCount; ++i) {
+        double r = (static_cast<double>(compute_vector[i]) - avg) / avg; // 相对差
+        double sgn = (r >= 0.0) ? -1.0 : +1.0;
+        double absr = std::abs(r);
+
+        double mag = 0.0;
+        if (absr <= EPS) {
+            // 线性微小增长到 small_m
+            mag = (absr / EPS) * small_m;
+        } else if (absr >= THR) {
+            // 超过 THR，直接最大幅度
+            mag = large_m;
+        } else {
+            // 在 (EPS, THR) 之间做平滑过渡
+            double t = (absr - EPS) / (THR - EPS); // 0..1
+            double s = smoothstep(t);
+            mag = small_m + s * (large_m - small_m);
+        }
+
+        double p = base + sgn * mag;
+        // 限幅到 0..1（一般可选地限制到 [0.2,0.8]）
+        p = std::clamp(p, 0.0, 1.0);
+        penalty_weights[i] = p;
+    }
+
+    // 记录到成员变量（如果需要）
+    workload_balance_penalty_weights_ = penalty_weights;
+
+    // 可选：打印/记录用于调试
+    logger->info("Compute node workload penalty: " + [&]() {
         std::string s;
         for (size_t i = 0; i < penalty_weights.size(); ++i) {
-            s += "Node " + std::to_string(i) + ": " + std::to_string(penalty_weights[i]) + ", ";
+            s += "Node " + std::to_string(i) + ":" + std::to_string(penalty_weights[i]) + ", ";
         }
         return s;
     }());
