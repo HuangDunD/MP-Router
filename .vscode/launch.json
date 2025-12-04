@@ -80,7 +80,7 @@
             "program": "${workspaceFolder}/build/serve/test/smallbank_test",
             "args": [
                 "--system-mode",
-                "8", 
+                "11", 
                 "--access-pattern",
                 "0",
                 "--zipfian-theta",

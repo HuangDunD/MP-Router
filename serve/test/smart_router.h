@@ -22,6 +22,7 @@
 #include "log/Logger.h"
 #include "ownership_table.h"
 #include "txn_queue.h"
+#include "workload_history.h"
 #include "config.h"
 
 // SmartRouter: 一个针对 hot-key hash cache 设有严格内存预算的事务路由器。
@@ -191,7 +192,8 @@ public:
           threadpool(worker_threads, *logger), 
           routed_txn_cnt_per_node(MaxComputeNodeCount), 
           batch_finished_flags(MaxComputeNodeCount, 0),
-          workload_balance_penalty_weights_(MaxComputeNodeCount, 0)
+          workload_balance_penalty_weights_(MaxComputeNodeCount, 0),
+          load_tracker_(ComputeNodeCount)
     {
         metis_->set_thread_pool(&threadpool);
         metis_->init_node_nums(cfg.partition_nums);
@@ -556,7 +558,7 @@ public:
             clock_gettime(CLOCK_MONOTONIC, &fetch_begin_time);
 
             // 从事务池中获取一批事务
-            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize);
+            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(100);
             if (txn_batch == nullptr || txn_batch->empty()) {
                 // 说明事务池已经运行完成
                 for(auto txn_queue : txn_queues_) {
@@ -654,6 +656,8 @@ public:
                 clock_gettime(CLOCK_MONOTONIC, &push_begin_time);
                 // 将事务放入对应的TxnQueue中
                 node_routed_txns[routed_node_id].push_back(txn_entry);
+                load_tracker_.record(routed_node_id);
+                // 如果达到批量大小，则批量推送
                 if(node_routed_txns[routed_node_id].size() >= BatchExecutorPOPTxnSize){
                     txn_queues_[routed_node_id]->push_txn_back_batch(node_routed_txns[routed_node_id]);
                     routed_txn_cnt_per_node[routed_node_id] += node_routed_txns[routed_node_id].size();
@@ -734,6 +738,7 @@ public:
                         // 将事务放入对应的TxnQueue中
                         txn_queues_[node_id]->push_txn(q.front());
                         q.pop();
+                        load_tracker_.record(node_id);
                         routed_txn_cnt_per_node[node_id]++;
                     }
                     // 把该批的事务都分发完成，设置batch处理完成标志
@@ -837,7 +842,7 @@ public:
         if(WarmupEnd)
         logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + " Thread: " + std::to_string(thread_id) +
                      " finished batch " + std::to_string(batch_id) + 
-                     ", finished threads: " + std::to_string(batch_finished_flags[compute_node_id]));
+                     ", finished threads: " + std::to_string(batch_finished_flags[compute_node_id]) + get_txn_queue_now_status());
     }
 
     // 计算节点等待
@@ -952,6 +957,14 @@ public:
 private:
 
     std::vector<double> compute_load_balance_penalty_weights();
+
+    std::string get_txn_queue_now_status(){
+        std::string res; 
+        for (int i=0; i<ComputeNodeCount; i++) {
+            res += "Node " + std::to_string(i) + " queue size: " + std::to_string(txn_queues_[i]->size()) + " ";
+        }
+        return res;
+    }
 
     // 重置事务/路由相关的统计信息（线程安全）
     void reset_txn_statistics() {
@@ -1215,10 +1228,12 @@ private:
     // 事务队列
     std::vector<TxnQueue*> txn_queues_;
 
-    std::vector<std::atomic<int>> routed_txn_cnt_per_node;
+    // 路由负载统计
+    std::vector<std::atomic<int>> routed_txn_cnt_per_node; // 维护了total每个节点路由的事务数量
+    SlidingWindowLoadTracker load_tracker_; // 维护了上一段时间窗口内每个节点的负载情况
 
     // 负载均衡权重
-    std::vector<double> workload_balance_penalty_weights_; 
+    std::vector<double> workload_balance_penalty_weights_; // 权重越高, 说明负载越低; 负载越低的节点被选中的概率越大
 
     // log access key
     std::mutex log_mutex;

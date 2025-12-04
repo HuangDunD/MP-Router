@@ -8,24 +8,19 @@
 #include <condition_variable>
 #include "common.h"
 #include "smallbank.h"
-
-struct TxnQueueEntry {
-    tx_id_t tx_id;
-    int txn_type;
-    std::vector<uint64_t> accounts; // for smallbank, store involved account ids, the table id is generated based on txn_type
-
-    int txn_decision_type = -1; // init to -1, and will be set during routing
-    std::vector<page_id_t> accessed_page_ids; // the page ids this txn will access, set during routing
-    int combine_next_txn_count = 0; // 这个字段的意思表示，pop事务执行的时候连带后面多少个事务一起pop到一个工作线程执行，这样可以避免一些死锁的问题
-};
+#include "tit.h"
+#include "txn_entry.h"
+#include "Logger.h"
 
 // for every compute node db connections, we have a txn queue to store incoming txns
 class TxnQueue {
 public:
-    TxnQueue(node_id_t node_id, int max_queue_size) : node_id_(node_id), max_queue_size_(max_queue_size) {}
+    TxnQueue(SlidingTransactionInforTable* _tit, Logger* log, node_id_t node_id, int max_queue_size) : 
+        tit(_tit), logger_(log), node_id_(node_id), max_queue_size_(max_queue_size) {}
     ~TxnQueue() = default;
     
     std::list<TxnQueueEntry*> pop_txn() {
+        std::list<TxnQueueEntry*> batch_entries; // ret
         std::unique_lock<std::mutex> lock(queue_mutex_);
         queue_cv_.wait(lock, [this]() {
             return !txn_queue_.empty() || finished_ || batch_finished_;
@@ -36,7 +31,6 @@ public:
         if (batch_finished_ && txn_queue_.empty()) {
             return {}; // indicate batch finished
         }
-        std::list<TxnQueueEntry*> batch_entries;
         TxnQueueEntry* entry = txn_queue_.front();
         txn_queue_.pop_front();
         current_queue_size_--;
@@ -50,7 +44,10 @@ public:
                 batch_entries.push_back(next_entry);
             }
         }
-        else {
+        // else{
+        else if(current_queue_size_ > worker_threads * BatchExecutorPOPTxnSize) {
+            // 如果队列中还有很多事务，一次可以拿多个事务交给一个线程处理
+            // 如果队列中事务不多，就不要一次拿太多，避免某个线程拿走太多事务，其他线程饿死
             // pop batch txn to reduce mutex lock/unlock overhead
             for(int i = 0; i < BatchExecutorPOPTxnSize - 1; i++) {
                 if(txn_queue_.empty()) break;
@@ -62,6 +59,16 @@ public:
         }
         if(current_queue_size_ >= max_queue_size_ * 0.8) {
             queue_cv_.notify_one();
+        }
+        lock.unlock(); // 释放锁
+        // add dependency check here, 这里只建议依赖吧, 先统计输出一下, 感觉改成类似确定性的思路不好做
+        assert(tit != nullptr);
+        for (auto& txn_entry : batch_entries) {
+            if(tit->check_dependency_txn(txn_entry)) {
+                // need wait, defer a little time
+                txn_entry->advise_exe_time = 
+            }
+
         }
         return batch_entries;
     }
@@ -146,6 +153,11 @@ private:
     std::deque<TxnQueueEntry*> txn_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
+    
+    std::deque<TxnQueueEntry*> delayed_txn_queue_;
+    std::mutex delayed_queue_mutex_;
+
+    SlidingTransactionInforTable* tit;
     node_id_t node_id_; // the compute node id this queue belongs to
     std::atomic<int> current_queue_size_ = 0;
     int max_queue_size_; // max queue size
@@ -153,13 +165,15 @@ private:
 
     int process_batch_id_ = -1; // the batch id this queue is processing
     bool batch_finished_ = false;
+
+    Logger* logger_; 
 };
 
 
 // the txn pool, receive txns from clients and dispatch to txn queues of compute nodes
 class TxnPool {
 public:
-    TxnPool(int max_pool_size) : max_pool_size_(max_pool_size){}
+    TxnPool(int max_pool_size, SlidingTransactionInforTable* tit) : max_pool_size_(max_pool_size), tit(tit){}
     ~TxnPool() = default;
 
     void receive_txn_from_client(TxnQueueEntry* entry) {
@@ -199,6 +213,7 @@ public:
         }
         TxnQueueEntry* entry = txn_pool_.front();
         txn_pool_.pop_front();
+        tit->push(entry); // 即将调度这个事务， 从池中取出，放入事务信息表
         return entry;
     }
 
@@ -217,6 +232,7 @@ public:
             TxnQueueEntry* entry = txn_pool_.front();
             txn_pool_.pop_front();
             batch_txns->push_back(entry);
+            tit->push(entry); // 即将调度这个事务， 从池中取出，放入事务信息表
         }
         if(current_pool_size_ <= max_pool_size_ * 0.6) {
             pool_cv_.notify_all();
@@ -235,6 +251,7 @@ public:
     
 private:
     SmallBank* smallbank_; // pointer to the SmallBank instance
+    SlidingTransactionInforTable *tit; // pointer to the SlidingTransactionInforTable instance
 
     const int max_pool_size_; // batch process txn size 
     std::atomic<int> current_pool_size_{0};

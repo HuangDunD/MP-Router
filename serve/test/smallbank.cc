@@ -23,6 +23,7 @@
 #include "util/zipf.h"
 #include "router_stat_snapshot.h"
 #include "txn_queue.h"
+#include "tit.h"
 
 std::atomic<uint64_t> tx_id_generator;
 auto start = std::chrono::high_resolution_clock::now();
@@ -41,6 +42,9 @@ thread_local uint64_t thread_gid;
 thread_local ZipfGen* zipfian_gen = nullptr;
 
 std::vector<std::atomic<int>> exec_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
+
+// 全局事务信息表
+SlidingTransactionInforTable* tit;
 
 // A streambuf that tees output to two destinations (console + file)
 class TeeBuf : public std::streambuf {
@@ -397,7 +401,7 @@ void run_smallbank_empty(thread_params* params, Logger* logger_){
             exe_count++;
             // statistics
             exec_txn_cnt_per_node[compute_node_id]++;
-            delete txn_entry; // 直接删除事务对象
+            tit->mark_done(txn_entry); // 一体化：标记完成，删除由 TIT 统一管理
         }
     }
     std::cout << "Empty txn worker thread " << params->thread_id << " on compute node " 
@@ -614,7 +618,7 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
                 std::cerr << "Transaction failed: " << e.what() << std::endl;
                 logger_->info("Transaction failed: " + std::string(e.what()));
             }
-            delete txn_entry; // free the txn entry memory
+            tit->mark_done(txn_entry); // 一体化：标记完成，删除由 TIT 统一管理
             delete txn;
             // std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
@@ -673,7 +677,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                 smart_router->add_worker_thread_wait_next_batch_time(params->compute_node_id_connecter, params->thread_id, wait_time);
                 con_batch_id++;
                 continue;
-            } else assert(false);
+            } else continue;
         }
 
         for (auto& txn_entry : txn_entries) {
@@ -770,7 +774,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
-            delete txn_entry;
+            tit->mark_done(txn_entry); // 一体化：标记完成，删除由 TIT 统一管理
         }
     }
     std::cout << "Finished running smallbank transactions via stored procedures." << std::endl;
@@ -847,11 +851,15 @@ void print_tps_loop() {
     exec_txn_cnt_per_node_last_snapshot.resize(ComputeNodeCount, 0);
     exec_txn_cnt_per_node_snapshot.resize(ComputeNodeCount, 0);
     txn_queue_size_snapshot.resize(ComputeNodeCount, 0);
+    uint64_t page_op_last_count = 0;
+    uint64_t cache_fusion_last_count = 0;
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
         auto now = steady_clock::now();
         uint64_t exec_cur_count = exe_count.load(std::memory_order_relaxed);
         uint64_t route_cur_count = 0;
+        uint64_t page_op_cur_count = 0;
+        uint64_t cache_fusion_cur_count = 0;
         double seconds = duration_cast<duration<double>>(now - last_time).count();
         double exec_tps = (exec_cur_count - exec_last_count) / seconds;
         // print routed txn count per node
@@ -867,6 +875,15 @@ void print_tps_loop() {
             int routed_cnt = routed_txn_cnt_per_node_snapshot[i] - routed_txn_cnt_per_node_last_snapshot[i];
             routed_txn_cnt_per_node_last_snapshot[i] = routed_txn_cnt_per_node_snapshot[i];
             std::cout << "Node " << i << ": " << routed_cnt << ' ';
+        }
+        if(smart_router) {
+            page_op_cur_count = smart_router->get_stats().page_update_cnt;
+            cache_fusion_cur_count = smart_router->get_ownership_changes();
+            uint64_t page_op_cnt = page_op_cur_count - page_op_last_count;
+            uint64_t cache_fusion_cnt = cache_fusion_cur_count - cache_fusion_last_count;
+            page_op_last_count = page_op_cur_count;
+            cache_fusion_last_count = cache_fusion_cur_count;
+            std::cout << " [Page Ops]: " << page_op_cnt << " [Cache Fusions]: " << cache_fusion_cnt <<  " ratio: " << (page_op_cnt > 0 ? (double)cache_fusion_cnt / page_op_cnt : 0.0) * 100.0 << "% ";
         }
         std::cout << '\n';
         // print exec txn count per node
@@ -1250,10 +1267,11 @@ int main(int argc, char *argv[]) {
     // Create a BtreeService
     BtreeIndexService *index_service = new BtreeIndexService(DBConnection, {"idx_checking_id", "idx_savings_id"}, read_btree_mode, read_frequency);
     // initialize the transaction pool
-    txn_pool = new TxnPool(TxnPoolMaxSize); 
+    tit = new SlidingTransactionInforTable(logger_, 10*BatchRouterProcessSize);
+    txn_pool = new TxnPool(TxnPoolMaxSize, tit);
     // initialize the transaction queues for each compute node connection
     for (int i = 0; i < ComputeNodeCount; i++) {
-        txn_queues.push_back(new TxnQueue(i, TxnQueueMaxSize));
+        txn_queues.push_back(new TxnQueue(tit, logger_, i, TxnQueueMaxSize));
     }
     // Initialize NewMetis
     NewMetis* metis = new NewMetis(logger_);
