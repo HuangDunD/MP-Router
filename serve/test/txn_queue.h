@@ -6,11 +6,57 @@
 #include <mutex>
 #include <list>
 #include <condition_variable>
+#include <thread>
 #include "common.h"
 #include "smallbank.h"
 #include "tit.h"
 #include "txn_entry.h"
 #include "Logger.h"
+
+// the shared txn queue, some txns may be equal for every compute nodes, and this queue is for workload balance 
+class SharedTxnQueue {
+public:
+    SharedTxnQueue(SlidingTransactionInforTable* _tit, Logger* log, node_id_t node_id, int max_queue_size) : 
+        tit(_tit), logger_(log), max_queue_size_(max_queue_size) {}
+    ~SharedTxnQueue() = default;
+
+    void push_txn(TxnQueueEntry* entry) {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        queue_cv_.wait(lock, [this]() {
+            return current_queue_size_ < max_queue_size_;
+        });
+        txn_queue_.push_back(entry); 
+        ++current_queue_size_;
+        queue_cv_.notify_one();
+    }
+
+    std::list<TxnQueueEntry*> pop_txn() {
+        std::list<TxnQueueEntry*> batch_entries; // ret
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        if(current_queue_size_ == 0){
+            return;
+        }
+        auto entry = txn_queue_.front();
+        txn_queue_.pop_front();
+        current_queue_size_--;
+        batch_entries.push_back(entry);
+        return batch_entries;
+    }
+
+    int size(){
+        return current_queue_size_; 
+    }
+
+private:
+    std::deque<TxnQueueEntry*> txn_queue_;
+    std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+
+    SlidingTransactionInforTable* tit;
+    std::atomic<int> current_queue_size_ = 0;
+    int max_queue_size_; // max queue size
+    Logger* logger_; 
+};
 
 // for every compute node db connections, we have a txn queue to store incoming txns
 class TxnQueue {
@@ -31,44 +77,48 @@ public:
         if (batch_finished_ && txn_queue_.empty()) {
             return {}; // indicate batch finished
         }
-        TxnQueueEntry* entry = txn_queue_.front();
-        txn_queue_.pop_front();
-        current_queue_size_--;
-        batch_entries.push_back(entry);
-        if(entry->combine_next_txn_count > 0) {
-            for(int i = 0; i < entry->combine_next_txn_count; i++) {
-                assert(!txn_queue_.empty());
-                TxnQueueEntry* next_entry = txn_queue_.front();
-                txn_queue_.pop_front();
-                current_queue_size_--;
-                batch_entries.push_back(next_entry);
-            }
+        auto it = txn_queue_.begin();
+        assert(it != txn_queue_.end());
+        if(it->front() != nullptr && it->front()->combine_txn_count > 0) {
+            // 绑定到一个线程的事务
+            batch_entries = std::move(*it);
+            txn_queue_.pop_front();
+            current_queue_size_ -= static_cast<int>(batch_entries.size());
+            // 校验批大小与combine计数一致：size == combine_txn_count
+            assert(!batch_entries.empty());
+            assert(batch_entries.front() != nullptr);
+            assert(static_cast<int>(batch_entries.size()) == batch_entries.front()->combine_txn_count);
         }
-        // else{
-        else if(current_queue_size_ > worker_threads * BatchExecutorPOPTxnSize) {
-            // 如果队列中还有很多事务，一次可以拿多个事务交给一个线程处理
-            // 如果队列中事务不多，就不要一次拿太多，避免某个线程拿走太多事务，其他线程饿死
-            // pop batch txn to reduce mutex lock/unlock overhead
-            for(int i = 0; i < BatchExecutorPOPTxnSize - 1; i++) {
-                if(txn_queue_.empty()) break;
-                TxnQueueEntry* next_entry = txn_queue_.front();
+        else if (current_queue_size_ < worker_threads * BatchExecutorPOPTxnSize) {
+            // 队列中事务不多，一次只拿一个事务
+            assert(!it->empty());
+            auto* e = it->front();
+            assert(e != nullptr);
+            batch_entries.push_back(e);
+            it->pop_front();
+            if(it->empty()) {
                 txn_queue_.pop_front();
-                current_queue_size_--;
-                batch_entries.push_back(next_entry);
             }
+            current_queue_size_--;
         }
-        if(current_queue_size_ >= max_queue_size_ * 0.8) {
+        else {
+            // 队列中事务较多，一次拿一个批次
+            batch_entries = std::move(*it);
+            txn_queue_.pop_front();
+            current_queue_size_ -= static_cast<int>(batch_entries.size());
+            assert(!batch_entries.empty());
+            assert(batch_entries.front() != nullptr);
+        }
+
+        // 通知可能阻塞的生产者线程
+        if(current_queue_size_ <= max_queue_size_ * 0.8) {
             queue_cv_.notify_one();
         }
         lock.unlock(); // 释放锁
         // add dependency check here, 这里只建议依赖吧, 先统计输出一下, 感觉改成类似确定性的思路不好做
         assert(tit != nullptr);
         for (auto& txn_entry : batch_entries) {
-            if(tit->check_dependency_txn(txn_entry)) {
-                // need wait, defer a little time
-                txn_entry->advise_exe_time = 
-            }
-
+            tit->check_dependency_txn(txn_entry); // check the dependency, if prior txn hasn't done, output warning
         }
         return batch_entries;
     }
@@ -78,23 +128,56 @@ public:
         queue_cv_.wait(lock, [this]() {
             return current_queue_size_ < max_queue_size_;
         });
-        txn_queue_.push_back(entry);
-        current_queue_size_++;
+        if (txn_queue_.empty()) {
+            txn_queue_.emplace_back(1, entry);
+        } 
+        else{
+            auto it = txn_queue_.end() - 1;
+            if((*it).size() < BatchExecutorPOPTxnSize) {
+                it->push_back(entry);
+            }
+            else txn_queue_.emplace_back(1, entry); // 构造包含单元素的批
+        }
+        ++current_queue_size_;
         queue_cv_.notify_one();
     }
 
+    // push 绑定到单线程的事务到队列前端
     void push_txn_front(std::vector<TxnQueueEntry*> entries) {
         std::unique_lock<std::mutex> lock(queue_mutex_);
         queue_cv_.wait(lock, [this, &entries]() {
             return current_queue_size_ + entries.size() < max_queue_size_;
         });
+        assert(!entries.empty());
         auto first_entry = entries[0];
-        first_entry->combine_next_txn_count = entries.size() - 1;
-        // 从后往前放
-        for(int i = entries.size() - 1; i >=0; i--) {
-            txn_queue_.push_front(entries[i]);
-            current_queue_size_++;
-        }
+        assert(first_entry != nullptr);
+        first_entry->combine_txn_count = static_cast<int>(entries.size());
+        txn_queue_.emplace_front(entries.begin(), entries.end());
+        current_queue_size_ += static_cast<int>(entries.size());
+        queue_cv_.notify_one();
+    }
+
+    // push 绑定到指定位置的事务到队列指定位置
+    void push_txn_front_pos(std::vector<TxnQueueEntry*> entries, int pos) {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        if (entries.empty()) return;
+
+        queue_cv_.wait(lock, [this, &entries]() {
+            return current_queue_size_ + entries.size() < max_queue_size_;
+        });
+
+        auto first_entry = entries[0];
+        assert(first_entry != nullptr);
+        first_entry->combine_txn_count = static_cast<int>(entries.size());
+
+        // 在指定位置插入一个批次（用移动避免拷贝）
+        if (pos < 0) pos = 0;
+        pos = pos > static_cast<int>(txn_queue_.size()) ? static_cast<int>(txn_queue_.size()) : pos;
+        std::list<TxnQueueEntry*> batch(entries.begin(), entries.end());
+        auto it = txn_queue_.begin() + pos;
+
+        txn_queue_.insert(it, std::move(batch));
+        current_queue_size_ += static_cast<int>(entries.size());
         queue_cv_.notify_one();
     }
 
@@ -104,9 +187,15 @@ public:
         queue_cv_.wait(lock, [this, &entries]() {
             return current_queue_size_ + entries.size() < max_queue_size_;
         });
-        for(int i = 0; i < entries.size(); i++) {
-            txn_queue_.push_back(entries[i]);
-            current_queue_size_++;
+        int i = 0;
+        while(i < entries.size()) {
+            std::list<TxnQueueEntry*> batch;
+            for(int j = 0; j < BatchExecutorPOPTxnSize && i < entries.size(); j++, i++) {
+                // construct a batch
+                batch.push_back(entries[i]);
+            }
+            current_queue_size_ += static_cast<int>(batch.size());
+            txn_queue_.emplace_back(std::move(batch)); // 构造包含单元素的批
         }
         queue_cv_.notify_one();
     }
@@ -150,13 +239,12 @@ public:
     }
     
 private:
-    std::deque<TxnQueueEntry*> txn_queue_;
+    std::deque<std::list<TxnQueueEntry*>> txn_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
-    
-    std::deque<TxnQueueEntry*> delayed_txn_queue_;
-    std::mutex delayed_queue_mutex_;
 
+    SharedTxnQueue* txn_queue;
+    
     SlidingTransactionInforTable* tit;
     node_id_t node_id_; // the compute node id this queue belongs to
     std::atomic<int> current_queue_size_ = 0;

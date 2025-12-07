@@ -656,6 +656,11 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
         std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        if(WarmupEnd)
+            logger_->info("Compute Node " + std::to_string(compute_node_id) + 
+                        " Thread " + std::to_string(params->thread_id) + 
+                        " popped " + std::to_string(txn_entries.size()) + " txns in batch " + 
+                        std::to_string(con_batch_id));
 
         clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
         double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
@@ -1229,8 +1234,8 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=127.0.0.1 port=6432 user=hcy password=123456 dbname=smallbank"); // pg12
     // DBConnection.push_back("host=127.0.0.1 port=6432 user=hcy password=123456 dbname=smallbank"); // pg12 
 
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
+    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
+    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
     ComputeNodeCount = DBConnection.size();
     std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
 

@@ -1215,7 +1215,10 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
         int min_txn_node = -1;
         int min_txn_count = INT32_MAX;
         for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
-            int workload = schedule_txn_cnt_per_node_this_batch[node_id] + ownership_ok_txn_queues[node_id].size(); 
+            // int workload = schedule_txn_cnt_per_node_this_batch[node_id] + ownership_ok_txn_queues[node_id].size(); 
+            // !采用更准确的当前负载作为衡量标准, 实时看一下txn_queues_的大小, 而不是schedule_txn_cnt_per_node_this_batch
+            // int workload = txn_queues_[node_id]->size() + ownership_ok_txn_queues[node_id].size(); 
+            int workload = expected_page_transfer_count_per_node[node_id].load(); // 采用预期的页面迁移数量作为负载衡量标准
             if(workload < min_txn_count) { 
                 min_txn_count = workload; 
                 min_txn_node = node_id;
@@ -1380,7 +1383,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
             }
         }
         // ! 将schedule_txn中的事务加入到txn_queues_头部先执行了
-        if(!schedule_txn.empty()) txn_queues_[schedule_node]->push_txn_front(schedule_txn);{}
+        if(!schedule_txn.empty()) txn_queues_[schedule_node]->push_txn_front(schedule_txn);
         // !记录事务偏序依赖
         for(auto txn: next_time_schedule_txn){
             for(auto prior_txn : schedule_txn){

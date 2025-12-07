@@ -92,7 +92,6 @@ public:
 
     // 通过 tx_id 查询状态（按照 tx_id % N 定位槽位 if match，否则 Evicted）
     TxnStatus get_status_by_tx_id(tx_id_t txid) const {
-        if (txid == 0) return TxnStatus::Empty;
         size_t idx = static_cast<size_t>(txid % txnTableSize_);
         const Slot& slot = slots_[idx];
         tx_id_t cur_id = slot.tx_id.load(std::memory_order_acquire);
@@ -106,7 +105,7 @@ public:
     bool check_dependency_txn(TxnQueueEntry* txn_entry){ 
         bool wait = false; 
         for (auto dep_tx_id : txn_entry->dependencies) {
-            auto status = tit->get_status_by_tx_id(dep_tx_id);
+            auto status = get_status_by_tx_id(dep_tx_id);
             assert(status != TxnStatus::Empty);
             if (status == TxnStatus::InProgress) {
                 wait = true;
