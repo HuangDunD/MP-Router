@@ -16,7 +16,7 @@
 // the shared txn queue, some txns may be equal for every compute nodes, and this queue is for workload balance 
 class SharedTxnQueue {
 public:
-    SharedTxnQueue(SlidingTransactionInforTable* _tit, Logger* log, node_id_t node_id, int max_queue_size) : 
+    SharedTxnQueue(SlidingTransactionInforTable* _tit, Logger* log, int max_queue_size) : 
         tit(_tit), logger_(log), max_queue_size_(max_queue_size) {}
     ~SharedTxnQueue() = default;
 
@@ -33,9 +33,7 @@ public:
     std::list<TxnQueueEntry*> pop_txn() {
         std::list<TxnQueueEntry*> batch_entries; // ret
         std::unique_lock<std::mutex> lock(queue_mutex_);
-        if(current_queue_size_ == 0){
-            return;
-        }
+        if(current_queue_size_ == 0) return {}; 
         auto entry = txn_queue_.front();
         txn_queue_.pop_front();
         current_queue_size_--;
@@ -47,6 +45,10 @@ public:
         return current_queue_size_; 
     }
 
+    bool empty(){
+        return current_queue_size_ == 0;
+    }
+
 private:
     std::deque<TxnQueueEntry*> txn_queue_;
     std::mutex queue_mutex_;
@@ -55,14 +57,14 @@ private:
     SlidingTransactionInforTable* tit;
     std::atomic<int> current_queue_size_ = 0;
     int max_queue_size_; // max queue size
-    Logger* logger_; 
+    Logger* logger_; // 
 };
 
 // for every compute node db connections, we have a txn queue to store incoming txns
 class TxnQueue {
 public:
-    TxnQueue(SlidingTransactionInforTable* _tit, Logger* log, node_id_t node_id, int max_queue_size) : 
-        tit(_tit), logger_(log), node_id_(node_id), max_queue_size_(max_queue_size) {}
+    TxnQueue(SlidingTransactionInforTable* _tit, SharedTxnQueue* shared_txn_queue, Logger* log, node_id_t node_id, int max_queue_size) : 
+        tit(_tit), shared_txn_queue_(shared_txn_queue), logger_(log), node_id_(node_id), max_queue_size_(max_queue_size) {}
     ~TxnQueue() = default;
     
     std::list<TxnQueueEntry*> pop_txn() {
@@ -71,12 +73,16 @@ public:
         queue_cv_.wait(lock, [this]() {
             return !txn_queue_.empty() || finished_ || batch_finished_;
         });
-        if (finished_ && txn_queue_.empty()) {
-            return {}; // indicate finished
+        if(txn_queue_.empty() && (finished_ || batch_finished_)) {
+            // indicate finished or batch finished, pop one from shared_queue, if shared_queue is empty, will returen {}
+            batch_entries = std::move(shared_txn_queue_->pop_txn()); 
+            // if(WarmupEnd)
+            //     logger_->info("Compute Node " + std::to_string(node_id_) + 
+            //                 " popped " + std::to_string(batch_entries.size()) 
+            //                 + " txns from shared_txn_queue. ");
+            return batch_entries;
         }
-        if (batch_finished_ && txn_queue_.empty()) {
-            return {}; // indicate batch finished
-        }
+        assert(!txn_queue_.empty());
         auto it = txn_queue_.begin();
         assert(it != txn_queue_.end());
         if(it->front() != nullptr && it->front()->combine_txn_count > 0) {
@@ -200,6 +206,10 @@ public:
         queue_cv_.notify_one();
     }
 
+    void push_txn_into_shared_queue(TxnQueueEntry* entry) {
+        shared_txn_queue_->push_txn(entry);
+    }
+
     int size() {
         return current_queue_size_.load();
     }
@@ -212,7 +222,7 @@ public:
 
     void set_process_batch_id(int batch_id) {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        assert(current_queue_size_ == 0); // only set new batch id when queue is empty
+        // assert(current_queue_size_ == 0); // only set new batch id when queue is empty
         process_batch_id_ = batch_id;
         batch_finished_ = false;
     }
@@ -233,17 +243,16 @@ public:
         return finished_;
     }
 
-    int get_process_batch_id() {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        return process_batch_id_;
+    bool is_shared_queue_empty() {
+        return shared_txn_queue_->empty();
     }
-    
+
 private:
     std::deque<std::list<TxnQueueEntry*>> txn_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
 
-    SharedTxnQueue* txn_queue;
+    SharedTxnQueue* shared_txn_queue_;
     
     SlidingTransactionInforTable* tit;
     node_id_t node_id_; // the compute node id this queue belongs to

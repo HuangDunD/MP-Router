@@ -832,33 +832,49 @@ public:
         std::cout << "Router worker thread finished." << std::endl; 
     }
     
+    // // 计算节点通知
+    // void notify_batch_finished(node_id_t compute_node_id, int thread_id, int con_batch_id) { 
+    //     std::lock_guard<std::mutex> lock(batch_mutex);
+    //     // 累计该计算节点完成的线程数
+    //     if(++batch_finished_flags[compute_node_id] >= db_con_worker_threads) {
+    //         batch_cv.notify_all();
+    //     }
+    //     if(WarmupEnd)
+    //     logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + " Thread: " + std::to_string(thread_id) +
+    //                  " finished batch " + std::to_string(batch_id) + 
+    //                  ", finished threads: " + std::to_string(batch_finished_flags[compute_node_id]) + get_txn_queue_now_status());
+    // }
+
     // 计算节点通知
     void notify_batch_finished(node_id_t compute_node_id, int thread_id, int con_batch_id) { 
         std::lock_guard<std::mutex> lock(batch_mutex);
-        // 累计该计算节点完成的线程数
-        if(++batch_finished_flags[compute_node_id] >= db_con_worker_threads) {
-            batch_cv.notify_all();
-        }
-        if(WarmupEnd)
+        // if(WarmupEnd)
         logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + " Thread: " + std::to_string(thread_id) +
-                     " finished batch " + std::to_string(batch_id) + 
-                     ", finished threads: " + std::to_string(batch_finished_flags[compute_node_id]) + get_txn_queue_now_status());
+                     " finished batch " + std::to_string(batch_id) + get_txn_queue_now_status());
+        batch_cv.notify_all();
     }
 
     // 计算节点等待
     void wait_for_next_batch(node_id_t compute_node_id, int thread_id, int con_batch_id) {
         std::unique_lock<std::mutex> lock(batch_mutex);
-        batch_cv.wait(lock, [this, compute_node_id, con_batch_id]() { 
+        batch_cv.wait(lock, [this, compute_node_id, con_batch_id, thread_id]() { 
             // 如果该计算节点的所有线程还没有完成该批次的处理，则继续等待
             // 如果batch_finished_flags被重置为0，说明可以开始下一批次的处理
-            if(con_batch_id < batch_id || txn_queues_[compute_node_id]->is_finished()) return true;// 如果整个系统跑完了，也直接结束，这个对于pipeline来说是一个情况，因为会缺少一个batch++；
+            if(con_batch_id < batch_id || txn_queues_[compute_node_id]->is_finished()) {
+                logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + 
+                             " Thread: " + std::to_string(thread_id) +
+                             " con_batch_id: " + std::to_string(con_batch_id) + 
+                             " detects batch_id: " + std::to_string(batch_id) + 
+                             ", exiting wait_for_next_batch.");
+                return true;// 如果整个系统跑完了，也直接结束，这个对于pipeline来说是一个情况，因为会缺少一个batch++；
+            }
             else return false; 
         });
         // 说明可以开始下一批次的处理
         // if(WarmupEnd)
-        // logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + 
-        //              " Thread: " + std::to_string(thread_id) +
-        //              " starts processing batch " + std::to_string(batch_id));
+        logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + 
+                     " Thread: " + std::to_string(thread_id) +
+                     " starts processing batch " + std::to_string(batch_id));
     }
 
 
