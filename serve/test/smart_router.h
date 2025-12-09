@@ -1086,127 +1086,165 @@ private:
         result.sys_8_decision_type = (int)router_decision_type;
         if(router_decision_type == MetisOwnershipDecisionType::MetisNoDecision) {
             this->stats_.metis_no_decision++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
-			logger->info("[SmartRouter Metis No Decision] found no candidate node based on metis, randomly selected node " + 
-					std::to_string(result.smart_router_id));
+            logger->info("[SmartRouter Metis No Decision] found no candidate node based on metis, randomly selected node " + 
+                    std::to_string(result.smart_router_id));
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisMissingAndOwnershipMissing) {
             this->stats_.metis_missing_and_ownership_missing++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
-			logger->info("[SmartRouter Metis Missing + Ownership Missing] found no candidate node based on ownership table, randomly selected node " + 
-					std::to_string(result.smart_router_id));
+            logger->info("[SmartRouter Metis Missing + Ownership Missing] found no candidate node based on ownership table, randomly selected node " + 
+                    std::to_string(result.smart_router_id));
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisMissingAndOwnershipEntirely) {
             this->stats_.metis_missing_and_ownership_entirely++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Missing + Ownership Entirely] " + debug_info + 
 					" based on ownership table directly to node " + std::to_string(result.smart_router_id));
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisMissingAndOwnershipCross) {
             this->stats_.metis_missing_and_ownership_cross++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Missing + Ownership Cross] " + debug_info + 
 					" based on ownership table with count to node " + std::to_string(result.smart_router_id));
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisEntirelyAndOwnershipMissing) {
             this->stats_.metis_entirely_and_ownership_missing++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Entirely + Ownership Missing] found no candidate node based on ownership table, selected metis node " + 
 					std::to_string(result.smart_router_id));
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisEntirelyAndOwnershipCrossEqual) {
             this->stats_.metis_entirely_and_ownership_cross_equal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Entirely + Ownership Cross Equal] " + debug_info + 
 					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisEntirelyAndOwnershipCrossUnequal) {
             this->stats_.metis_entirely_and_ownership_cross_unequal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Entirely + Ownership Cross Unequal] " + debug_info + 
 					" metis to node " + std::to_string(result.smart_router_id) + 
 					" but ownership table to node " + std::to_string(result.smart_router_id) + 
 					", selected ownership node");
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyEqual) {
             this->stats_.metis_entirely_and_ownership_entirely_equal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Entirely + Ownership Entirely Equal] " + debug_info + 
 					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyUnequal) {
             this->stats_.metis_entirely_and_ownership_entirely_unequal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Entirely + Ownership Entirely Unequal] " + debug_info + 
 					" metis to node " + std::to_string(result.smart_router_id) + 
 					" but ownership table to node " + std::to_string(result.smart_router_id) + 
 					", selected ownership node");
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisCrossAndOwnershipMissing) {
             this->stats_.metis_cross_and_ownership_missing++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Cross + Ownership Missing] found no candidate node based on ownership table, selected metis node " + 
 					std::to_string(result.smart_router_id));
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyEqual) {
             this->stats_.metis_cross_and_ownership_entirely_equal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Cross + Ownership Entirely Equal] " + debug_info + 
 					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+            #endif
 		}
         else if(router_decision_type == MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyUnequal) {
             this->stats_.metis_cross_and_ownership_entirely_unequal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
             logger->info("[SmartRouter Metis Cross + Ownership Entirely Unequal] " + debug_info + 
                     " metis to node " + std::to_string(result.smart_router_id) + 
                     " but ownership table to node " + std::to_string(result.smart_router_id) + 
                     ", selected ownership node");
+            #endif
         }
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossEqual) {
             this->stats_.metis_cross_and_ownership_cross_equal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Cross + Ownership Cross Equal] " + debug_info + 
 					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossUnequal) {
             this->stats_.metis_cross_and_ownership_cross_unequal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Cross + Ownership Cross Unequal] " + debug_info + 
 					" metis to node " + std::to_string(result.smart_router_id) + 
 					" but ownership table to node " + std::to_string(result.smart_router_id) + 
 					", selected ownership node");
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisPartialAndOwnershipMissing) {
             this->stats_.metis_partial_and_ownership_missing++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Partial + Ownership Missing] found no candidate node based on ownership table, selected metis node " + 
 					std::to_string(result.smart_router_id));
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyEqual) {
             this->stats_.metis_partial_and_ownership_entirely_equal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Partial + Ownership Entirely Equal] " + debug_info + 
 					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+            #endif
 		}
         else if(router_decision_type == MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyUnequal) {
             this->stats_.metis_partial_and_ownership_entirely_unequal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
             logger->info("[SmartRouter Metis Partial + Ownership Entirely Unequal] " + debug_info + 
                     " based on ownership table directly to node " + std::to_string(result.smart_router_id));
+            #endif
         }
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossEqual) {
             this->stats_.metis_partial_and_ownership_cross_equal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Partial + Ownership Cross Equal] " + debug_info + 
 					" both metis and ownership table to node " + std::to_string(result.smart_router_id));
+            #endif
 		}
 		else if(router_decision_type == MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossUnequal) {
             this->stats_.metis_partial_and_ownership_cross_unequal++;
+            #if LOG_METIS_OWNERSHIP_DECISION
             if(WarmupEnd)
 			logger->info("[SmartRouter Metis Partial + Ownership Cross Unequal] " + debug_info + 
 					" metis to node " + std::to_string(result.smart_router_id) + 
 					" but ownership table to node " + std::to_string(result.smart_router_id) + 
 					", selected ownership node");
+            #endif
 		}
     }
 

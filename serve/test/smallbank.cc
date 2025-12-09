@@ -1223,8 +1223,14 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
 
     // kes 双机, 新版本
+    // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+
+    // kes 四机, 新版本
     DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
     DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
 
     // kes 单机
     // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
@@ -1236,31 +1242,33 @@ int main(int argc, char *argv[]) {
 
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
+
+    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+
     ComputeNodeCount = DBConnection.size();
     std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
 
-    pqxx::connection *conn0 = nullptr;
-    pqxx::connection *conn1 = nullptr;
+    std::vector<pqxx::connection*> conns;
     try {
-        // Create a connection for each thread
-        conn0 = new pqxx::connection(DBConnection[0]);
-        if (!conn0->is_open()) {
-            std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
-            return -1;
-        } else {
-            std::cout << "Connected to the database successfully." << std::endl;
-        }
-        conn1 = new pqxx::connection(DBConnection[1]);
-        if (!conn1->is_open()) {
-            std::cerr << "Failed to connect to the database. conninfo" + DBConnection[1] << std::endl;
-            return -1;
-        } else {
-            std::cout << "Connected to the database successfully." << std::endl;
+        for(int i = 0; i < ComputeNodeCount; i++) {
+            pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
+            if (!conn->is_open()) {
+                std::cerr << "Failed to connect to the database. conninfo: " + DBConnection[i] << std::endl;
+                return -1;
+            } else {
+                std::cout << "Connected to the database node " << i << " successfully." << std::endl;
+            }
+            conns.push_back(conn);
         }
     } catch (const std::exception &e) {
         std::cerr << "Error while connecting to KingBase: " + std::string(e.what()) << std::endl;
         return -1;
     }
+    assert(conns.size() == ComputeNodeCount);
+    pqxx::connection* conn0 = conns[0];
 
     // Create table and indexes
     create_table(conn0);
@@ -1408,8 +1416,9 @@ int main(int argc, char *argv[]) {
     generate_perf_kwr_report(conn0, start_snapshot_id, end_snapshot_id, report_file_run_phase);
 
     // 关闭连接
-    delete conn0;
-    delete conn1;
+    for(auto conn : conns) {
+        conn->disconnect();
+    }
 
     // 清理Zipfian生成器
     if (zipfian_gen) {

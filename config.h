@@ -29,7 +29,8 @@ extern int SYSTEM_MODE;
 #define LOG_METIS_DECISION 0 // 0: no log 1: log
 #define LOG_OWNERSHIP_CHANGE 0 // 0: no log 1: log
 #define LOG_PAGE_UPDATE 0 // 0: no log 1: log
-#define LOG_KROUTER_SCHEDULING_DEBUG 1 // 0: no log 1: log
+#define LOG_KROUTER_SCHEDULING_DEBUG 0 // 0: no log 1: log
+#define LOG_METIS_OWNERSHIP_DECISION 0 // 0: no log 1: log
 #define WORKLOAD_AFFINITY_MODE 1 // 0: key affinity 1: city-key affinity
 #define SYS_8_DECISION_TYPE_COUNT 19 // for SYSTEM_MODE 8, 17 types of ownership changes
 // for log
