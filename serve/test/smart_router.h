@@ -24,6 +24,8 @@
 #include "txn_queue.h"
 #include "workload_history.h"
 #include "config.h"
+#include "smallbank.h"
+#include "ycsb.h"
 
 // SmartRouter: 一个针对 hot-key hash cache 设有严格内存预算的事务路由器。
 // 它维护：
@@ -459,12 +461,21 @@ public:
         for (auto& txn : *txn_batch) { 
             auto txn_type = txn->txn_type;
             auto tx_id = txn->tx_id;
-            itemkey_t account1 = txn->accounts[0];
-            itemkey_t account2 = txn->accounts[1];
+
+            // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
             std::vector<itemkey_t> accounts_keys;
-            std::vector<table_id_t> table_ids = smallbank_->get_table_ids_by_txn_type(txn_type); 
-            assert(!table_ids.empty());
-            smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
+            std::vector<table_id_t> table_ids; 
+            
+            if(Workload_Type == 0) {
+                itemkey_t account1 = txn->accounts[0];
+                itemkey_t account2 = txn->accounts[1];
+                table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
+                smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
+            } else if (Workload_Type == 1) { 
+                table_ids = ycsb_->get_table_ids_by_txn_type();
+                accounts_keys = txn->keys;
+            } 
+            else assert(false); // 不可能出现的情况
             assert(table_ids.size() == accounts_keys.size());
 
             // 获取涉及的页面列表
@@ -580,18 +591,27 @@ public:
 
                 tx_id_t tx_id = txn_entry->tx_id;
                 int txn_type = txn_entry->txn_type;
-                itemkey_t account1 = txn_entry->accounts[0];
-                itemkey_t account2 = txn_entry->accounts[1];
+
+                // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
+                std::vector<itemkey_t> keys;
+                std::vector<table_id_t> table_ids; 
+                
+                if(Workload_Type == 0) {
+                    itemkey_t account1 = txn_entry->accounts[0];
+                    itemkey_t account2 = txn_entry->accounts[1];
+                    table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
+                    smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
+                } else if (Workload_Type == 1) { 
+                    table_ids = ycsb_->get_table_ids_by_txn_type();
+                    keys = txn_entry->keys;
+                } 
+                else assert(false); // 不可能出现的情况
+                assert(table_ids.size() == keys.size());
 
                 // Init the routed node id
                 int routed_node_id = 0; // Default node ID
                 
                 // ! decide the routed_node_id based on SYSTEM_MODE
-                // keys 只和 account1/account2有关，不能静态化，但可以用局部变量，每次只构造一份
-                std::vector<itemkey_t> keys; 
-                smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
-                // table_ids 静态化后只需引用
-                const std::vector<table_id_t>& table_ids = TABLE_IDS_ARR[txn_type < 6 ? txn_type : 0];
                 #if LOG_ACCESS_KEY
                     // 写日志记录一下
                     std::unique_lock<std::mutex> lock(log_mutex);
@@ -609,20 +629,19 @@ public:
                     routed_node_id = rand() % 2; // Randomly select node ID for system mode 0
                 }
                 else if(SYSTEM_MODE == 1){
-                    if(txn_type == 0 || txn_type == 1) {
-                        int node1 = account1 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
-                        int node2 = account2 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
-                        if(node1 == node2) {
-                            routed_node_id = node1;
+                    std::vector<int> key_range_count(ComputeNodeCount, 0);
+                    for(size_t i=0; i<keys.size(); i++) {
+                        itemkey_t key = keys[i];
+                        node_id_t choose_node;
+                        if(Workload_Type == 0) {
+                            choose_node = key / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
+                        } else if (Workload_Type == 1) {
+                            choose_node = key / (ycsb_->get_record_count() / ComputeNodeCount); // Range partitioning
                         }
-                        else {
-                            // randomly pick one
-                            routed_node_id = (rand() % 2 == 0) ? node1 : node2;
-                        }
+                        key_range_count[choose_node]++;
                     }
-                    else {
-                        routed_node_id = account1 / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
-                    }
+                    routed_node_id = std::distance(key_range_count.begin(), 
+                                            std::max_element(key_range_count.begin(), key_range_count.end()));
                 }
                 else if(SYSTEM_MODE == 2) {
                     // get page_id from checking_page_map
@@ -1276,7 +1295,8 @@ private:
     TimeBreakdown time_stats_{};
 
     SmallBank* smallbank_ = nullptr;
-
+    YCSB* ycsb_ = nullptr;
+    
     // 事务池
     TxnPool* txn_pool_ = nullptr;
     // 事务队列

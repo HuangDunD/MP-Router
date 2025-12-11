@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <atomic>
 /*********************** For common **********************/
 
 // ! pay attention: need modify this when use different workload
@@ -51,5 +52,15 @@ extern int TxnQueueMaxSize; // 事务队列的最大大小
 extern int BatchRouterProcessSize; // 每次批量路由处理的事务数量
 extern int BatchExecutorPOPTxnSize; // 每次批量执行pop的事务数量
 extern int PreExtendPageSize; // 预分配页面大小
+extern bool LOAD_DATA_ONLY; // 仅加载数据模式
+extern bool SKIP_LOAD_DATA; // 跳过加载数据模式
+
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;
+
+// global variables
+extern int try_count;
+extern std::atomic<int> exe_count;
+extern std::atomic<int> generated_txn_count;
+extern std::atomic<uint64_t> tx_id_generator;
+extern int Workload_Type;

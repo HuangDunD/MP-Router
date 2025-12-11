@@ -529,15 +529,25 @@ std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_
     for (auto& txn : *txn_batch) { 
         auto txn_type = txn->txn_type;
         auto tx_id = txn->tx_id;
+
+        // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
+        std::vector<itemkey_t> accounts_keys;
+        std::vector<table_id_t> table_ids; 
+        
+        if(Workload_Type == 0) {
+            itemkey_t account1 = txn->accounts[0];
+            itemkey_t account2 = txn->accounts[1];
+            table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
+            smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
+        } else if (Workload_Type == 1) { 
+            table_ids = ycsb_->get_table_ids_by_txn_type();
+            accounts_keys = txn->keys;
+        } 
+        else assert(false); // 不可能出现的情况
+        assert(table_ids.size() == accounts_keys.size());
+
         SchedulingCandidateTxn* scheduling_candidate_txn = new SchedulingCandidateTxn{txn, {}, {}, {}, {}, -1};
         txid_to_txn_map[tx_id] = scheduling_candidate_txn;
-        itemkey_t account1 = txn->accounts[0];
-        itemkey_t account2 = txn->accounts[1];
-        std::vector<itemkey_t> accounts_keys;
-        std::vector<table_id_t> table_ids = smallbank_->get_table_ids_by_txn_type(txn_type); 
-        assert(!table_ids.empty());
-        smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
-        assert(table_ids.size() == accounts_keys.size());
 
         // 获取涉及的页面列表
         std::unordered_map<uint64_t, node_id_t> table_page_ids; // 高32位存table_id，低32位存page_id
@@ -825,19 +835,27 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                 TxnQueueEntry* txn = (*txn_batch)[idx];
                 tx_id_t tx_id = txn->tx_id;
                 int txn_type = txn->txn_type;
-                itemkey_t account1 = txn->accounts[0];
-                itemkey_t account2 = txn->accounts[1];
+
+                // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
+                std::vector<itemkey_t> accounts_keys;
+                std::vector<table_id_t> table_ids; 
+                
+                if(Workload_Type == 0) {
+                    itemkey_t account1 = txn->accounts[0];
+                    itemkey_t account2 = txn->accounts[1];
+                    table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
+                    smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
+                } else if (Workload_Type == 1) { 
+                    table_ids = ycsb_->get_table_ids_by_txn_type();
+                    accounts_keys = txn->keys;
+                } 
+                else assert(false); // 不可能出现的情况
+                assert(table_ids.size() == accounts_keys.size());
 
                 std::unique_ptr<SchedulingCandidateTxn> sc = std::make_unique<SchedulingCandidateTxn>();
                 sc->txn = txn;
                 sc->will_route_node = -1;
                 sc->is_scheduled = false; // !这里做出逻辑的更改，当一个事务调度完成之后，不再从 txid_to_txn_map 中删除，而是设置 is_scheduled 标志
-
-                // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
-                std::vector<itemkey_t> accounts_keys;
-                std::vector<table_id_t> table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
-                smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
-                assert(table_ids.size() == accounts_keys.size());
 
                 // 获取涉及的页面列表
                 std::unordered_map<uint64_t, node_id_t> table_page_ids; // 高32位存table_id，低32位存page_id

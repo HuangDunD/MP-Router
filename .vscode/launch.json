@@ -77,10 +77,44 @@
             "name": "(gdb)smallbank_test",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/serve/test/smallbank_test",
+            "program": "${workspaceFolder}/build/serve/test/run",
             "args": [
                 "--system-mode",
-                "11", 
+                "8", 
+                "--access-pattern",
+                "0",
+                "--zipfian-theta",
+                "0.9",
+                "--account-count",
+                "300000",
+                "--worker-threads",
+                "16",
+                "--try-count",
+                "30000",
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build/serve/test/",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "(gdb)ycsb_test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/serve/test/run",
+            "args": [
+                "--workload",
+                "ycsb",
+                "--system-mode",
+                "13", 
                 "--access-pattern",
                 "0",
                 "--zipfian-theta",

@@ -10,7 +10,8 @@ struct TxnQueueEntry {
     tx_id_t tx_id;
     int txn_type;
     std::vector<uint64_t> accounts; // for smallbank, store involved account ids, the table id is generated based on txn_type
-
+    std::vector<uint64_t> keys; // for ycsb, store involved record keys
+    
     int txn_decision_type = -1; // init to -1, and will be set during routing
     std::vector<page_id_t> accessed_page_ids; // the page ids this txn will access, set during routing
     int combine_txn_count = 0; // 这个字段的意思表示，pop事务执行的时候连带多少个事务(包括他自己)一起pop到一个工作线程执行，这样可以避免一些死锁的问题

@@ -13,6 +13,7 @@
 #include <unordered_set>
 #include <cstdint>
 #include "txn_entry.h"
+#include "Logger.h"
 
 class SlidingTransactionInforTable {
 public:

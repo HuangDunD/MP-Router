@@ -7,8 +7,9 @@
 #include <list>
 #include <condition_variable>
 #include <thread>
+#include <chrono>
 #include "common.h"
-#include "smallbank.h"
+#include "config.h"
 #include "tit.h"
 #include "txn_entry.h"
 #include "Logger.h"
@@ -347,7 +348,6 @@ public:
     }
     
 private:
-    SmallBank* smallbank_; // pointer to the SmallBank instance
     SlidingTransactionInforTable *tit; // pointer to the SlidingTransactionInforTable instance
 
     const int max_pool_size_; // batch process txn size 
