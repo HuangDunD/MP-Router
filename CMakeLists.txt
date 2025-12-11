@@ -20,6 +20,7 @@ include(FindThreads)
 
 include_directories($ENV{HOME}/local/include)
 link_directories($ENV{HOME}/local/lib)
+link_directories(/usr/lib/postgresql/14/lib)
 
 # 在用户目录下寻找 metis.h
 find_path(METIS_INCLUDE_DIR metis.h
