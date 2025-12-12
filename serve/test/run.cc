@@ -1309,7 +1309,6 @@ int main(int argc, char *argv[]) {
         std::cout << "Load data only mode enabled. Exiting after data load." << std::endl;
         // Clean up connections
         for(auto conn : conns) {
-            conn->disconnect();
             delete conn;
         }
         return 0;
@@ -1474,7 +1473,7 @@ int main(int argc, char *argv[]) {
 
     // 关闭连接
     for(auto conn : conns) {
-        conn->disconnect();
+        delete conn;
     }
 
     // restore streams (best-effort; program may exit via signal handler earlier)
