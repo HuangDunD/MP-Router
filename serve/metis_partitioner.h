@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <ctime>
 #include <atomic>     // Required for automatic partitioning counters
+#include <memory>     // Required for std::shared_ptr + atomic_load/store
 #include <random>
 #include <cassert>
 
@@ -35,10 +36,12 @@
 
 class NewMetis {
 public:
+    using PartitionMap = std::unordered_map<uint64_t, idx_t>;
+
     NewMetis(Logger* logger = nullptr) : num_partitions_(0),
                  logger_(logger),
                  gen_(rd()),
-                 active_partition_map_ptr_(&partition_node_map) {
+                 active_partition_map_snapshot_(std::make_shared<const PartitionMap>()) {
         if(logger_ == nullptr) {
             logger_ = new Logger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::INFO, partition_log_file_, 4096);
         }
@@ -71,7 +74,7 @@ public:
         idx_t nvtx,
         const std::vector<idx_t> &new_part_csr,
         const std::vector<uint64_t> &dense_to_original_id_snapshot,
-        std::unordered_map<uint64_t, idx_t> &current_partition_node_map_ref // 传入引用以修改
+        uint64_t target_num_partitions
     );
 
     struct Stats {
@@ -104,12 +107,11 @@ private:
     std::unordered_map<uint64_t, uint64_t> partition_weight_;
 
     // Mapping and Partitioning Results
-    // Stores OriginalRegionID -> PartitionIndex (from METIS)
-    std::unordered_map<uint64_t, idx_t> partition_node_map;
     std::unordered_map<uint64_t, std::pair<idx_t, std::vector<int>> > pending_partition_node_map; // 在触发分区操作间隔中第一次出现悬而未决的顶点.
-    
-    // RCU-style fast read access: atomic pointer to current partition map
-    std::atomic<std::unordered_map<uint64_t, idx_t>*> active_partition_map_ptr_;
+
+    // RCU-style fast read access: atomically published immutable snapshot.
+    // Readers use atomic_load on this shared_ptr and never touch the mutable map.
+    std::shared_ptr<const PartitionMap> active_partition_map_snapshot_;
 
     // Mutexes for thread safety
     mutable std::mutex graph_data_mutex_;
@@ -143,7 +145,8 @@ private:
 
     // 稳定器，是评估上一次Metis和这一次Metis结果变化率
     std::vector<double> change_rates_history_;
-    std::atomic<int> change_times;
+    std::atomic<int> change_times{0};
+    mutable std::mutex change_rate_mutex_;
 
     // Helper (not directly used by METIS call after snapshot, but for internal consistency if needed)
     // Must be called while holding graph_data_mutex_.

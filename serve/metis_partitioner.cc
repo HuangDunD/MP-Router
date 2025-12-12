@@ -99,18 +99,18 @@ int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &requ
     int return_decision_type = 0; // 0: no decision, 1: entire affinity, 2: partial affinity, 3: cross-partition, -1: missing
     std::string cross_partition_log_message_str;
     
-    // Use atomic pointer for lock-free read access to partition map
-    // This avoids blocking on partition_map_mutex_ which may be held by partition_internal_graph
-    const std::unordered_map<uint64_t, idx_t>* current_map = active_partition_map_ptr_.load(std::memory_order_acquire);
-    
-    if (current_map != nullptr && !current_map->empty()) {
+    // Lock-free read: load an immutable snapshot of the partition map.
+    // Avoids blocking on partition_map_mutex_ and avoids data races with writers.
+    auto current_map_sp = std::atomic_load_explicit(&active_partition_map_snapshot_, std::memory_order_acquire);
+
+    if (current_map_sp != nullptr && !current_map_sp->empty()) {
         // partition_counts now maps PartitionIndex (idx_t) to count (uint64_t)
         std::map<idx_t, uint64_t> partition_counts;
         uint64_t unmapped_count = 0;
 
         for (const auto& r: request_partition_node_map) {
-            auto map_it = current_map->find(r.first);
-            if (map_it != current_map->end()) {
+            auto map_it = current_map_sp->find(r.first);
+            if (map_it != current_map_sp->end()) {
                 partition_counts[map_it->second]++; // map_it->second is the PartitionIndex
                 request_partition_node_map[r.first] = map_it->second; // Update to PartitionIndex
             } else {
@@ -215,13 +215,13 @@ int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &requ
 // 只查询当前分区的结果, 但不构建图
 // 传入的request_partition_node_map 的key是图节点id, value是占位符, 函数会将value更新为对应的分区id
 void NewMetis::get_metis_partitioning_result(std::unordered_map<uint64_t, idx_t> &request_partition_node_map) {
-    // Use atomic pointer for lock-free read access
-    const std::unordered_map<uint64_t, idx_t>* current_map = active_partition_map_ptr_.load(std::memory_order_acquire);
-    
-    if (current_map != nullptr) {
+    // Lock-free read: load immutable snapshot.
+    auto current_map_sp = std::atomic_load_explicit(&active_partition_map_snapshot_, std::memory_order_acquire);
+
+    if (current_map_sp != nullptr) {
         for(auto& r: request_partition_node_map) {
-            auto map_it = current_map->find(r.first);
-            if (map_it != current_map->end()) {
+            auto map_it = current_map_sp->find(r.first);
+            if (map_it != current_map_sp->end()) {
                 r.second = map_it->second; // Update to PartitionIndex
             } else {
                 r.second = -1; // Indicate not found
@@ -236,12 +236,12 @@ void NewMetis::get_metis_partitioning_result(std::unordered_map<uint64_t, idx_t>
 }
 
 node_id_t NewMetis::get_metis_partitioning_result(uint64_t request_partition_node) {
-    // Use atomic pointer for lock-free read access
-    const std::unordered_map<uint64_t, idx_t>* current_map = active_partition_map_ptr_.load(std::memory_order_acquire);
-    
-    if (current_map != nullptr) {
-        auto map_it = current_map->find(request_partition_node);
-        if (map_it != current_map->end()) {
+    // Lock-free read: load immutable snapshot.
+    auto current_map_sp = std::atomic_load_explicit(&active_partition_map_snapshot_, std::memory_order_acquire);
+
+    if (current_map_sp != nullptr) {
+        auto map_it = current_map_sp->find(request_partition_node);
+        if (map_it != current_map_sp->end()) {
             return map_it->second; // Return PartitionIndex
         }
     }
@@ -250,13 +250,35 @@ node_id_t NewMetis::get_metis_partitioning_result(uint64_t request_partition_nod
 
 // MODIFIED build_link_between_nodes_in_graph FUNCTION
 void NewMetis::build_link_between_nodes_in_graph(uint64_t from_node, uint64_t to_node) {
-    // try lock the partition_map_mutex_ for writing
-    std::unique_lock<std::shared_mutex> lock(partition_map_mutex_); 
-    // 首先先看下to_node是否已经有分区信息
-    auto to_it = partition_node_map.find(to_node);
-    if(to_it != partition_node_map.end()) return; // 已经有分区信息, 直接返回
-    // 如果没有分区信息, 那么查看from_node的分区信息
-    idx_t from_partition = partition_node_map.count(from_node) ? partition_node_map[from_node] : -1; 
+    // Fast-path: if `to_node` already has a stable partition assignment, do nothing.
+    auto snapshot_sp = std::atomic_load_explicit(&active_partition_map_snapshot_, std::memory_order_acquire);
+    if (snapshot_sp != nullptr) {
+        auto to_it = snapshot_sp->find(to_node);
+        if (to_it != snapshot_sp->end()) {
+            return;
+        }
+    }
+
+    idx_t from_partition = -1;
+    if (snapshot_sp != nullptr) {
+        auto from_it = snapshot_sp->find(from_node);
+        if (from_it != snapshot_sp->end()) {
+            from_partition = from_it->second;
+        }
+    }
+
+    // Protect pending state updates.
+    std::unique_lock<std::shared_mutex> lock(partition_map_mutex_);
+
+    // Re-check under lock (snapshot may have advanced).
+    snapshot_sp = std::atomic_load_explicit(&active_partition_map_snapshot_, std::memory_order_acquire);
+    if (snapshot_sp != nullptr) {
+        auto to_it = snapshot_sp->find(to_node);
+        if (to_it != snapshot_sp->end()) {
+            return;
+        }
+    }
+
     if (from_partition == -1) {
         // check pending_partition_node_map
         auto pending_it = pending_partition_node_map.find(from_node);
@@ -264,8 +286,8 @@ void NewMetis::build_link_between_nodes_in_graph(uint64_t from_node, uint64_t to
             from_partition = pending_it->second.first;
         }
     }
-    if(from_partition == -1) { assert(false); } // 如果from_node没有分区信息, 则不进行任何处理, 按道理这种情况应该不会出现
-    // 剩下的情况是to_it 不在partition_node_map中, 或者已经在里面了
+    if(from_partition == -1) { assert(false); return; }
+
     auto pending_to_it = pending_partition_node_map.find(to_node);
     if(pending_to_it != pending_partition_node_map.end()) {
         pending_to_it->second.second[from_partition]++; // 增加对应分区的计数
@@ -324,7 +346,9 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
         std::lock_guard<std::mutex> lock(graph_data_mutex_);
         logger_->info("Acquired graph_data_mutex_ for creating graph snapshot.");
 
-        num_dense_ids_snapshot = next_dense_id_.load(std::memory_order_relaxed);
+        // Move (not copy) the current accumulated graph into a snapshot to avoid doubling memory.
+        // The live structures are cleared and will start accumulating fresh data after this point.
+        num_dense_ids_snapshot = next_dense_id_.exchange(0, std::memory_order_acq_rel);
         nvtx_for_metis = num_dense_ids_snapshot;
 
         if (nvtx_for_metis == 0) {
@@ -337,35 +361,35 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
                 logger_->error("Cannot open partition output file " + output_partition_file + " for empty graph.");
             } {
                 std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-                partition_node_map.clear();
+                auto new_snapshot = std::make_shared<const PartitionMap>();
+                std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
             }
             return;
         }
 
-        graph_snapshot = this->partition_graph_;
-        weight_snapshot = this->partition_weight_;
-        original_to_dense_snapshot = this->regionid_to_denseid_map_;
+        graph_snapshot = std::move(this->partition_graph_);
+        weight_snapshot = std::move(this->partition_weight_);
+        original_to_dense_snapshot = std::move(this->regionid_to_denseid_map_);
+        dense_to_original_snapshot = std::move(this->regionid_to_dense_map_);
 
-        if (num_dense_ids_snapshot <= this->regionid_to_dense_map_.size()) {
-            dense_to_original_snapshot.assign(this->regionid_to_dense_map_.begin(),
-                                              this->regionid_to_dense_map_.begin() + num_dense_ids_snapshot);
-        } else {
-            dense_to_original_snapshot = this->regionid_to_dense_map_;
-            logger_->warning("num_dense_ids_snapshot (" + std::to_string(num_dense_ids_snapshot) +
-                            ") > regionid_to_dense_map_ size (" + std::to_string(this->regionid_to_dense_map_.size()) +
-                            "). Copying entire dense_map. Review synchronization.");
-            if (this->regionid_to_dense_map_.size() < nvtx_for_metis) {
-                nvtx_for_metis = this->regionid_to_dense_map_.size();
-                logger_->info(
-                    "Adjusted nvtx_for_metis to " + std::to_string(nvtx_for_metis) + " due to dense_map size.");
-            }
+        // Reset live structures (they are in a valid-but-unspecified state after move).
+        this->partition_graph_.clear();
+        this->partition_weight_.clear();
+        this->regionid_to_denseid_map_.clear();
+        this->regionid_to_dense_map_.clear();
+        this->active_nodes_.clear();
+
+        // The dense map may have been over-resized; trim to the actual used vertex count.
+        if (dense_to_original_snapshot.size() > static_cast<size_t>(num_dense_ids_snapshot)) {
+            dense_to_original_snapshot.resize(static_cast<size_t>(num_dense_ids_snapshot));
         }
         if (nvtx_for_metis == 0 && num_dense_ids_snapshot > 0) {
             // Consistency check after adjustment
             logger_->info(
                 "Error: nvtx_for_metis became 0 after dense_map size adjustment, but num_dense_ids_snapshot was > 0. Aborting."); {
                 std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-                partition_node_map.clear();
+                auto new_snapshot = std::make_shared<const PartitionMap>();
+                std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
             }
             return;
         }
@@ -397,7 +421,8 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
     if (!conversion_to_csr_successful) {
         logger_->info("Aborting partitioning due to error in degree sum calculation from snapshot."); {
             std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-            partition_node_map.clear();
+            auto new_snapshot = std::make_shared<const PartitionMap>();
+            std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
         }
         return;
     }
@@ -414,7 +439,8 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
             out_part_empty.close();
         } {
             std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-            partition_node_map.clear();
+            auto new_snapshot = std::make_shared<const PartitionMap>();
+            std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
         }
         return;
     }
@@ -512,7 +538,8 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
     if (!conversion_to_csr_successful) {
         logger_->info("Aborting partitioning due to CSR conversion failure from snapshot."); {
             std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-            partition_node_map.clear();
+            auto new_snapshot = std::make_shared<const PartitionMap>();
+            std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
         }
         return;
     }
@@ -524,7 +551,8 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
         logger_->error(
             " Invalid number of partitions requested (" + std::to_string(nParts_metis) + ") for METIS. Aborting."); {
             std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-            partition_node_map.clear();
+            auto new_snapshot = std::make_shared<const PartitionMap>();
+            std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
         }
         return;
     }
@@ -534,23 +562,24 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
         if (!out_part_one.is_open()) {
             logger_->error("Cannot open partition output file " + output_partition_file); {
                 std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-                partition_node_map.clear();
+                auto new_snapshot = std::make_shared<const PartitionMap>();
+                std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
             }
             return;
         }
-        out_part_one << "RegionID,TableID,InnerRegionID,PartitionIndex\n"; {
-            std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-            partition_node_map.clear();
-            for (idx_t dense_i = 0; dense_i < nvtx_for_metis; ++dense_i) {
-                if (dense_i < dense_to_original_snapshot.size()) {
-                    uint64_t original_id = dense_to_original_snapshot[dense_i];
-                    Region region(original_id);
-                    out_part_one << original_id << "," << region.getTableId() << "," << region.getInnerRegionId() <<
-                            ",0\n";
-                    partition_node_map[original_id] = 0; // Assign to PartitionIndex 0
-                }
+        out_part_one << "RegionID,TableID,InnerRegionID,PartitionIndex\n";
+        PartitionMap one_part_map;
+        one_part_map.reserve(static_cast<size_t>(nvtx_for_metis));
+        for (idx_t dense_i = 0; dense_i < nvtx_for_metis; ++dense_i) {
+            if (dense_i < dense_to_original_snapshot.size()) {
+                uint64_t original_id = dense_to_original_snapshot[dense_i];
+                Region region(original_id);
+                out_part_one << original_id << "," << region.getTableId() << "," << region.getInnerRegionId() << ",0\n";
+                one_part_map.emplace(original_id, 0);
             }
         }
+        auto new_snapshot = std::make_shared<const PartitionMap>(std::move(one_part_map));
+        std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
         out_part_one.close();
         logger_->info("Partition result (all to PartitionIndex 0) written. Router map populated.");
         return;
@@ -566,23 +595,24 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
             if (!out_part_one_reduced.is_open()) {
                 logger_->error("Cannot open partition output file " + output_partition_file); {
                     std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-                    partition_node_map.clear();
+                    auto new_snapshot = std::make_shared<const PartitionMap>();
+                    std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
                 }
                 return;
             }
-            out_part_one_reduced << "RegionID,TableID,InnerRegionID,PartitionIndex\n"; {
-                std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-                partition_node_map.clear();
-                for (idx_t dense_i = 0; dense_i < nvtx_for_metis; ++dense_i) {
-                    if (dense_i < dense_to_original_snapshot.size()) {
-                        uint64_t original_id = dense_to_original_snapshot[dense_i];
-                        Region region(original_id);
-                        out_part_one_reduced << original_id << "," << region.getTableId() << "," << region.
-                                getInnerRegionId() << ",0\n";
-                        partition_node_map[original_id] = 0; // Assign to PartitionIndex 0
-                    }
+            out_part_one_reduced << "RegionID,TableID,InnerRegionID,PartitionIndex\n";
+            PartitionMap one_part_map;
+            one_part_map.reserve(static_cast<size_t>(nvtx_for_metis));
+            for (idx_t dense_i = 0; dense_i < nvtx_for_metis; ++dense_i) {
+                if (dense_i < dense_to_original_snapshot.size()) {
+                    uint64_t original_id = dense_to_original_snapshot[dense_i];
+                    Region region(original_id);
+                    out_part_one_reduced << original_id << "," << region.getTableId() << "," << region.getInnerRegionId() << ",0\n";
+                    one_part_map.emplace(original_id, 0);
                 }
             }
+            auto new_snapshot = std::make_shared<const PartitionMap>(std::move(one_part_map));
+            std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
             out_part_one_reduced.close();
             logger_->info("Partition result (all to PartitionIndex 0 after reduction) written. Router map populated.");
             return;
@@ -592,7 +622,8 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
                 "Cannot partition into " + std::to_string(nParts_metis) +
                 " partitions after adjustment. Aborting."); {
                 std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-                partition_node_map.clear();
+                auto new_snapshot = std::make_shared<const PartitionMap>();
+                std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
             }
             return;
         }
@@ -636,7 +667,8 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
     if (metis_ret != METIS_OK) {
         logger_->info("METIS partitioning failed with error code: " + std::to_string(metis_ret)); {
             std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-            partition_node_map.clear();
+            auto new_snapshot = std::make_shared<const PartitionMap>();
+            std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
         }
         return;
     }
@@ -656,31 +688,32 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
     }
     logger_->info(size_report);
 
-    // 调用稳定化函数，它会修改 this->partition_node_map
-    // 在调用前，this->partition_node_map 存储的是旧的分区结果
-    // 传递 this->partition_node_map 的引用，它将作为旧分区信息被读取，并被新的稳定化结果覆盖
+    // Stabilize and publish the new partition map snapshot.
     this->stabilize_partition_indices(
         nvtx_for_metis,
         part_csr, // METIS 原始输出
         dense_to_original_snapshot,
-        this->partition_node_map // 将被修改的路由映射
+        this->num_partitions_
     );
+
+    auto final_map_sp = std::atomic_load_explicit(&active_partition_map_snapshot_, std::memory_order_acquire);
 
     std::ofstream out_part_final(output_partition_file, std::ios::out | std::ios::app);
     if (!out_part_final.is_open()) {
         logger_->error("Cannot open partition output file " + output_partition_file); {
             std::unique_lock<std::shared_mutex> map_lock(partition_map_mutex_);
-            partition_node_map.clear();
+            auto new_snapshot = std::make_shared<const PartitionMap>();
+            std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(new_snapshot), std::memory_order_release);
         }
         return;
     }
-    out_part_final << "Epoch,RegionID,TableID,InnerRegionID,PartitionIndex\n"; {
-        std::shared_lock<std::shared_mutex> lock(partition_map_mutex_); // 只需要读锁
-        for (const auto &pair: partition_node_map) {
+    out_part_final << "Epoch,RegionID,TableID,InnerRegionID,PartitionIndex\n";
+    if (final_map_sp != nullptr) {
+        for (const auto &pair: *final_map_sp) {
             uint64_t original_id = pair.first;
             idx_t assigned_partition_index = pair.second;
             Region region(original_id);
-            out_part_final << stats_.total_partition_calls << "," << original_id << "," << region.getTableId() 
+            out_part_final << stats_.total_partition_calls << "," << original_id << "," << region.getTableId()
                 << "," << region.getInnerRegionId() << "," << assigned_partition_index << "\n";
         }
     }
@@ -694,29 +727,35 @@ void NewMetis::stabilize_partition_indices(
     idx_t nvtx,
     const std::vector<idx_t> &new_part_csr, // METIS's raw partition result (dense ID -> new_idx)
     const std::vector<uint64_t> &dense_to_original_id_snapshot, // dense ID -> original ID mapping
-    std::unordered_map<uint64_t, idx_t> &current_partition_node_map_ref
-    // Original ID -> old_idx, will be updated to stabilized new_idx
+    uint64_t target_num_partitions
 ) {
+    const uint64_t target_partitions = (target_num_partitions > 0) ? target_num_partitions : num_partitions_;
     logger_->info(
         "Starting partition index stabilization process, ensuring indices are within [0, " + std::to_string(
-            num_partitions_ - 1) + "].");
+            target_partitions > 0 ? (target_partitions - 1) : 0) + "].");
 
-    // Create a copy of the OLD partition map to compare against.
-    std::unordered_map<uint64_t, idx_t> old_partition_node_map_copy; {
-        std::shared_lock<std::shared_mutex> lock(partition_map_mutex_); // Acquire read lock to copy
-        old_partition_node_map_copy = current_partition_node_map_ref;
+    auto old_partition_map_sp = std::atomic_load_explicit(&active_partition_map_snapshot_, std::memory_order_acquire);
+    if (old_partition_map_sp == nullptr) {
+        old_partition_map_sp = std::make_shared<const PartitionMap>();
+    }
+
+    if (target_partitions == 0) {
+        logger_->error("target_num_partitions is 0; cannot stabilize partition indices. Publishing empty snapshot.");
+        auto empty_snapshot = std::make_shared<const PartitionMap>();
+        std::atomic_store_explicit(&active_partition_map_snapshot_, std::move(empty_snapshot), std::memory_order_release);
+        return;
     }
 
     // Step 1: Collect information about existing (OLD) partitions
     std::map<idx_t, std::vector<uint64_t> > old_partition_to_nodes;
-    for (const auto &pair: old_partition_node_map_copy) {
+    for (const auto &pair: *old_partition_map_sp) {
         uint64_t original_id = pair.first;
         idx_t old_partition_idx = pair.second;
         // 确保旧的索引本身就在合法范围内
-        if (old_partition_idx < 0 || static_cast<uint64_t>(old_partition_idx) >= num_partitions_) {
+        if (old_partition_idx < 0 || static_cast<uint64_t>(old_partition_idx) >= target_partitions) {
             logger_->warning(
                 "Old partition index " + std::to_string(old_partition_idx) + " for node " + std::to_string(original_id)
-                + " is out of target range [0, " + std::to_string(num_partitions_ - 1) +
+                + " is out of target range [0, " + std::to_string(target_partitions > 0 ? (target_partitions - 1) : 0) +
                 "]. Adjusting to 0 for matching purposes.");
             old_partition_idx = 0; // 或者进行其他合理的调整，这里简单回退到0
         }
@@ -787,8 +826,8 @@ void NewMetis::stabilize_partition_indices(
         // If both the old partition and the new METIS partition haven't been assigned yet
         if (assigned_old_partitions.find(old_idx) == assigned_old_partitions.end() &&
             assigned_new_metis_partitions.find(new_idx_metis) == assigned_new_metis_partitions.end()) {
-            // Only establish match if old_idx is within the target range [0, num_partitions_ - 1]
-            if (static_cast<uint64_t>(old_idx) < num_partitions_) {
+            // Only establish match if old_idx is within the target range [0, target_partitions - 1]
+            if (static_cast<uint64_t>(old_idx) < target_partitions) {
                 old_to_new_metis_mapping[old_idx] = new_idx_metis;
                 assigned_old_partitions.insert(old_idx);
                 assigned_new_metis_partitions.insert(new_idx_metis);
@@ -797,7 +836,7 @@ void NewMetis::stabilize_partition_indices(
                               " with overlap " + std::to_string(count));
             } else {
                 logger_->warning("Skipping match for old partition " + std::to_string(old_idx) +
-                                " as it's outside target range [0, " + std::to_string(num_partitions_ - 1) + "].");
+                                " as it's outside target range [0, " + std::to_string(target_partitions - 1) + "].");
             }
         }
     }
@@ -835,8 +874,8 @@ void NewMetis::stabilize_partition_indices(
 
             // First, try to find an *unused* target index within the allowed range.
             idx_t assigned_stabilized_idx = -1;
-            for (uint64_t i = 0; i < num_partitions_; ++i) {
-                idx_t candidate_idx = (current_round_robin_idx + i) % num_partitions_;
+            for (uint64_t i = 0; i < target_partitions; ++i) {
+                idx_t candidate_idx = (current_round_robin_idx + static_cast<idx_t>(i)) % static_cast<idx_t>(target_partitions);
                 if (used_target_stabilized_indices.find(candidate_idx) == used_target_stabilized_indices.end()) {
                     assigned_stabilized_idx = candidate_idx;
                     break;
@@ -847,7 +886,7 @@ void NewMetis::stabilize_partition_indices(
                 // Found an unused target index
                 new_metis_idx_to_stabilized_idx_map[new_idx_metis] = assigned_stabilized_idx;
                 used_target_stabilized_indices.insert(assigned_stabilized_idx);
-                current_round_robin_idx = (assigned_stabilized_idx + 1) % num_partitions_; // Advance round-robin
+                current_round_robin_idx = (assigned_stabilized_idx + 1) % static_cast<idx_t>(target_partitions); // Advance round-robin
                 logger_->debug("Assigned new METIS partition " + std::to_string(new_idx_metis) +
                               " to UNUSED stabilized index " + std::to_string(assigned_stabilized_idx) +
                               " (round-robin).");
@@ -859,7 +898,7 @@ void NewMetis::stabilize_partition_indices(
                 assigned_stabilized_idx = current_round_robin_idx;
                 new_metis_idx_to_stabilized_idx_map[new_idx_metis] = assigned_stabilized_idx;
                 // No need to insert into used_target_stabilized_indices as it's already "used"
-                current_round_robin_idx = (current_round_robin_idx + 1) % num_partitions_; // Advance round-robin
+                current_round_robin_idx = (current_round_robin_idx + 1) % static_cast<idx_t>(target_partitions); // Advance round-robin
                 logger_->warning("Assigned new METIS partition " + std::to_string(new_idx_metis) +
                                 " to REUSED stabilized index " + std::to_string(assigned_stabilized_idx) +
                                 " (round-robin). All target indices are currently occupied.");
@@ -869,72 +908,70 @@ void NewMetis::stabilize_partition_indices(
 
     logger_->info(
         "Stabilized partition index mapping created. Total target indices used (potentially reused): " +
-        std::to_string(used_target_stabilized_indices.size()) + " out of " + std::to_string(num_partitions_) + ".");
+        std::to_string(used_target_stabilized_indices.size()) + " out of " + std::to_string(target_partitions) + ".");
 
-    // Step 6: Construct the final stabilized `current_partition_node_map_ref` and calculate change rate
+    // Step 6: Construct the final stabilized partition map snapshot and calculate change rate
     uint64_t nodes_unchanged_count = 0;
-    uint64_t nodes_existing_in_old_map = old_partition_node_map_copy.size(); {
-        std::unique_lock<std::shared_mutex> lock(partition_map_mutex_); // Acquire exclusive write lock for router map
-        current_partition_node_map_ref.clear(); // Clear the old map
+    uint64_t nodes_existing_in_old_map = old_partition_map_sp->size();
 
-        for (idx_t dense_i = 0; dense_i < nvtx; ++dense_i) {
-            if (dense_i < dense_to_original_id_snapshot.size()) {
-                uint64_t original_id = dense_to_original_id_snapshot[dense_i];
-                idx_t original_new_partition_idx_metis = new_part_csr[dense_i]; // Raw index from METIS
+    PartitionMap new_partition_map;
+    new_partition_map.reserve(static_cast<size_t>(nvtx));
 
-                auto it_stabilized_idx_map = new_metis_idx_to_stabilized_idx_map.find(original_new_partition_idx_metis);
-                idx_t final_assigned_partition_index;
+    for (idx_t dense_i = 0; dense_i < nvtx; ++dense_i) {
+        if (dense_i < dense_to_original_id_snapshot.size()) {
+            uint64_t original_id = dense_to_original_id_snapshot[dense_i];
+            idx_t original_new_partition_idx_metis = new_part_csr[dense_i]; // Raw index from METIS
 
-                if (it_stabilized_idx_map != new_metis_idx_to_stabilized_idx_map.end()) {
-                    final_assigned_partition_index = it_stabilized_idx_map->second;
-                } else {
-                    // This should ideally not happen if new_metis_idx_to_stabilized_idx_map
-                    // is correctly populated with all raw METIS partition indices.
-                    logger_->error(
-                        "CRITICAL ERROR: METIS partition index " + std::to_string(original_new_partition_idx_metis) +
-                        " for node " + std::to_string(original_id) +
-                        " not found in stabilization map. Assigning to (0 % num_partitions_).");
-                    final_assigned_partition_index = 0 % static_cast<idx_t>(num_partitions_);
-                    // Fallback to 0 (within range)
-                }
+            auto it_stabilized_idx_map = new_metis_idx_to_stabilized_idx_map.find(original_new_partition_idx_metis);
+            idx_t final_assigned_partition_index;
 
-                // Final check to ensure the assigned index is within bounds [0, num_partitions_ - 1]
-                if (static_cast<uint64_t>(final_assigned_partition_index) >= num_partitions_) {
-                    logger_->error("CRITICAL ERROR: Stabilized index " + std::to_string(final_assigned_partition_index) +
-                                  " for node " + std::to_string(original_id) + " is out of bounds [0, " +
-                                  std::to_string(num_partitions_ - 1) + "]. Modulo correcting.");
-                    final_assigned_partition_index %= static_cast<idx_t>(num_partitions_);
-                }
-                current_partition_node_map_ref[original_id] = final_assigned_partition_index;
-
-                // Calculate unchanged nodes: only for nodes that existed in the previous partition map
-                auto it_old_map = old_partition_node_map_copy.find(original_id);
-                if (it_old_map != old_partition_node_map_copy.end()) {
-                    if (it_old_map->second == final_assigned_partition_index) {
-                        nodes_unchanged_count++;
-                    }
-                }
+            if (it_stabilized_idx_map != new_metis_idx_to_stabilized_idx_map.end()) {
+                final_assigned_partition_index = it_stabilized_idx_map->second;
             } else {
-                logger_->error("Dense ID " + std::to_string(dense_i) +
-                              " out of bounds in dense_to_original_id_snapshot during final map creation. Skipping node for final map.");
+                logger_->error(
+                    "CRITICAL ERROR: METIS partition index " + std::to_string(original_new_partition_idx_metis) +
+                    " for node " + std::to_string(original_id) +
+                    " not found in stabilization map. Assigning to 0.");
+                final_assigned_partition_index = 0;
             }
+
+            if (target_partitions > 0 && static_cast<uint64_t>(final_assigned_partition_index) >= target_partitions) {
+                logger_->error("CRITICAL ERROR: Stabilized index " + std::to_string(final_assigned_partition_index) +
+                              " for node " + std::to_string(original_id) + " is out of bounds [0, " +
+                              std::to_string(target_partitions - 1) + "]. Modulo correcting.");
+                final_assigned_partition_index %= static_cast<idx_t>(target_partitions);
+            }
+
+            new_partition_map.emplace(original_id, final_assigned_partition_index);
+
+            auto it_old_map = old_partition_map_sp->find(original_id);
+            if (it_old_map != old_partition_map_sp->end() && it_old_map->second == final_assigned_partition_index) {
+                nodes_unchanged_count++;
+            }
+        } else {
+            logger_->error("Dense ID " + std::to_string(dense_i) +
+                          " out of bounds in dense_to_original_id_snapshot during final map creation. Skipping node for final map.");
         }
-        
-        // Atomically publish the updated partition map for lock-free readers
-        // This allows readers to access the new mapping without waiting for the write lock
-        active_partition_map_ptr_.store(&current_partition_node_map_ref, std::memory_order_release);
-    } // partition_map_mutex_ (UNIQUE lock) released
+    }
+
+    auto new_snapshot = std::make_shared<const PartitionMap>(std::move(new_partition_map));
+    std::atomic_store_explicit(&active_partition_map_snapshot_, new_snapshot, std::memory_order_release);
 
     // Log the change rate
     double change_rate = 0.0;
     if (nodes_existing_in_old_map > 0) {
         change_rate = static_cast<double>(nodes_existing_in_old_map - nodes_unchanged_count) /
                       nodes_existing_in_old_map;
-        change_rates_history_.push_back(change_rate);
-        change_times++;
-        // if (change_times % 10 == 0) {
+
+        int run_idx = 0;
+        size_t window_size = 0;
+        double average_change_rate = 0.0;
+        {
+            std::lock_guard<std::mutex> guard(change_rate_mutex_);
+            change_rates_history_.push_back(change_rate);
+            run_idx = ++change_times;
+
             double sum_change_rates = 0.0;
-            // Sum the last 10 rates, or all if fewer than 10
             size_t start_idx = 0;
             if (change_rates_history_.size() > 10) {
                 start_idx = change_rates_history_.size() - 10;
@@ -942,28 +979,23 @@ void NewMetis::stabilize_partition_indices(
             for (size_t i = start_idx; i < change_rates_history_.size(); ++i) {
                 sum_change_rates += change_rates_history_[i];
             }
-            double average_change_rate = sum_change_rates / (change_rates_history_.size() - start_idx);
+            window_size = change_rates_history_.size() - start_idx;
+            average_change_rate = (window_size > 0) ? (sum_change_rates / window_size) : 0.0;
+        }
 
-            std::ofstream report_file(change_rate_report_file_, std::ios::app); // 以追加模式打开文件
-            if (report_file.is_open()) {
-                report_file << "--- Partition Change Rate Report ---\n";
-                report_file << "Run: " << change_times << "\n"; // 使用 change_times 作为当前运行次数
-                report_file << "Total successful partition runs: " << change_times << ".\n";
-                report_file << "Average change rate over last " << (change_rates_history_.size() - start_idx) << " runs: "
-                            << std::fixed << std::setprecision(4) << (average_change_rate * 100.0) << "%.\n";
-                report_file << "------------------------------------\n";
-                report_file.close();
-                logger_->info("Partition change rate report written to " + change_rate_report_file_);
-            } else {
-                logger_->error("Failed to open partition change rate report file: " + change_rate_report_file_);
-                // 失败时 fallback 到控制台输出
-                std::cout << "--- Partition Change Rate Report ---" << std::endl;
-                std::cout << "Total successful partition runs: " << change_times << "." << std::endl;
-                std::cout << "Average change rate over last " << (change_rates_history_.size() - start_idx) << " runs: "
-                          << std::fixed << std::setprecision(4) << (average_change_rate * 100.0) << "%." << std::endl;
-                std::cout << "------------------------------------" << std::endl;
-            }
-        // }
+        std::ofstream report_file(change_rate_report_file_, std::ios::app); // 以追加模式打开文件
+        if (report_file.is_open()) {
+            report_file << "--- Partition Change Rate Report ---\n";
+            report_file << "Run: " << run_idx << "\n";
+            report_file << "Total successful partition runs: " << run_idx << ".\n";
+            report_file << "Average change rate over last " << window_size << " runs: "
+                        << std::fixed << std::setprecision(4) << (average_change_rate * 100.0) << "%.\n";
+            report_file << "------------------------------------\n";
+            report_file.close();
+            logger_->info("Partition change rate report written to " + change_rate_report_file_);
+        } else {
+            logger_->error("Failed to open partition change rate report file: " + change_rate_report_file_);
+        }
     } else {
         logger_->info(
             "Partition index stabilization complete. No nodes existed in the previous partition map to compare for change rate (old map was empty).");
