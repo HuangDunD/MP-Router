@@ -97,23 +97,26 @@ int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &requ
 
     idx_t final_partition_index_result = -1; // Default: no specific partition index determined
     int return_decision_type = 0; // 0: no decision, 1: entire affinity, 2: partial affinity, 3: cross-partition, -1: missing
-    std::string cross_partition_log_message_str; {
-        std::shared_lock<std::shared_mutex> lock(partition_map_mutex_);
+    std::string cross_partition_log_message_str;
+    
+    // Use atomic pointer for lock-free read access to partition map
+    // This avoids blocking on partition_map_mutex_ which may be held by partition_internal_graph
+    const std::unordered_map<uint64_t, idx_t>* current_map = active_partition_map_ptr_.load(std::memory_order_acquire);
+    
+    if (current_map != nullptr && !current_map->empty()) {
+        // partition_counts now maps PartitionIndex (idx_t) to count (uint64_t)
+        std::map<idx_t, uint64_t> partition_counts;
+        uint64_t unmapped_count = 0;
 
-        if (!partition_node_map.empty()) {
-            // partition_counts now maps PartitionIndex (idx_t) to count (uint64_t)
-            std::map<idx_t, uint64_t> partition_counts;
-            uint64_t unmapped_count = 0;
-
-            for (const auto& r: request_partition_node_map) {
-                auto map_it = partition_node_map.find(r.first);
-                if (map_it != partition_node_map.end()) {
-                    partition_counts[map_it->second]++; // map_it->second is the PartitionIndex
-                    request_partition_node_map[r.first] = map_it->second; // Update to PartitionIndex
-                } else {
-                    unmapped_count++;
-                }
+        for (const auto& r: request_partition_node_map) {
+            auto map_it = current_map->find(r.first);
+            if (map_it != current_map->end()) {
+                partition_counts[map_it->second]++; // map_it->second is the PartitionIndex
+                request_partition_node_map[r.first] = map_it->second; // Update to PartitionIndex
+            } else {
+                unmapped_count++;
             }
+        }
 
             #if LOG_METIS_DECISION
             std::string group_str = "[";
@@ -197,7 +200,6 @@ int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &requ
                 assert(false && "Unexpected state in partition_counts analysis.");
             }
         }
-    } // partition_map_mutex_ (SHARED lock) is released here
 
 #if LOG_METIS_DECISION
     if (!cross_partition_log_message_str.empty()) {
@@ -213,25 +215,37 @@ int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &requ
 // 只查询当前分区的结果, 但不构建图
 // 传入的request_partition_node_map 的key是图节点id, value是占位符, 函数会将value更新为对应的分区id
 void NewMetis::get_metis_partitioning_result(std::unordered_map<uint64_t, idx_t> &request_partition_node_map) {
-    std::shared_lock<std::shared_mutex> lock(partition_map_mutex_);
-    for(auto& r: request_partition_node_map) {
-        auto map_it = partition_node_map.find(r.first);
-        if (map_it != partition_node_map.end()) {
-            r.second = map_it->second; // Update to PartitionIndex
-        } else {
-            r.second = -1; // Indicate not found
+    // Use atomic pointer for lock-free read access
+    const std::unordered_map<uint64_t, idx_t>* current_map = active_partition_map_ptr_.load(std::memory_order_acquire);
+    
+    if (current_map != nullptr) {
+        for(auto& r: request_partition_node_map) {
+            auto map_it = current_map->find(r.first);
+            if (map_it != current_map->end()) {
+                r.second = map_it->second; // Update to PartitionIndex
+            } else {
+                r.second = -1; // Indicate not found
+            }
+        }
+    } else {
+        // Map not initialized yet, mark all as not found
+        for(auto& r: request_partition_node_map) {
+            r.second = -1;
         }
     }
 }
 
 node_id_t NewMetis::get_metis_partitioning_result(uint64_t request_partition_node) {
-    std::shared_lock<std::shared_mutex> lock(partition_map_mutex_);
-    auto map_it = partition_node_map.find(request_partition_node);
-    if (map_it != partition_node_map.end()) {
-        return map_it->second; // Return PartitionIndex
-    } else {
-        return -1; // Indicate not found
+    // Use atomic pointer for lock-free read access
+    const std::unordered_map<uint64_t, idx_t>* current_map = active_partition_map_ptr_.load(std::memory_order_acquire);
+    
+    if (current_map != nullptr) {
+        auto map_it = current_map->find(request_partition_node);
+        if (map_it != current_map->end()) {
+            return map_it->second; // Return PartitionIndex
+        }
     }
+    return -1; // Indicate not found or map not initialized
 }
 
 // MODIFIED build_link_between_nodes_in_graph FUNCTION
@@ -905,6 +919,10 @@ void NewMetis::stabilize_partition_indices(
                               " out of bounds in dense_to_original_id_snapshot during final map creation. Skipping node for final map.");
             }
         }
+        
+        // Atomically publish the updated partition map for lock-free readers
+        // This allows readers to access the new mapping without waiting for the write lock
+        active_partition_map_ptr_.store(&current_partition_node_map_ref, std::memory_order_release);
     } // partition_map_mutex_ (UNIQUE lock) released
 
     // Log the change rate

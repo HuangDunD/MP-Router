@@ -37,7 +37,8 @@ class NewMetis {
 public:
     NewMetis(Logger* logger = nullptr) : num_partitions_(0),
                  logger_(logger),
-                 gen_(rd()) {
+                 gen_(rd()),
+                 active_partition_map_ptr_(&partition_node_map) {
         if(logger_ == nullptr) {
             logger_ = new Logger(Logger::LogTarget::FILE_ONLY, Logger::LogLevel::INFO, partition_log_file_, 4096);
         }
@@ -105,7 +106,10 @@ private:
     // Mapping and Partitioning Results
     // Stores OriginalRegionID -> PartitionIndex (from METIS)
     std::unordered_map<uint64_t, idx_t> partition_node_map;
-    std::unordered_map<uint64_t, std::pair<idx_t, std::vector<int>> > pending_partition_node_map; // 在触发分区操作间隔中第一次出现悬而未决的顶点. 
+    std::unordered_map<uint64_t, std::pair<idx_t, std::vector<int>> > pending_partition_node_map; // 在触发分区操作间隔中第一次出现悬而未决的顶点.
+    
+    // RCU-style fast read access: atomic pointer to current partition map
+    std::atomic<std::unordered_map<uint64_t, idx_t>*> active_partition_map_ptr_;
 
     // Mutexes for thread safety
     mutable std::mutex graph_data_mutex_;
