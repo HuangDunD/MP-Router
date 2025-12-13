@@ -320,7 +320,7 @@ public:
 
     // 可能Update SQL执行之后数据页所在的位置, 根据returning ctid 进行更新key-page映射
     // 如果key不存在, 则不进行任何操作
-    inline void update_key_page(TxnQueueEntry* txn, std::vector<table_id_t>& table_ids, std::vector<itemkey_t>& keys, 
+    inline void update_key_page(TxnQueueEntry* txn, std::vector<table_id_t>& table_ids, std::vector<itemkey_t>& keys, std::vector<bool>& rw, 
             std::vector<page_id_t> ctid_ret_pages, node_id_t routed_node_id) { // txn_type for SYSTEM_MODE 8
         // 这个地方可能ctid_ret_pages的数量不等于keys, 因为这个事务可能触发了回滚, 此时需要将table_ids, keys截断一下
         if(txn->accessed_page_ids.size() == 0) return; // 说明没有记录访问的页面，可能是system_mode 4无需维护key-page映射，直接返回
@@ -339,7 +339,7 @@ public:
             if(original_page == ctid_ret_pages[i]) {
                 // 说明访问的页面没有变化，直接更新所有权即可
                 // 仅访问了原来的页面, 仍然是这个节点的所有权
-                ownership_table_->set_owner(txn, table_ids[i], keys[i], original_page, routed_node_id); 
+                ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], original_page, routed_node_id); 
                 stats_.page_update_cnt++;
             }
             else {
@@ -348,8 +348,8 @@ public:
                 std::unique_lock<std::shared_mutex> lock(hot_mutex_);
                 auto it = hot_key_map.find({table_ids[i], keys[i]});
                 if (it != hot_key_map.end()) {
-                    ownership_table_->set_owner(txn, table_ids[i], keys[i], ctid_ret_pages[i], routed_node_id);
-                    ownership_table_->set_owner(txn, table_ids[i], keys[i], original_page, routed_node_id); 
+                    ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], ctid_ret_pages[i], routed_node_id);
+                    ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], original_page, routed_node_id); 
                     it->second.page = ctid_ret_pages[i];
                     // 毫秒级时间戳
                     it->second.last_access_time = static_cast<uint64_t>(
@@ -434,7 +434,7 @@ public:
 
     // 根据table_ids和keys进行路由，返回目标节点ID
     SmartRouterResult get_route_primary(TxnQueueEntry* txn, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, 
-            std::vector<pqxx::connection *> &thread_conns);
+            std::vector<bool> &rw, std::vector<pqxx::connection *> &thread_conns);
             
     // ! core code, propose the transaction scheduling
     // 批量对事务进行路由
@@ -532,9 +532,10 @@ public:
     struct SchedulingCandidateTxn {
         TxnQueueEntry* txn;
         std::vector<uint64_t> involved_pages;
+        std::vector<bool> rw_flags; 
         // 在这里面存储对应页面的metis node和ownership node, 这样可以避免全局维护一个page_to_node_map，对map修改需要mutex锁
         std::vector<node_id_t> page_to_metis_node_vec;
-        std::vector<node_id_t> page_to_ownership_node_vec;
+        std::vector<std::pair<std::vector<node_id_t>, bool> > page_to_ownership_node_vec; // pages 可能对应多个ownership节点, bool表示锁的模式
         std::unordered_map<node_id_t, double> node_benefit_map;
         node_id_t will_route_node; // 最终决定路由到的节点
         bool is_scheduled = false; // 是否已经被调度, 避免重复调度
@@ -595,15 +596,18 @@ public:
                 // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
                 std::vector<itemkey_t> keys;
                 std::vector<table_id_t> table_ids; 
-                
+                std::vector<bool> rw;
+
                 if(Workload_Type == 0) {
                     itemkey_t account1 = txn_entry->accounts[0];
                     itemkey_t account2 = txn_entry->accounts[1];
                     table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
                     smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
+                    rw = smallbank_->get_rw_by_txn_type(txn_type);
                 } else if (Workload_Type == 1) { 
                     table_ids = ycsb_->get_table_ids_by_txn_type();
                     keys = txn_entry->keys;
+                    rw = ycsb_->get_rw_flags();
                 } 
                 else assert(false); // 不可能出现的情况
                 assert(table_ids.size() == keys.size());
@@ -648,7 +652,7 @@ public:
                     routed_node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
                 }
                 else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13) {
-                    SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, thread_conns_vec);
+                    SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, rw, thread_conns_vec);
                     if(result.success) {
                         routed_node_id = result.smart_router_id;
                         if(SYSTEM_MODE == 3) txn_entry->txn_decision_type = result.sys_3_decision_type; 
@@ -868,8 +872,8 @@ public:
     void notify_batch_finished(node_id_t compute_node_id, int thread_id, int con_batch_id) { 
         std::lock_guard<std::mutex> lock(batch_mutex);
         // if(WarmupEnd)
-        logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + " Thread: " + std::to_string(thread_id) +
-                     " finished batch " + std::to_string(batch_id) + get_txn_queue_now_status());
+        // logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + " Thread: " + std::to_string(thread_id) +
+        //              " finished batch " + std::to_string(batch_id) + get_txn_queue_now_status());
         batch_cv.notify_all();
     }
 
@@ -880,20 +884,20 @@ public:
             // 如果该计算节点的所有线程还没有完成该批次的处理，则继续等待
             // 如果batch_finished_flags被重置为0，说明可以开始下一批次的处理
             if(con_batch_id < batch_id || txn_queues_[compute_node_id]->is_finished()) {
-                logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + 
-                             " Thread: " + std::to_string(thread_id) +
-                             " con_batch_id: " + std::to_string(con_batch_id) + 
-                             " detects batch_id: " + std::to_string(batch_id) + 
-                             ", exiting wait_for_next_batch.");
+                // logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + 
+                //              " Thread: " + std::to_string(thread_id) +
+                //              " con_batch_id: " + std::to_string(con_batch_id) + 
+                //              " detects batch_id: " + std::to_string(batch_id) + 
+                //              ", exiting wait_for_next_batch.");
                 return true;// 如果整个系统跑完了，也直接结束，这个对于pipeline来说是一个情况，因为会缺少一个batch++；
             }
             else return false; 
         });
         // 说明可以开始下一批次的处理
         // if(WarmupEnd)
-        logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + 
-                     " Thread: " + std::to_string(thread_id) +
-                     " starts processing batch " + std::to_string(batch_id));
+        // logger->info("Batch Router Worker: Node " + std::to_string(compute_node_id) + 
+        //              " Thread: " + std::to_string(thread_id) +
+        //              " starts processing batch " + std::to_string(batch_id));
     }
 
 
@@ -990,6 +994,7 @@ public:
     }
 
 private:
+    std::vector<node_id_t> checkif_txn_ownership_ok(SchedulingCandidateTxn* sc, std::unordered_map<node_id_t, int>& ownership_node_count);
 
     std::vector<double> compute_load_balance_penalty_weights();
 
