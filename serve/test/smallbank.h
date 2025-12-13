@@ -89,6 +89,21 @@ public:
         // txn_type == 5
         {(table_id_t)SmallBankTableType::kSavingsTable}
     };
+
+    inline static const std::vector<bool> RW_FLAGS_ARR[SmallBank_TX_TYPES] = {
+        // txn_type == 0 -> W W W
+        {true, true, true},
+        // txn_type == 1 -> W W
+        {true, true},
+        // txn_type == 2 -> W
+        {true},
+        // txn_type == 3 -> R W
+        {false, true},
+        // txn_type == 4 -> R R
+        {false, false},
+        // txn_type == 5 -> W
+        {true}
+    };
     
     int get_account_count() const {
         return smallbank_account;
@@ -192,6 +207,12 @@ public:
     std::vector<table_id_t>& get_table_ids_by_txn_type(int txn_type) {
         assert(txn_type >= 0 && txn_type < SmallBank_TX_TYPES);
         return const_cast<std::vector<table_id_t>&>(TABLE_IDS_ARR[txn_type]);
+    }
+
+    // 获取读写标志, 1表示写，0表示读
+    std::vector<bool>& get_rw_by_txn_type(int txn_type) {
+        assert(txn_type >= 0 && txn_type < SmallBank_TX_TYPES);
+        return const_cast<std::vector<bool>&>(RW_FLAGS_ARR[txn_type]);
     }
 
     void get_keys_by_txn_type(int txn_type, itemkey_t account1, itemkey_t account2, std::vector<itemkey_t> &keys) {

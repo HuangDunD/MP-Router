@@ -200,6 +200,7 @@ void run_smallbank_empty(thread_params* params, Logger* logger_){
     TxnQueue* txn_queue = txn_queues[compute_node_id];
     SmartRouter* smart_router = params->smart_router;
     SlidingTransactionInforTable *tit = params->tit;
+    SmallBank* smallbank = params->smallbank;
 
     // init the thread connection for this compute node
     auto con_str = DBConnection[compute_node_id];
@@ -231,6 +232,26 @@ void run_smallbank_empty(thread_params* params, Logger* logger_){
         for(auto& txn_entry : txn_entries) {
             // just for statistics
             exe_count++;
+
+            tx_id_t tx_id = txn_entry->tx_id;
+            int txn_type = txn_entry->txn_type;
+            itemkey_t account1 = txn_entry->accounts[0];
+            itemkey_t account2 = txn_entry->accounts[1];
+            int txn_decision_type = txn_entry->txn_decision_type;
+            
+            // init the table ids and keys
+            std::vector<table_id_t>& tables = smallbank->get_table_ids_by_txn_type(txn_type);
+            assert(tables.size() > 0);
+            std::vector<itemkey_t> keys;
+            smallbank->get_keys_by_txn_type(txn_type, account1, account2, keys);
+            assert(tables.size() == keys.size());
+            std::vector<bool> rw = smallbank->get_rw_by_txn_type(txn_type);
+            std::vector<page_id_t> ctid_ret_page_ids; 
+
+            ctid_ret_page_ids = txn_entry->accessed_page_ids;
+            // update the smart router page map if needed
+            if(smart_router) smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables), keys, rw, ctid_ret_page_ids, compute_node_id);
+
             // statistics
             exec_txn_cnt_per_node[compute_node_id]++;
             tit->mark_done(txn_entry); // 一体化：标记完成，删除由 TIT 统一管理
@@ -313,6 +334,7 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
             std::vector<itemkey_t> keys;
             smallbank->get_keys_by_txn_type(txn_type, account1, account2, keys);
             assert(tables.size() == keys.size());
+            std::vector<bool> rw = smallbank->get_rw_by_txn_type(txn_type);
             std::vector<page_id_t> ctid_ret_page_ids; 
             try {  
                 switch(txn_type) {
@@ -445,7 +467,7 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
                 }
                 txn->commit();
                 // update the smart router page map if needed
-                if(smart_router) smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables), keys, ctid_ret_page_ids, compute_node_id);
+                if(smart_router) smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables), keys, rw, ctid_ret_page_ids, compute_node_id);
                 
             } catch (const std::exception &e) {
                 std::cerr << "Transaction failed: " << e.what() << std::endl;
@@ -539,6 +561,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             std::vector<itemkey_t> keys;
             smallbank->get_keys_by_txn_type(txn_type, account1, account2, keys);
             assert(tables.size() == keys.size());
+            std::vector<bool> rw = smallbank->get_rw_by_txn_type(txn_type);
             std::vector<page_id_t> ctid_ret_page_ids;
 
             // 计时
@@ -600,7 +623,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
 
                 if(smart_router) {
                     smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
-                                                  keys, ctid_ret_page_ids, compute_node_id);
+                                                  keys, rw, ctid_ret_page_ids, compute_node_id);
                 }
             } catch (const std::exception &e) {
                 std::cerr << "Transaction (SP) failed: " << e.what() << std::endl;
@@ -633,11 +656,6 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
     YCSB* ycsb = params->ycsb;
     assert(txn_queue != nullptr && smart_router != nullptr && smart_router != nullptr && ycsb != nullptr);
 
-    int read_pct = ycsb->get_read_pct();
-    int update_pct = ycsb->get_update_pct();
-    int total_keys = 10; // 固定每次10个键
-    int read_cnt = std::max(0, std::min(total_keys, (int)std::round(total_keys * (read_pct / 100.0))));
-    int write_cnt = total_keys - read_cnt;
     // 构造数组字符串：array['k1','k2',...]
     auto build_array = [](const std::vector<itemkey_t>& v, size_t start, size_t count) {
         std::string s = "array[";
@@ -710,6 +728,7 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             std::vector<itemkey_t> keys = txn_entry->keys;
             assert(tables.size() == keys.size());
             assert(txn_entry->keys.size() == 10);
+            std::vector<bool> rw = ycsb->get_rw_flags();
 
             std::vector<page_id_t> ctid_ret_page_ids;
 
@@ -724,8 +743,8 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
                 switch(txn_type) {
                     case 0: { 
                         // 读集合取前 read_cnt 个，写集合取后 write_cnt 个
-                        std::string read_arr = build_array(keys, 0, read_cnt);
-                        std::string write_arr = build_array(keys, read_cnt, write_cnt);
+                        std::string read_arr = build_array(keys, 0, ycsb->get_read_cnt());
+                        std::string write_arr = build_array(keys, ycsb->get_read_cnt(), ycsb->get_write_cnt());
 
                         std::string sql = "SELECT id, ctid, txid FROM ycsb_multi_rw(" + read_arr + ", " + write_arr + ")";
                         res = txn.exec(sql);
@@ -744,7 +763,7 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
 
                 if(smart_router) {
                     smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
-                                                  keys, ctid_ret_page_ids, compute_node_id);
+                                                  keys, rw, ctid_ret_page_ids, compute_node_id);
                 }
             } catch (const std::exception &e) {
                 std::cerr << "Transaction (SP) failed: " << e.what() << std::endl;
