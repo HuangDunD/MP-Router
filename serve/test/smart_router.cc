@@ -1,8 +1,56 @@
 #include "smart_router.h"
 #include "indexed_priority_queue.h"
 
+// check 是否事务满足 ownership, 如果满足, 返回满足的节点集合
+// 同时传入 ownership_node_count 以便于后续计算分数
+std::vector<node_id_t> SmartRouter::checkif_txn_ownership_ok(SchedulingCandidateTxn* sc, std::unordered_map<node_id_t, int>& ownership_node_count){
+    std::vector<node_id_t> ownership_ok_nodes;
+    for (int i = 0; i < sc->involved_pages.size(); ++i) {
+        auto page = sc->involved_pages[i];
+        // check if the ownership satisfies
+        auto ownership_stats = sc->page_to_ownership_node_vec[i];
+        bool rw = sc->rw_flags[i];
+        for(const auto& ownership_node : ownership_stats.first) {
+            if(ownership_stats.second == 1) {
+                // exclusive ownership
+                assert(ownership_stats.first.size() == 1);
+                ownership_node_count[ownership_node]++; // 满足读和写
+            } else{
+                // shared ownership
+                if(!rw) {
+                    // read operation, shared ownership is ok
+                    ownership_node_count[ownership_node]++;
+                }
+            }            
+        }
+    }
+    // 判断该事务是否满足ownership entirely
+    int max_ownership_count = 0;
+    std::vector<node_id_t> candidate_ownership_nodes;
+    for(const auto& [node_id, count] : ownership_node_count) {
+        if(count > max_ownership_count) {
+            max_ownership_count = count;
+            candidate_ownership_nodes.clear();
+            candidate_ownership_nodes.push_back(node_id);
+        } else if(count == max_ownership_count) {
+            candidate_ownership_nodes.push_back(node_id);
+        }
+    }
+    if(max_ownership_count == sc->involved_pages.size()) {
+        // ownership entirely
+        for(const auto& node_id : candidate_ownership_nodes) {
+            ownership_ok_nodes.push_back(node_id);
+        }
+    }
+    else{
+        // ownership not entirely
+        ownership_ok_nodes = {};
+    }
+    return ownership_ok_nodes;
+}
+
 SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, 
-        std::vector<pqxx::connection *> &thread_conns) {
+        std::vector<bool> &rw, std::vector<pqxx::connection *> &thread_conns) {
     SmartRouterResult result;
     if (table_ids.size() != keys.size() || table_ids.empty()) {
         result.error_message = "Mismatched or empty table_ids and keys";
@@ -13,7 +61,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
     std::unordered_map<node_id_t, int> node_count_basedon_key_access_last; // 基于key_access_last的计数, for SYSTEM_MODE 5
     std::unordered_map<uint64_t, node_id_t> table_key_id;  // 高32位存table_id，低32位存key, for SYSTEM_MODE 6
     std::unordered_map<node_id_t, int> node_count_basedon_page_access_last; // 基于page_access_last的计数, for SYSTEM_MODE 7
-    std::unordered_map<uint64_t, node_id_t> page_ownership_to_node_map; // 找到ownership对应的节点的映射关系, for SYSTEM_MODE 8
+    // std::unordered_map<uint64_t, node_id_t> page_ownership_to_node_map; // 找到ownership对应的节点的映射关系, for SYSTEM_MODE 8
     std::string debug_info;
     page_to_node_map.reserve(keys.size());
     for (size_t i = 0; i < keys.size(); ++i) {
@@ -55,12 +103,19 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                                     ", key=" + std::to_string(keys[i]) + ")";
                 assert(false); // 这里不应该失败
             }
-            auto last_node = ownership_table_->get_owner(table_ids[i], entry.page);
-            if (last_node != -1) {
-                node_count_basedon_page_access_last[last_node]++;
+            bool rw_flag = rw[i];
+            auto owner_stats = ownership_table_->get_owner(table_ids[i], entry.page);
+            for(auto node: owner_stats.first) {
+                node_count_basedon_page_access_last[node]++;
             }
+            #if LOG_METIS_OWNERSHIP_DECISION
             debug_info += "(table_id=" + std::to_string(table_ids[i]) + ", key=" + std::to_string(keys[i]) + 
-                            ", page=" + std::to_string(entry.page) + ", last_node=" + std::to_string(last_node) + "); ";
+                            ", page=" + std::to_string(entry.page) + ", owners=[";
+            for(auto node: owner_stats.first) {
+                debug_info += std::to_string(node) + ",";
+            }
+            debug_info += "], mode=" + (owner_stats.second ? "shared" : "exclusive") + "); ";
+            #endif
         }
         else if(SYSTEM_MODE == 8 || SYSTEM_MODE == 13) {
             // 计算page id
@@ -72,14 +127,18 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
             }
             uint64_t table_page_id_val = (static_cast<uint64_t>(table_ids[i]) << 32) | entry.page;
             page_to_node_map[table_page_id_val] = -1; // 初始化
-            auto last_node = ownership_table_->get_owner(table_ids[i], entry.page);
-            if (last_node != -1) {
-                page_ownership_to_node_map[table_page_id_val] = last_node;
-                node_count_basedon_page_access_last[last_node]++;
+            bool rw_flag = rw[i];
+            auto owner_stats = ownership_table_->get_owner(table_ids[i], entry.page);
+            for(auto node: owner_stats.first) {
+                node_count_basedon_page_access_last[node]++;
             }
             #if LOG_METIS_OWNERSHIP_DECISION
             debug_info += "(table_id=" + std::to_string(table_ids[i]) + ", key=" + std::to_string(keys[i]) + 
-                            ", page=" + std::to_string(entry.page) + ", last_node=" + std::to_string(last_node) + "); ";
+                            ", page=" + std::to_string(entry.page) + ", owners=[";
+            for(auto node: owner_stats.first) {
+                debug_info += std::to_string(node) + ",";
+            }
+            debug_info += "], mode=" + (owner_stats.second ? "shared" : "exclusive") + "); ";
             #endif
         }
         else { 
@@ -178,7 +237,18 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
             result.keys_processed = page_to_node_map.size();
             node_id_t metis_decision_node;
             int ret_code = metis_->build_internal_graph(page_to_node_map, &metis_decision_node);
-            // page_ownership_to_node_map 是ownership_table_中记录的page到node的映射
+            // 找出满足所有权的节点候选集
+            int max_owner_count = 0;
+            std::vector<node_id_t> owner_candidates;
+            for (const auto& [node, count] : node_count_basedon_page_access_last) {
+                if (count > max_owner_count) {
+                    max_owner_count = count;
+                    owner_candidates.clear();
+                    owner_candidates.push_back(node);
+                } else if (count == max_owner_count) {
+                    owner_candidates.push_back(node);
+                }
+            }
             // page_to_node_map 是metis分区后得到的page到node的映射
             // 这里进行对比, 看看两者是否一致, 综合考虑page_to_node_map和ownership_table_的信息, 进行调整
             if  (ret_code == 0){ 
@@ -196,33 +266,22 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                     result.smart_router_id = rand() % cfg_.partition_nums; // 随机选择一个节点
                     log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisMissingAndOwnershipMissing);
                 }
-                else if(node_count_basedon_page_access_last.size() == 1) {
+                else if(max_owner_count == page_to_node_map.size()) {
                     // ownership_table_中只有一个page的映射信息
-                    result.smart_router_id = page_ownership_to_node_map.begin()->second;
+                    // 随机一个ownership_node从owner_candidates中
+                    assert(!owner_candidates.empty());
+                    result.smart_router_id = owner_candidates[rand() % owner_candidates.size()];
                     log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisMissingAndOwnershipEntirely);
                 }
-                else if(node_count_basedon_page_access_last.size() > 1) {
+                else if(max_owner_count < page_to_node_map.size()) {
                     // ownership_table_中有多个page的映射信息
-                    // 基于page_ownership_to_node_map进行计数, 选择出现次数最多的节点
-                    int max_count = 0;
-                    node_id_t candidate_node = -1;
-                    std::vector<node_id_t> candidates;
-                    for (const auto& [node, count] : node_count_basedon_page_access_last) {
-                        if (count > max_count) {
-                            max_count = count;
-                            candidates.clear();
-                            candidates.push_back(node);
-                        } else if (count == max_count) {
-                            candidates.push_back(node);
-                        }
-                    }
-                    assert(!candidates.empty());
+                    assert(!owner_candidates.empty());
                     // 随机选择出现次数最多的节点
                     node_id_t min_txn_node = -1;
                     // 选择负载最低的节点进行路由, 找到workload_balance_penalty_weights_ 中最大的那个
                     size_t max_txn_workload_penalty_weight = 0;
-                    for (int i=0; i<candidates.size(); i++) {
-                        auto node = candidates[i];
+                    for (int i=0; i<owner_candidates.size(); i++) {
+                        auto node = owner_candidates[i];
                         if (workload_balance_penalty_weights_[node] > max_txn_workload_penalty_weight) {
                             max_txn_workload_penalty_weight = workload_balance_penalty_weights_[node];
                             min_txn_node = node;
@@ -234,7 +293,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                 }
                 else assert(false); // 不可能出现的情况
             }
-            else if (ret_code == 1) {
+            else if (ret_code == 1 || ret_code == 2) {
                 // entire affinity, 所有page都映射到同一个节点
                 assert(!page_to_node_map.empty());
                 assert(metis_decision_node != -1);
@@ -243,119 +302,72 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                     result.smart_router_id = metis_decision_node;
                     log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipMissing);
                 }
-                else if(node_count_basedon_page_access_last.size() == 1) {
-                    // ownership_table_中只有一个page的映射信息
-                    auto ownership_node = page_ownership_to_node_map.begin()->second;
-                    if(ownership_node == metis_decision_node) {
-                        result.smart_router_id = metis_decision_node;
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyEqual);
-                    }
-                    else {
-                        // !两者不一致, 优先选择ownership_node
-                        result.smart_router_id = ownership_node;
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyUnequal);
-                    }
-                }
-                else if(node_count_basedon_page_access_last.size() > 1) {
-                    // ownership_table_中有多个page的映射信息
-                    int max_count = 0;
+                else {
+                    assert(!owner_candidates.empty());
                     node_id_t candidate_node = -1;
-                    std::vector<node_id_t> candidates;
-                    for (const auto& [node, count] : node_count_basedon_page_access_last) {
-                        if (count > max_count) {
-                            max_count = count;
-                            candidates.clear();
-                            candidates.push_back(node);
-                        } else if (count == max_count) {
-                            candidates.push_back(node);
-                        }
-                    }
-                    assert(!candidates.empty());
                     int i;
-                    for(i=0; i<candidates.size(); i++) {
-                        if (candidates[i] == metis_decision_node) {
-                            candidate_node = candidates[i];
+                    for(i=0; i<owner_candidates.size(); i++) {
+                        if (owner_candidates[i] == metis_decision_node) {
+                            candidate_node = owner_candidates[i];
                             break;
                         }
                     }
-                    if(i >= candidates.size()) {
-                        // candidates中没有metis_decision_node, 那就随机选择一个
-                        candidate_node = candidates[rand() % candidates.size()];
+                    if(i >= owner_candidates.size()) {
+                        // candidates中没有metis_decision_node, 那就根据负载选择一个节点
+                        node_id_t min_txn_node = -1;
+                        // 选择负载最低的节点进行路由, 找到workload_balance_penalty_weights_ 中最大的那个
+                        size_t max_txn_workload_penalty_weight = 0;
+                        for (int i=0; i<owner_candidates.size(); i++) {
+                            auto node = owner_candidates[i];
+                            if (workload_balance_penalty_weights_[node] > max_txn_workload_penalty_weight) {
+                                max_txn_workload_penalty_weight = workload_balance_penalty_weights_[node];
+                                min_txn_node = node;
+                            }
+                        }
+                        assert(min_txn_node != -1);
+                        candidate_node = min_txn_node;
                     }
                     if(candidate_node == metis_decision_node) {
+                        // !两者一致
                         result.smart_router_id = metis_decision_node;
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipCrossEqual);
+                        if(ret_code == 1){
+                            if(max_owner_count == page_to_node_map.size()) {
+                                log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyEqual);
+                            }
+                            else {
+                                log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipCrossEqual);
+                            }
+                        }
+                        else if(ret_code == 2) {
+                            if(max_owner_count == page_to_node_map.size()) {
+                                log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyEqual);
+                            }
+                            else {
+                                log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossEqual);
+                            }
+                        }
                     }
                     else {
-                        // !pay attention: 这里对于candidates 中有可能包含metis_decision_node的情况, 这种情况需要选择metis_decision_node
+                        // !两者不一致, 优先选择ownership_node
                         result.smart_router_id = candidate_node;
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipCrossUnequal);
-                    }
-                }
-                else assert(false); // 不可能出现的情况
-            }
-            else if (ret_code == 2) {
-                // partial affinity, 多个page映射到多个节点
-                assert(!page_to_node_map.empty());
-                // 这个时候再检查一下ownership_table_的信息
-                if(node_count_basedon_page_access_last.empty()) {
-                    // ownership_table_中也没有任何page的映射信息, 即涉及到的页面第一次被访问
-                    result.smart_router_id = metis_decision_node;
-                    log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipMissing);
-                }
-                else if(node_count_basedon_page_access_last.size() == 1) {
-                    // ownership_table_中只有一个page的映射信息
-                    auto ownership_node = page_ownership_to_node_map.begin()->second;
-                    if(ownership_node == metis_decision_node) {
-                        // 两者一致
-                        result.smart_router_id = metis_decision_node;
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyEqual);
-                    }
-                    else {
-                        // !两者不一致, 优先选择ownership_node
-                        result.smart_router_id = ownership_node;
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyUnequal);
-                    }
-                }
-                else if(node_count_basedon_page_access_last.size() > 1) {
-                    // ownership_table_中有多个page的映射信息
-                    int max_count = 0;
-                    node_id_t candidate_node = -1;
-                    std::vector<node_id_t> candidates;
-                    for (const auto& [node, count] : node_count_basedon_page_access_last) {
-                        if (count > max_count) {
-                            max_count = count;
-                            candidates.clear();
-                            candidates.push_back(node);
-                        } else if (count == max_count) {
-                            candidates.push_back(node);
+                        if(ret_code == 1){
+                            if(max_owner_count == page_to_node_map.size()) {
+                                log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipEntirelyUnequal);
+                            }
+                            else {
+                                log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisEntirelyAndOwnershipCrossUnequal);
+                            }
+                        }
+                        else if(ret_code == 2) {
+                            if(max_owner_count == page_to_node_map.size()) {
+                                log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipEntirelyUnequal);
+                            }
+                            else {
+                                log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossUnequal);
+                            }
                         }
                     }
-                    assert(!candidates.empty());
-                    // 找到routed_txn_cnt_per_node中最小的节点
-                    node_id_t min_txn_node = -1;
-                    // 选择负载最低的节点进行路由, 找到workload_balance_penalty_weights_ 中最大的那个
-                    size_t max_txn_workload_penalty_weight = 0;
-                    for (int i=0; i<candidates.size(); i++) {
-                        auto node = candidates[i];
-                        if (workload_balance_penalty_weights_[node] > max_txn_workload_penalty_weight) {
-                            max_txn_workload_penalty_weight = workload_balance_penalty_weights_[node];
-                            min_txn_node = node;
-                        }
-                    }
-                    assert(min_txn_node != -1);
-                    node_id_t ownership_node = min_txn_node;
-                    if(ownership_node == metis_decision_node) {
-                        result.smart_router_id = metis_decision_node;
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossEqual);
-                    }
-                    else {
-                        // !两者不一致, 优先选择ownership_node
-                        result.smart_router_id = ownership_node;
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisPartialAndOwnershipCrossUnequal);
-                    }
                 }
-                else assert(false); // 不可能出现的情况
             }
             else if (ret_code == 3) {
                 // cross affinity, 多个page映射到多个节点, 并且有些page没有映射到节点
@@ -366,41 +378,14 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                     result.smart_router_id = metis_decision_node;
                     log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipMissing);
                 }
-                else if(node_count_basedon_page_access_last.size() == 1) {
-                    // ownership_table_中只有一个page的映射信息
-                    auto ownership_node = page_ownership_to_node_map.begin()->second;
-                    if(ownership_node == metis_decision_node) {
-                        // 两者一致
-                        result.smart_router_id = metis_decision_node;
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyEqual);
-                    }
-                    else {
-                        // !两者不一致, 优先选择ownership_node
-                        result.smart_router_id = ownership_node; 
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyUnequal);
-                    }
-                }
-                else if(node_count_basedon_page_access_last.size() > 1) {
-                    // ownership_table_中有多个page的映射信息
-                    int max_count = 0;
-                    node_id_t candidate_node = -1;
-                    std::vector<node_id_t> candidates;
-                    for (const auto& [node, count] : node_count_basedon_page_access_last) {
-                        if (count > max_count) {
-                            max_count = count;
-                            candidates.clear();
-                            candidates.push_back(node);
-                        } else if (count == max_count) {
-                            candidates.push_back(node);
-                        }
-                    }
-                    assert(!candidates.empty());
+                else{
+                    assert(!owner_candidates.empty());
                     // 找到routed_txn_cnt_per_node中最小的节点
                     node_id_t min_txn_node = -1;
                     // 选择负载最低的节点进行路由, 找到workload_balance_penalty_weights_ 中最大的那个
                     size_t max_txn_workload_penalty_weight = 0;
-                    for (int i=0; i<candidates.size(); i++) {
-                        auto node = candidates[i];
+                    for (int i=0; i<owner_candidates.size(); i++) {
+                        auto node = owner_candidates[i];
                         if (workload_balance_penalty_weights_[node] > max_txn_workload_penalty_weight) {
                             max_txn_workload_penalty_weight = workload_balance_penalty_weights_[node];
                             min_txn_node = node;
@@ -409,22 +394,31 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                     assert(min_txn_node != -1);
                     node_id_t ownership_node = min_txn_node;
                     if(ownership_node == metis_decision_node) {
+                        // !两者一致
                         result.smart_router_id = metis_decision_node;
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossEqual);
-                    }
-                    else {
+                        if(max_owner_count == page_to_node_map.size()) {
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyEqual);
+                        }
+                        else {
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossEqual);
+                        }
+                    } else {
                         // !两者不一致, 优先选择ownership_node
                         result.smart_router_id = ownership_node;
-                        log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossUnequal);
+                        if(max_owner_count == page_to_node_map.size()) {
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipEntirelyUnequal);
+                        }
+                        else {
+                            log_metis_ownership_based_router_result(result, debug_info, MetisOwnershipDecisionType::MetisCrossAndOwnershipCrossUnequal);
+                        }
                     }
                 }
-                else assert(false); // 不可能出现的情况
             }
             else assert(false);
             // update now the ownership table
             if(table_ids.size() != txn->accessed_page_ids.size()) assert(false);
             for (int i=0; i<keys.size(); i++) {
-                ownership_table_->set_owner(txn, table_ids[i], keys[i], txn->accessed_page_ids[i], result.smart_router_id);
+                ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], txn->accessed_page_ids[i], result.smart_router_id);
             }
         }
         else if(SYSTEM_MODE == 13) {
@@ -480,9 +474,9 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
             if (best_node != -1) {
                 result.smart_router_id = best_node;
             }
-            if (WarmupEnd) {
-                logger->info("[SmartRouter Mode 13] " + debug_info + " selected node " + std::to_string(result.smart_router_id));
-            }
+            // if (WarmupEnd) {
+            //     logger->info("[SmartRouter Mode 13] " + debug_info + " selected node " + std::to_string(result.smart_router_id));
+            // }
         }
         else {
             assert(false);
@@ -546,7 +540,7 @@ std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_
         else assert(false); // 不可能出现的情况
         assert(table_ids.size() == accounts_keys.size());
 
-        SchedulingCandidateTxn* scheduling_candidate_txn = new SchedulingCandidateTxn{txn, {}, {}, {}, {}, -1};
+        SchedulingCandidateTxn* scheduling_candidate_txn = new SchedulingCandidateTxn{txn, {}, {}, {}, {}, {}, -1};
         txid_to_txn_map[tx_id] = scheduling_candidate_txn;
 
         // 获取涉及的页面列表
@@ -579,9 +573,13 @@ std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_
                 page_metis_to_node_map[table_page_id] = metis_node;
             }
             if(page_ownership_to_node_map.find(table_page_id) == page_ownership_to_node_map.end()) {
-                node_id_t ownership_node = ownership_table_->get_owner(table_page_id);
-                if(ownership_node == -1) {
-                    ownership_node = rand() % ComputeNodeCount; // 如果没有owner，则随机分配一个节点
+                auto owner_stats = ownership_table_->get_owner(table_page_id);
+                node_id_t ownership_node = -1;
+                if(owner_stats.first.empty()) {
+                    // 如果没有owner，则随机分配一个节点
+                    ownership_node = rand() % ComputeNodeCount;
+                } else {
+                    ownership_node = owner_stats.first[0]; // 选择第一个owner作为ownership_node
                 }
                 page_ownership_to_node_map[table_page_id] = ownership_node;
             }
@@ -839,15 +837,17 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                 // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
                 std::vector<itemkey_t> accounts_keys;
                 std::vector<table_id_t> table_ids; 
-                
+                std::vector<bool> rw;
                 if(Workload_Type == 0) {
                     itemkey_t account1 = txn->accounts[0];
                     itemkey_t account2 = txn->accounts[1];
                     table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
                     smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
+                    rw = smallbank_->get_rw_by_txn_type(txn_type);
                 } else if (Workload_Type == 1) { 
                     table_ids = ycsb_->get_table_ids_by_txn_type();
                     accounts_keys = txn->keys;
+                    rw = ycsb_->get_rw_flags();
                 } 
                 else assert(false); // 不可能出现的情况
                 assert(table_ids.size() == accounts_keys.size());
@@ -856,6 +856,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                 sc->txn = txn;
                 sc->will_route_node = -1;
                 sc->is_scheduled = false; // !这里做出逻辑的更改，当一个事务调度完成之后，不再从 txid_to_txn_map 中删除，而是设置 is_scheduled 标志
+                sc->rw_flags = std::move(rw);
 
                 // 获取涉及的页面列表
                 std::unordered_map<uint64_t, node_id_t> table_page_ids; // 高32位存table_id，低32位存page_id
@@ -1048,23 +1049,39 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                 tx_id_t tx_id = txn_batch->at(idx)->tx_id;
                 SchedulingCandidateTxn* sc = txid_to_txn_map[tx_id].get();
                 if(sc == nullptr) assert(false); // 不可能出现的情况
-                std::unordered_map<node_id_t, int> ownership_node_count;
+                // 填充 page_to_ownership_node_vec
                 for (int i = 0; i < sc->involved_pages.size(); ++i) {
                     auto page = sc->involved_pages[i];
-                    node_id_t ownership_node = ownership_table_->get_owner(page); 
-                    if(ownership_node == -1) {
-                        ownership_node = sc->page_to_metis_node_vec[i];
+                    auto owner_stats = ownership_table_->get_owner(page);
+                    if(owner_stats.first.empty()){
+                        node_id_t ownership_node = sc->page_to_metis_node_vec[i];
                         if(ownership_node == -1) {
                             ownership_node = page % ComputeNodeCount; // 如果没有owner，则随机分配一个节点
                         }
+                        owner_stats = std::make_pair(std::vector<node_id_t>{ownership_node}, 1); // exclusive ownership
                     }
-                    sc->page_to_ownership_node_vec.push_back(ownership_node);
-                    ownership_node_count[ownership_node]++;
+                    sc->page_to_ownership_node_vec.push_back(owner_stats);
                 }
-                if(ownership_node_count.size() == 1) {
+                // 计算是否有计算节点满足页面所有权
+                std::unordered_map<node_id_t, int> ownership_node_count;
+                std::vector<node_id_t> candidate_ownership_nodes = checkif_txn_ownership_ok(sc, ownership_node_count);
+                if(!candidate_ownership_nodes.empty()) {
                     // 满足ownership entirely
-                    node_id_t ownership_node = ownership_node_count.begin()->first;
-                    sc->will_route_node = ownership_node;
+                    if(candidate_ownership_nodes.size() > 1) {
+                        // 多个节点满足ownership entirely，选择负载最轻的节点
+                        node_id_t best_node = -1;
+                        int max_compute_node_workload_benefit = -1;
+                        for(const auto& node_id : candidate_ownership_nodes) {
+                            if(compute_node_workload_benefit[node_id] > max_compute_node_workload_benefit) {
+                                max_compute_node_workload_benefit = compute_node_workload_benefit[node_id];
+                                best_node = node_id;
+                            }
+                        }
+                        sc->will_route_node = best_node;
+                    }
+                    else 
+                        sc->will_route_node = candidate_ownership_nodes.front();
+                    node_id_t ownership_node = sc->will_route_node;
                     if(unconflicted_txns.count(tx_id) > 0) {
                         // ! 如果该事务没有冲突，直接加入txn_queues, 工作线程可以直接处理
                         txn_queues_[ownership_node]->push_txn(sc->txn); // txn_queues_ 是 SmartRouter 的成员变量, TxnQueue中的push_txn函数是线程安全的
@@ -1294,14 +1311,56 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
     #endif
         
         // 1.2 找到合适的不满足ownership entirely的事务，进行页面转移计划的制订
-        std::vector<uint64_t> transfer_pages;
+        std::vector<std::pair<uint64_t, std::pair<std::vector<node_id_t>, bool>>> transfer_pages;
         if(selected_candidate_txn != nullptr){
             assert(selected_candidate_txn->page_to_ownership_node_vec.size() == selected_candidate_txn->involved_pages.size());
             for(int i=0; i<selected_candidate_txn->involved_pages.size(); i++){
                 auto page = selected_candidate_txn->involved_pages[i];
-                node_id_t owner_node = selected_candidate_txn->page_to_ownership_node_vec[i];
-                if(owner_node != min_txn_node){
-                    transfer_pages.push_back(page);
+                auto owner_stats = selected_candidate_txn->page_to_ownership_node_vec[i];
+                bool rw = selected_candidate_txn->rw_flags[i];
+                std::pair<std::vector<node_id_t>, bool> new_ownership_stats;
+                if(rw){
+                    // write operation, need exclusive ownership
+                    if(!(owner_stats.second == 1 && owner_stats.first.size() == 1 && owner_stats.first[0] == min_txn_node)){
+                        new_ownership_stats = {{min_txn_node}, 1}; // exclusive ownership
+                        // check if already in transfer_pages
+                        bool already_in_transfer_pages = false;
+                        for(auto& [transfer_page, stats] : transfer_pages){
+                            if(transfer_page == page){
+                                if(stats.second == 0) {
+                                    // already in transfer_pages with shared ownership, need to update to exclusive ownership
+                                    stats = new_ownership_stats; // 由于是引用类型，直接修改即可
+                                }
+                                else assert(stats.first[0] == min_txn_node); // already exclusive ownership to the same node
+                                already_in_transfer_pages = true;
+                                break;
+                            }
+                        }
+                        if(!already_in_transfer_pages)
+                            transfer_pages.push_back({page, new_ownership_stats}); // true表示需要exclusive ownership
+                    }
+                } else {
+                    // check if already in transfer_pages
+                    bool already_in_transfer_pages = false;
+                    for(auto& [transfer_page, stats] : transfer_pages){
+                        if(transfer_page == page){
+                            already_in_transfer_pages = true;
+                        }
+                    }
+                    if(already_in_transfer_pages) continue;
+                    // read operation, shared ownership is ok
+                    bool has_shared_ownership = false;
+                    for(const auto& ownership_node : owner_stats.first){
+                        if(ownership_node == min_txn_node){
+                            has_shared_ownership = true;
+                            break;
+                        }
+                    }
+                    if(!has_shared_ownership){
+                        owner_stats.first.push_back(min_txn_node);
+                        owner_stats.second = false; // shared ownership
+                        transfer_pages.push_back({page, owner_stats});
+                    }
                 }
             }
         }
@@ -1309,10 +1368,10 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
         expected_page_transfer_count_per_node[min_txn_node] += transfer_pages.size();
 
         // 1.3 进行事务的编排，找到转移页面后，原来可以满足ownership entirely的事务可能不满足的，将这些事务先执行
-        std::vector<TxnQueueEntry*> schedule_txn;
+        std::vector<TxnQueueEntry*> schedule_txn; // 记录本次调度的事务
         node_id_t schedule_node = -1;
         std::vector<TxnQueueEntry*> next_time_schedule_txn; // 记录下次调度的事务
-        for(auto transfer_page : transfer_pages){
+        for(auto [transfer_page, new_ownership_stats] : transfer_pages){
             #if LOG_KROUTER_SCHEDULING_DEBUG
                 if(WarmupEnd)
                 logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
@@ -1323,90 +1382,96 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                 // 检查affected_txn_id是否在ownership_ok_txn_queues中
                 auto it = txid_to_txn_map.find(affected_txn_id);
                 if (it->second->is_scheduled) continue; // 说明这个事务已经被调度过了
-                node_id_t will_route_node = it->second->will_route_node;
-                if(will_route_node != -1) {
-                    // 说明这个事务之前可以在will_route_node上执行， 但是这个transfer page转移到新的节点之后，他就不可以继续执行了
-                    assert(ownership_ok_txn_queues[will_route_node].count(affected_txn_id) == 1);
-                    // 将该事务从ownership_ok_txn_queues中删除，表示已不能执行
-                    ownership_ok_txn_queues[will_route_node].erase(affected_txn_id);
-                    // !将该事务加入到txn_queues中, 可以执行
-                    schedule_txn.push_back(it->second->txn);
-                    if(schedule_node == -1) schedule_node = will_route_node; 
-                    else if(schedule_node != will_route_node) 
-                        logger->warning("[SmartRouter Scheduling] Warning: schedule_node " + std::to_string(schedule_node) + 
-                                        " different from will_route_node " + std::to_string(will_route_node) + 
-                                        " for affected txn " + std::to_string(affected_txn_id));
-                    // else assert(schedule_node == will_route_node); // 说明这些事务之前都是在同一个节点上执行的
-                    this->routed_txn_cnt_per_node[will_route_node]++;
-                    load_tracker_.record(will_route_node);
-                    schedule_txn_cnt_per_node_this_batch[will_route_node]++;
-                    // !标记该事务已经被调度
-                    it->second->is_scheduled = true;
-                #if LOG_KROUTER_SCHEDULING_DEBUG
-                    if(WarmupEnd)
-                    logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
+                // 更新页面的所有权
+                for(int i=0; i<it->second->involved_pages.size(); i++){
+                    auto page = it->second->involved_pages[i];
+                    // 更新所有的页面所有权
+                    if(page == transfer_page){
+                        it->second->page_to_ownership_node_vec[i] = new_ownership_stats; 
+                    }
+                }
+                // check if the affected_txn_id can still execute
+                std::unordered_map<node_id_t, int> ownership_node_count;
+                std::vector<node_id_t> candidate_ownership_nodes = checkif_txn_ownership_ok(it->second.get(), ownership_node_count);
+                if(!candidate_ownership_nodes.empty()) {
+                    // 加入next_time_schedule_txn
+                    next_time_schedule_txn.push_back(it->second->txn);
+                    // 如果能够执行
+                    node_id_t will_route_node = it->second->will_route_node;
+                    if(will_route_node == min_txn_count) continue; // 说明之前就已经在该节点上执行，不需要变动
+                    if(will_route_node != -1) {
+                        // 之前可以执行
+                        assert(ownership_ok_txn_queues[will_route_node].count(affected_txn_id) == 1);
+                        // 需要变动到新的节点上执行, 将该事务从ownership_ok_txn_queues中删除，表示已不能执行
+                        ownership_ok_txn_queues[will_route_node].erase(affected_txn_id);  
+                        #if LOG_KROUTER_SCHEDULING_DEBUG
+                        if(WarmupEnd)
+                        logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
+                                        " transferred to node " + std::to_string(min_txn_node) + 
+                                        ", affected txn " + std::to_string(affected_txn_id) + 
+                                        " will change execution node from " + std::to_string(will_route_node) + 
+                                        " to " + std::to_string(min_txn_node) + " at this time txn queue size: " +
+                                        this->get_txn_queue_now_status());
+                        #endif
+                    } else{
+                        // 之前不可以执行, 将该事务从candidate_txn_ids中删除，表示现在可以执行
+                        assert(candidate_txn_ids.count(affected_txn_id) == 1);
+                        candidate_txn_ids.erase(affected_txn_id);
+                        #if LOG_KROUTER_SCHEDULING_DEBUG
+                        if(WarmupEnd)
+                        logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
+                                        " transferred to node " + std::to_string(min_txn_node) + 
+                                        ", affected txn " + std::to_string(affected_txn_id) + 
+                                        " can now execute on node " + std::to_string(min_txn_node) + " at this time txn queue size: " +
+                                        this->get_txn_queue_now_status());
+                        #endif
+                    }
+                    it->second->will_route_node = min_txn_node;
+                    ownership_ok_txn_queues[min_txn_node].insert(affected_txn_id);
+                }
+                else{
+                    // 页面所有权转移之后不能执行
+                    node_id_t will_route_node = it->second->will_route_node;
+                    if(will_route_node != -1) {
+                        // 之前可以执行
+                        assert(ownership_ok_txn_queues[will_route_node].count(affected_txn_id) == 1);
+                        // 将该事务从ownership_ok_txn_queues中删除，表示已不能执行
+                        ownership_ok_txn_queues[will_route_node].erase(affected_txn_id);
+                        // !将该事务加入到txn_queues中, 现在需要执行
+                        schedule_txn.push_back(it->second->txn);
+                        if(schedule_node == -1) schedule_node = will_route_node; 
+                        else if(schedule_node != will_route_node) 
+                            logger->warning("[SmartRouter Scheduling] Warning: schedule_node " + std::to_string(schedule_node) + 
+                                            " different from will_route_node " + std::to_string(will_route_node) + 
+                                            " for affected txn " + std::to_string(affected_txn_id));
+                        this->routed_txn_cnt_per_node[will_route_node]++;
+                        load_tracker_.record(will_route_node);
+                        schedule_txn_cnt_per_node_this_batch[will_route_node]++;
+                        // !标记该事务已经被调度
+                        it->second->is_scheduled = true;
+                    #if LOG_KROUTER_SCHEDULING_DEBUG
+                        if(WarmupEnd)
+                        logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
                                     " transferred to node " + std::to_string(min_txn_node) + 
                                     ", scheduling previously ownership_ok txn " + std::to_string(affected_txn_id) + 
                                     " to execute on node " + std::to_string(will_route_node) + "at this time txn queue size: " +
                                     this->get_txn_queue_now_status());
-                #endif
-                }
-                else {
-                    // 加入next_time_schedule_txn
-                    next_time_schedule_txn.push_back(it->second->txn);
-                    // 如果不能执行，首先更新迁移页面的owner信息
-                    for(int i=0; i<it->second->involved_pages.size(); i++){
-                        auto page = it->second->involved_pages[i];
-                        node_id_t owner_node = it->second->page_to_ownership_node_vec[i];
-                        if(page == transfer_page){
-                            it->second->page_to_ownership_node_vec[i] = min_txn_node;
-                        }
-                    }
-                    // 确定当前事务在迁移页面后，能否执行
-                    bool can_execute = true;
-                    for(int i=0; i<it->second->involved_pages.size(); i++){ 
-                        auto page = it->second->involved_pages[i];
-                        node_id_t owner_node = it->second->page_to_ownership_node_vec[i];
-                        if(owner_node != min_txn_node){
-                            // 说明当前事务仍然不能在min_txn_node上执行
-                            can_execute = false;
-                            break;
-                        }
-                    }
-                    if(can_execute) {
-                        // 说明当前事务现在可以在min_txn_node上执行
-                        it->second->will_route_node = min_txn_node;
-                        ownership_ok_txn_queues[min_txn_node].insert(affected_txn_id);
-                        // 从candidate_txn_queues中删除该事务
-                        candidate_txn_ids.erase(affected_txn_id);
-                #if LOG_KROUTER_SCHEDULING_DEBUG
-                    if(WarmupEnd)
-                        logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
-                                        ", txn " + std::to_string(affected_txn_id) + 
-                                        " MOVE to ownership_ok on node " + std::to_string(min_txn_node));
-                #endif
-                    }
-                    else {
+                    #endif
+                    } else{
+                        // 加入next_time_schedule_txn
+                        next_time_schedule_txn.push_back(it->second->txn);
                         // 说明当前事务仍然不能在min_txn_node上执行，保持不变
                         // 更新candidate_txn_benefit_ipq中的benefit值
                         int sum_pages = it->second->involved_pages.size();
                         std::vector<double> metis_benefit(ComputeNodeCount, 0.0);
-                        
                         for(int i=0; i<sum_pages; i++) {
-                            auto page = it->second->involved_pages[i];
                             node_id_t metis_node = it->second->page_to_metis_node_vec[i];
                             if(metis_node == -1) continue;
                             metis_benefit[metis_node] += 1.0 / sum_pages;
                         }
-                        std::vector<double> ownership_benefit(ComputeNodeCount, 0.0);
-                        for(int i=0; i<sum_pages; i++) {
-                            auto page = it->second->involved_pages[i];
-                            node_id_t ownership_node = it->second->page_to_ownership_node_vec[i];
-                            ownership_benefit[ownership_node] += 1.0 / sum_pages;
-                        }
                         for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
                             // benefit 计算：已经有ownership的页面比例
-                            double benefit1 = ownership_benefit[node_id];
+                            double benefit1 = 1.0 * ownership_node_count[node_id] / sum_pages;
                             // benefit 计算: 满足metis分区结果的页面比例
                             double benefit2 = metis_benefit[node_id];
                             // benefit 计算: 负载均衡，当前节点路由的事务越少，benefit越高
@@ -1415,13 +1480,14 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                             double total_benefit = benefit1 + benefit2 + benefit3;
                             // 更新ipq中的benefit值
                             candidate_txn_benefit_ipq[node_id].update(affected_txn_id, total_benefit);
+                            it->second->node_benefit_map[node_id] = total_benefit;
                         }
-                #if LOG_KROUTER_SCHEDULING_DEBUG
-                    if(WarmupEnd)
-                        logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
-                                        ", txn " + std::to_string(affected_txn_id) + 
-                                        " still cannot execute on node " + std::to_string(min_txn_node));
-                #endif
+                        #if LOG_KROUTER_SCHEDULING_DEBUG
+                            if(WarmupEnd)
+                                logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
+                                                ", txn " + std::to_string(affected_txn_id) + 
+                                                " still cannot execute on node " + std::to_string(min_txn_node));
+                        #endif
                     }
                 }
             }
@@ -1439,6 +1505,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                 #endif
             }
         }
+        assert(candidate_txn_ids.count(selected_candidate_txn->txn->tx_id) == 0); // 由于选择了该事务，一定不在candidate_txn_ids中了
     }
 
     // 计时结束

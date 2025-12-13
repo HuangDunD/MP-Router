@@ -9,6 +9,7 @@
 #include <vector>
 #include <thread>
 #include <random>
+#include <cmath>
 #include <pqxx/pqxx>
 
 #include "common.h"
@@ -27,12 +28,19 @@ class YCSB {
 public:
     // access_pattern: 0=uniform, 1=zipfian
     YCSB(int record_count, int access_pattern, int read_pct = 90, int update_pct = 10, int field_len = 100)
-        : record_count_(record_count), access_pattern_(access_pattern), read_pct_(read_pct), update_pct_(update_pct), field_len_(field_len) {}
+        : record_count_(record_count), access_pattern_(access_pattern), read_pct_(read_pct), update_pct_(update_pct), field_len_(field_len) {
+            int total_keys = 10; // 固定每次10个键
+            read_ops_per_txn_ = std::max(0, std::min(total_keys, (int)std::round(total_keys * (read_pct / 100.0))));
+            write_ops_per_txn_ = total_keys - read_ops_per_txn_; 
+            // 预构造静态 rw_flags_：0 表示读，1 表示写
+            rw_flags_.assign(total_keys, false);
+            for (int i = read_ops_per_txn_; i < total_keys; ++i) rw_flags_[i] = true;
+        }
 
     int get_record_count() const { return record_count_; }
     int get_access_pattern() const { return access_pattern_; }
-    int get_read_pct() const { return read_pct_; }
-    int get_update_pct() const { return update_pct_; }
+    int get_read_cnt() const { return read_ops_per_txn_; }
+    int get_write_cnt() const { return write_ops_per_txn_; }
 
     inline static const std::vector<table_id_t> TABLE_IDS_ARR[] = {
         // txn_type == 0 -> 10 zeros
@@ -126,6 +134,9 @@ public:
         return 0;
     }
     
+    // 获取读写标志（零拷贝），1表示写，0表示读
+    const std::vector<bool>& get_rw_flags() const { return rw_flags_; }
+
     void create_ycsb_stored_procedures(pqxx::connection* conn);
 
     void generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool);
@@ -186,6 +197,10 @@ private:
     double zipfian_theta_;
     double hotspot_fraction_;
     double hotspot_access_prob_;
+
+    int read_ops_per_txn_;
+    int write_ops_per_txn_;
+    std::vector<bool> rw_flags_; // 大小固定为10：前 read_ops_per_txn_ 为0(读)，其余为1(写)
 
     static std::string random_string(int len) {
         static thread_local std::mt19937 rng{std::random_device{}()};
