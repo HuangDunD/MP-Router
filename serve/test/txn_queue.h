@@ -267,12 +267,10 @@ private:
     Logger* logger_; 
 };
 
-
-// the txn pool, receive txns from clients and dispatch to txn queues of compute nodes
-class TxnPool {
+class MiniTxnPool{
 public:
-    TxnPool(int max_pool_size, SlidingTransactionInforTable* tit) : max_pool_size_(max_pool_size), tit(tit){}
-    ~TxnPool() = default;
+    MiniTxnPool(int max_pool_size, SlidingTransactionInforTable* tit) : max_pool_size_(max_pool_size), tit(tit){}
+    ~MiniTxnPool() = default;
 
     void receive_txn_from_client(TxnQueueEntry* entry) {
         std::unique_lock<std::mutex> lock(pool_mutex_);
@@ -291,48 +289,35 @@ public:
             return current_pool_size_ + size < max_pool_size_;
         });
         for(int i = 0; i < size; i++){
-            current_pool_size_++;
             txn_pool_.push_back(entry[i]);
         }
+        current_pool_size_ += size;
         pool_cv_.notify_one();
     }
 
-    // !not used, because we always fetch batch txns, fetch single txn may cause high mutex overhead
-    TxnQueueEntry* fetch_txn_from_poolfront() {
-        std::unique_lock<std::mutex> lock(pool_mutex_);
-        pool_cv_.wait(lock, [this]() {
-            return !txn_pool_.empty() || stop_; // 如果停止标志被设置，也要退出等待
-        });
-        if (stop_ && txn_pool_.empty()) {
-            return nullptr; // 如果停止且池为空，返回空指针
-        }
-        if(current_pool_size_-- >= max_pool_size_) {
-            pool_cv_.notify_one();
-        }
-        TxnQueueEntry* entry = txn_pool_.front();
-        txn_pool_.pop_front();
-        tit->push(entry); // 即将调度这个事务， 从池中取出，放入事务信息表
-        return entry;
-    }
-
     std::unique_ptr<std::vector<TxnQueueEntry*>> fetch_batch_txns_from_pool(int batch_size) {
-        std::unique_lock<std::mutex> lock(pool_mutex_);
-        pool_cv_.wait(lock, [this, batch_size]() {
-            return txn_pool_.size() >= batch_size || stop_; // 如果停止标志被设置，也要退出等待
-        }); 
-        if (stop_ && txn_pool_.size() < batch_size) {
-            return {}; // 如果停止且池中事务不足，返回空向量
-        }
         std::unique_ptr<std::vector<TxnQueueEntry*>> batch_txns = 
             std::make_unique<std::vector<TxnQueueEntry*>>();
-        for (int i = 0; i < batch_size; i++) {
-            current_pool_size_--;
-            TxnQueueEntry* entry = txn_pool_.front();
-            txn_pool_.pop_front();
-            batch_txns->push_back(entry);
+        {
+            std::unique_lock<std::mutex> lock(pool_mutex_);
+            pool_cv_.wait(lock, [this, batch_size]() {
+                return txn_pool_.size() >= batch_size || stop_; // 如果停止标志被设置，也要退出等待
+            }); 
+            if (stop_ && txn_pool_.size() < batch_size) {
+                return {}; // 如果停止且池中事务不足，返回空向量
+            }
+            for (int i = 0; i < batch_size; i++) {
+                TxnQueueEntry* entry = txn_pool_.front();
+                txn_pool_.pop_front();
+                batch_txns->push_back(entry);
+            }
+        }
+        current_pool_size_ -= batch_size;
+        // 在lock之外更新tit
+        for (auto& entry : *batch_txns) {
             tit->push(entry); // 即将调度这个事务， 从池中取出，放入事务信息表
         }
-        if(current_pool_size_ <= max_pool_size_ * 0.6) {
+        if(current_pool_size_ <= max_pool_size_ * 0.8) {
             pool_cv_.notify_all();
         }
         return batch_txns;
@@ -357,5 +342,48 @@ private:
     std::condition_variable pool_cv_;
 
     bool stop_ = false;
-    // SmartRouter* smart_router_; 
+};
+
+// the txn pool, receive txns from clients and dispatch to txn queues of compute nodes
+class TxnPool {
+public:
+    TxnPool(int num_sub_pool, int max_pool_size, SlidingTransactionInforTable* tit):num_sub_pool_(num_sub_pool) {
+        pools = new MiniTxnPool*[num_sub_pool];
+        for(int i = 0; i < num_sub_pool; i++){
+            pools[i] = new MiniTxnPool(max_pool_size, tit);
+        }
+    }
+    ~TxnPool() = default;
+
+    void receive_txn_from_client(TxnQueueEntry* entry, int gen_thread_id) {
+        pools[gen_thread_id % num_sub_pool_]->receive_txn_from_client(entry);
+    }
+
+    void receive_txn_from_client_batch(std::vector<TxnQueueEntry*> entry, int gen_thread_id) {
+        pools[gen_thread_id % num_sub_pool_]->receive_txn_from_client_batch(std::move(entry));
+    }
+
+    std::unique_ptr<std::vector<TxnQueueEntry*>> fetch_batch_txns_from_pool(int batch_size, int thread_id) {
+        return pools[thread_id % num_sub_pool_]->fetch_batch_txns_from_pool(batch_size);
+    }
+
+    void stop_pool() {
+        stop_ = true;
+        for(int i = 0; i < num_sub_pool_; i++){
+            pools[i]->stop_pool();
+        }
+    }
+
+    int size() {
+        int total_size = 0;
+        for(int i = 0; i < num_sub_pool_; i++){
+            total_size += pools[i]->size();
+        }
+        return total_size;
+    }
+    
+private:
+    int num_sub_pool_;
+    MiniTxnPool** pools; // 由于单个事务池的开销可能会很大, 这里做一个分区
+    bool stop_ = false;
 };
