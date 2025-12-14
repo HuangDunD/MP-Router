@@ -570,7 +570,7 @@ public:
             clock_gettime(CLOCK_MONOTONIC, &fetch_begin_time);
 
             // 从事务池中获取一批事务
-            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(100);
+            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, thread_id);
             if (txn_batch == nullptr || txn_batch->empty()) {
                 // 说明事务池已经运行完成
                 for(auto txn_queue : txn_queues_) {
@@ -728,7 +728,7 @@ public:
 
         while (true) {
             logger->info("Router Worker: Fetching batch " + std::to_string(batch_id) + " from txn pool.");
-            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize);
+            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, rand() % router_worker_threads_);
             if (txn_batch == nullptr || txn_batch->empty()) {
                 // 说明事务池已经运行完成
                 for(auto txn_queue : txn_queues_) {
@@ -815,7 +815,7 @@ public:
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             // pipeline 模式下，batch_id在get_route_primary_batch_schedule_v2中自增, 这里相当于是拿的下一个batch的事务
-            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize);
+            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, rand() % router_worker_threads_);
 
             // 计时
             clock_gettime(CLOCK_MONOTONIC, &end_time);

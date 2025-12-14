@@ -1341,8 +1341,8 @@ int main(int argc, char *argv[]) {
                                         : std::vector<std::string>{};
     BtreeIndexService *index_service = new BtreeIndexService(DBConnection, index_names, read_btree_mode, read_frequency);
     // initialize the transaction pool
-    SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, 10*BatchRouterProcessSize);
-    TxnPool* txn_pool = new TxnPool(TxnPoolMaxSize, tit);
+    SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, ComputeNodeCount*worker_threads*BatchRouterProcessSize);
+    TxnPool* txn_pool = new TxnPool(4, TxnPoolMaxSize, tit);
     auto shared_txn_queue = new SharedTxnQueue(tit, logger_, TxnQueueMaxSize);
     // initialize the transaction queues for each compute node connection
     for (int i = 0; i < ComputeNodeCount; i++) { 
@@ -1377,7 +1377,7 @@ int main(int argc, char *argv[]) {
     
     // !start the client transaction generation threads
     std::vector<std::thread> client_gen_txn_threads;
-    for(int i = 0; i < worker_threads; i++) {
+    for(int i = 0; i < worker_threads * 2; i++) {
         if(Workload_Type == 0) {
             client_gen_txn_threads.emplace_back([i, txn_pool, smallbank]() {
                 smallbank->generate_smallbank_txns_worker(i, txn_pool);
@@ -1404,7 +1404,7 @@ int main(int argc, char *argv[]) {
 
             if(Workload_Type == 0) {
                 if (use_sp)
-                    db_conn_threads.emplace_back(run_smallbank_txns_sp, params, logger_);
+                    db_conn_threads.emplace_back(run_smallbank_empty, params, logger_);
                 else
                     db_conn_threads.emplace_back(run_smallbank_txns, params, logger_);
             }

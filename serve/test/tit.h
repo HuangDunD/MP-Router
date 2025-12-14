@@ -17,7 +17,7 @@
 
 class SlidingTransactionInforTable {
 public:
-    SlidingTransactionInforTable(Logger* logger_ptr, size_t txnTableSize = 30000)
+    SlidingTransactionInforTable(Logger* logger_ptr, size_t txnTableSize = 1000000)
         : txnTableSize_(txnTableSize),
           slots_(txnTableSize),
           logger_(logger_ptr) {}

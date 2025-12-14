@@ -29,7 +29,7 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
         }
         // Enqueue the transaction into the global transaction pool
         // txn_pool->receive_txn_from_client(txn_entry);
-        txn_pool->receive_txn_from_client_batch(txn_batch);
+        txn_pool->receive_txn_from_client_batch(txn_batch, thread_id);
     }
     txn_pool->stop_pool();
 
