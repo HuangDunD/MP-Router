@@ -182,7 +182,7 @@ public:
 
 public:
     explicit SmartRouter(const Config &cfg, TxnPool* txn_pool, std::vector<TxnQueue*> txn_queue, int worker_threads,
-            BtreeIndexService *btree_service, NewMetis* metis = nullptr, Logger* logger_ptr = nullptr)
+            BtreeIndexService *btree_service, NewMetis* metis = nullptr, Logger* logger_ptr = nullptr, SmallBank* smallbank = nullptr, YCSB* ycsb = nullptr)
         : cfg_(cfg),
           txn_pool_(txn_pool),
           txn_queues_(txn_queue),
@@ -195,7 +195,9 @@ public:
           routed_txn_cnt_per_node(MaxComputeNodeCount), 
           batch_finished_flags(MaxComputeNodeCount, 0),
           workload_balance_penalty_weights_(MaxComputeNodeCount, 0),
-          load_tracker_(ComputeNodeCount)
+          load_tracker_(ComputeNodeCount),
+          smallbank_(smallbank),
+          ycsb_(ycsb)
     {
         metis_->set_thread_pool(&threadpool);
         metis_->init_node_nums(cfg.partition_nums);
@@ -728,7 +730,7 @@ public:
 
         while (true) {
             logger->info("Router Worker: Fetching batch " + std::to_string(batch_id) + " from txn pool.");
-            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, rand() % router_worker_threads_);
+            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, 0);
             if (txn_batch == nullptr || txn_batch->empty()) {
                 // 说明事务池已经运行完成
                 for(auto txn_queue : txn_queues_) {
@@ -815,7 +817,7 @@ public:
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             // pipeline 模式下，batch_id在get_route_primary_batch_schedule_v2中自增, 这里相当于是拿的下一个batch的事务
-            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, rand() % router_worker_threads_);
+            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, 0);
 
             // 计时
             clock_gettime(CLOCK_MONOTONIC, &end_time);

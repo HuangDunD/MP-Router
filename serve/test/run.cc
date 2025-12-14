@@ -1352,7 +1352,7 @@ int main(int argc, char *argv[]) {
     NewMetis* metis = new NewMetis(logger_);
 
     SmartRouter::Config cfg{};
-    SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, worker_threads, index_service, metis, logger_);
+    SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, worker_threads, index_service, metis, logger_, smallbank, ycsb);
     std::cout << "Smart Router initialized." << std::endl;
 
     // Initialize the key-page map

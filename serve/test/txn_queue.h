@@ -286,8 +286,9 @@ public:
         int size = entry.size();
         std::unique_lock<std::mutex> lock(pool_mutex_);
         pool_cv_.wait(lock, [this, size]() {
-            return current_pool_size_ + size < max_pool_size_;
+            return current_pool_size_ + size < max_pool_size_ || stop_;
         });
+        if(stop_) return;
         for(int i = 0; i < size; i++){
             txn_pool_.push_back(entry[i]);
         }
