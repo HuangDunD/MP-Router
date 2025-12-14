@@ -75,9 +75,10 @@ int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &requ
         // Step 2: Update graph structure using striped locks
         lock_stripes_for_nodes(keys, [&]() {
             for (uint64_t regionid : keys) {
-                active_nodes_.insert(regionid);
-                partition_graph_.try_emplace(regionid);
-                partition_weight_.try_emplace(regionid, 1); // 点的权重就是1
+                size_t idx = get_stripe_index(regionid);
+                active_nodes_[idx].insert(regionid);
+                partition_graph_[idx].try_emplace(regionid);
+                partition_weight_[idx].try_emplace(regionid, 1); // 点的权重就是1
             }
 
             if (keys.size() >= 2) {
@@ -85,8 +86,10 @@ int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &requ
                     for (size_t j = i + 1; j < keys.size(); ++j) {
                         uint64_t u = keys[i];
                         uint64_t v = keys[j];
-                        partition_graph_[u][v]++;
-                        partition_graph_[v][u]++;
+                        size_t u_idx = get_stripe_index(u);
+                        size_t v_idx = get_stripe_index(v);
+                        partition_graph_[u_idx][u][v]++;
+                        partition_graph_[v_idx][v][u]++;
                     }
                 }
             }
@@ -387,17 +390,19 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
             return;
         }
 
-        graph_snapshot = std::move(this->partition_graph_);
-        weight_snapshot = std::move(this->partition_weight_);
+        for (size_t i = 0; i < NUM_GRAPH_STRIPES; ++i) {
+            graph_snapshot.merge(this->partition_graph_[i]);
+            this->partition_graph_[i].clear();
+            weight_snapshot.merge(this->partition_weight_[i]);
+            this->partition_weight_[i].clear();
+            this->active_nodes_[i].clear();
+        }
         original_to_dense_snapshot = std::move(this->regionid_to_denseid_map_);
         dense_to_original_snapshot = std::move(this->regionid_to_dense_map_);
 
         // Reset live structures (they are in a valid-but-unspecified state after move).
-        this->partition_graph_.clear();
-        this->partition_weight_.clear();
         this->regionid_to_denseid_map_.clear();
         this->regionid_to_dense_map_.clear();
-        this->active_nodes_.clear();
 
         // The dense map may have been over-resized; trim to the actual used vertex count.
         if (dense_to_original_snapshot.size() > static_cast<size_t>(num_dense_ids_snapshot)) {

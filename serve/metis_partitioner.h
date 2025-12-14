@@ -102,10 +102,14 @@ public:
     }
 
 private:
+    // Fine-grained Mutexes for better concurrency
+    // Use striping pattern to reduce contention
+    static constexpr size_t NUM_GRAPH_STRIPES = 16; // 16 locks for graph data
+
     // Internal Graph Representation
-    std::set<uint64_t> active_nodes_;
-    std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint64_t> > partition_graph_;
-    std::unordered_map<uint64_t, uint64_t> partition_weight_;
+    std::array<std::set<uint64_t>, NUM_GRAPH_STRIPES> active_nodes_;
+    std::array<std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint64_t> >, NUM_GRAPH_STRIPES> partition_graph_;
+    std::array<std::unordered_map<uint64_t, uint64_t>, NUM_GRAPH_STRIPES> partition_weight_;
 
     // Mapping and Partitioning Results
     std::unordered_map<uint64_t, std::pair<idx_t, std::vector<int>> > pending_partition_node_map; // 在触发分区操作间隔中第一次出现悬而未决的顶点.
@@ -114,9 +118,6 @@ private:
     // Readers use atomic_load on this shared_ptr and never touch the mutable map.
     std::shared_ptr<const PartitionMap> active_partition_map_snapshot_;
 
-    // Fine-grained Mutexes for better concurrency
-    // Use striping pattern to reduce contention
-    static constexpr size_t NUM_GRAPH_STRIPES = 16; // 16 locks for graph data
     mutable std::array<std::mutex, NUM_GRAPH_STRIPES> graph_stripe_mutexes_;
 
     // Separate lock for ID mapping operations
