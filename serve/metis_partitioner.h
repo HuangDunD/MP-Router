@@ -9,6 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <algorithm> // Required for std::max_element, std::max
+#include <array>      // Required for std::array
 #include <mutex>      // Required for std::mutex, std::lock_guard, std::unique_lock
 #include <shared_mutex> // Required for std::shared_mutex, std::shared_lock
 #include <numeric>    // Required for std::iota (optional)
@@ -113,8 +114,17 @@ private:
     // Readers use atomic_load on this shared_ptr and never touch the mutable map.
     std::shared_ptr<const PartitionMap> active_partition_map_snapshot_;
 
-    // Mutexes for thread safety
-    mutable std::mutex graph_data_mutex_;
+    // Fine-grained Mutexes for better concurrency
+    // Use striping pattern to reduce contention
+    static constexpr size_t NUM_GRAPH_STRIPES = 16; // 16 locks for graph data
+    mutable std::array<std::mutex, NUM_GRAPH_STRIPES> graph_stripe_mutexes_;
+
+    // Separate lock for ID mapping operations
+    mutable std::mutex id_mapping_mutex_;
+
+    // Lock for snapshot operation (taking ownership of data during partition)
+    mutable std::mutex graph_snapshot_mutex_;
+
     mutable std::shared_mutex partition_map_mutex_;
 
     // Automatic Partitioning Members
@@ -152,5 +162,35 @@ private:
     // Must be called while holding graph_data_mutex_.
     uint64_t get_graph_size_unsafe() const {
         return next_dense_id_.load(std::memory_order_relaxed);
+    }
+
+    // Helper function to get stripe index for a given node ID
+    size_t get_stripe_index(uint64_t node_id) const {
+        return std::hash<uint64_t>{}(node_id) % NUM_GRAPH_STRIPES;
+    }
+
+    // Helper to lock multiple stripes in a consistent order (to avoid deadlock)
+    template<typename Func>
+    void lock_stripes_for_nodes(const std::vector<uint64_t>& node_ids, Func&& func) {
+        if (node_ids.empty()) {
+            func();
+            return;
+        }
+
+        // Collect unique stripe indices and sort them to ensure consistent lock order
+        std::set<size_t> stripe_indices;
+        for (uint64_t node_id : node_ids) {
+            stripe_indices.insert(get_stripe_index(node_id));
+        }
+
+        // Lock all required stripes in order
+        std::vector<std::unique_lock<std::mutex>> locks;
+        locks.reserve(stripe_indices.size());
+        for (size_t idx : stripe_indices) {
+            locks.emplace_back(graph_stripe_mutexes_[idx]);
+        }
+
+        // Execute the function while holding all locks
+        func();
     }
 };

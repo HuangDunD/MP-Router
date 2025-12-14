@@ -43,44 +43,55 @@ int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &requ
 #endif
     // --- End Auto Partition Trigger Check ---
 
-    // --- Core Graph Modification (within graph_data_mutex_) ---
+    // --- Core Graph Modification (within fine-grained locks) ---
     // add sample rate here
     double random_value = distrib(gen_); // Generate a random value between 0.0 and 1.0
     if (enable_partition && (random_value <= AffinitySampleRate)) {
-        std::lock_guard<std::mutex> lock(graph_data_mutex_);
-
         std::vector<uint64_t> keys;
+        keys.reserve(request_partition_node_map.size());
         for (const auto& itr: request_partition_node_map) {
-            uint64_t regionid = itr.first;
-            keys.push_back(regionid);
-            active_nodes_.insert(regionid);
-            partition_graph_.try_emplace(regionid);
-            partition_weight_.try_emplace(regionid, 1); // 点的权重就是1
-
-            auto map_it = regionid_to_denseid_map_.find(regionid);
-            if (map_it == regionid_to_denseid_map_.end()) {
-                idx_t new_dense_id = next_dense_id_.fetch_add(1, std::memory_order_relaxed);
-                regionid_to_denseid_map_[regionid] = new_dense_id;
-
-                if (new_dense_id >= regionid_to_dense_map_.size()) {
-                    // Resize in larger chunks to reduce frequency of reallocations
-                    regionid_to_dense_map_.resize(new_dense_id + (regionid_to_dense_map_.size() / 2) + 100);
-                }
-                regionid_to_dense_map_[new_dense_id] = regionid;
-            }
+            keys.push_back(itr.first);
         }
 
-        if (keys.size() >= 2) {
-            for (size_t i = 0; i < keys.size(); ++i) {
-                for (size_t j = i + 1; j < keys.size(); ++j) {
-                    uint64_t u = keys[i];
-                    uint64_t v = keys[j];
-                    partition_graph_[u][v]++;
-                    partition_graph_[v][u]++;
+        // Step 1: Handle ID mapping under a separate lock
+        {
+            std::lock_guard<std::mutex> id_lock(id_mapping_mutex_);
+
+            for (uint64_t regionid : keys) {
+                auto map_it = regionid_to_denseid_map_.find(regionid);
+                if (map_it == regionid_to_denseid_map_.end()) {
+                    idx_t new_dense_id = next_dense_id_.fetch_add(1, std::memory_order_relaxed);
+                    regionid_to_denseid_map_[regionid] = new_dense_id;
+
+                    if (new_dense_id >= regionid_to_dense_map_.size()) {
+                        // Resize in larger chunks to reduce frequency of reallocations
+                        regionid_to_dense_map_.resize(new_dense_id + (regionid_to_dense_map_.size() / 2) + 100);
+                    }
+                    regionid_to_dense_map_[new_dense_id] = regionid;
                 }
             }
         }
-    } // graph_data_mutex_ is released here
+
+        // Step 2: Update graph structure using striped locks
+        lock_stripes_for_nodes(keys, [&]() {
+            for (uint64_t regionid : keys) {
+                active_nodes_.insert(regionid);
+                partition_graph_.try_emplace(regionid);
+                partition_weight_.try_emplace(regionid, 1); // 点的权重就是1
+            }
+
+            if (keys.size() >= 2) {
+                for (size_t i = 0; i < keys.size(); ++i) {
+                    for (size_t j = i + 1; j < keys.size(); ++j) {
+                        uint64_t u = keys[i];
+                        uint64_t v = keys[j];
+                        partition_graph_[u][v]++;
+                        partition_graph_[v][u]++;
+                    }
+                }
+            }
+        });
+    } // fine-grained locks are released here
 
     // --- Submit Partition Task ---
 #ifdef ENABLE_AUTO_PARTITION
@@ -343,8 +354,17 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
     std::vector<uint64_t> dense_to_original_snapshot;
     std::unordered_map<uint64_t, idx_t> original_to_dense_snapshot;
     idx_t num_dense_ids_snapshot = 0; {
-        std::lock_guard<std::mutex> lock(graph_data_mutex_);
-        logger_->info("Acquired graph_data_mutex_ for creating graph snapshot.");
+        // Lock all graph stripes + ID mapping lock + snapshot lock for atomic snapshot
+        std::lock_guard<std::mutex> snapshot_lock(graph_snapshot_mutex_);
+        std::lock_guard<std::mutex> id_lock(id_mapping_mutex_);
+
+        // Lock all graph stripes in order
+        std::array<std::unique_lock<std::mutex>, NUM_GRAPH_STRIPES> stripe_locks;
+        for (size_t i = 0; i < NUM_GRAPH_STRIPES; ++i) {
+            stripe_locks[i] = std::unique_lock<std::mutex>(graph_stripe_mutexes_[i]);
+        }
+
+        logger_->info("Acquired all locks for creating graph snapshot.");
 
         // Move (not copy) the current accumulated graph into a snapshot to avoid doubling memory.
         // The live structures are cleared and will start accumulating fresh data after this point.
@@ -394,7 +414,7 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
             return;
         }
 
-        logger_->info("Graph snapshot created. Releasing graph_data_mutex_.");
+        logger_->info("Graph snapshot created. Releasing all locks.");
     }
 
     size_t total_degree_sum_csr = 0; // Total number of edges (sum of degrees)
