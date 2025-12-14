@@ -67,6 +67,33 @@ RUN wget https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VE
     make -j$(nproc) world && \
     make install-world && \
     cd .. && rm -rf postgresql-${PG_VERSION} postgresql-${PG_VERSION}.tar.gz
+# -----------------------------------------------------------------------------
+# 4.5 初始化数据库并预执行 SQL 脚本
+# -----------------------------------------------------------------------------
+
+# 1. 创建 postgres 用户和组 (PostgreSQL 不能以 root 运行)
+RUN groupadd -r postgres && useradd -r -g postgres postgres
+
+# 2. 创建数据目录并授权
+# 通常习惯放在 /usr/local/pgsql/data 或者 /var/lib/postgresql/data
+ENV PGDATA=/usr/local/pgsql/data
+RUN mkdir -p "$PGDATA" && chown -R postgres:postgres /usr/local/pgsql
+
+# 3. 切换到 postgres 用户执行初始化、启动、SQL 设置、关闭
+# 注意：这里必须在一个 RUN 指令内完成 "启动->执行->关闭"，否则构建层结束后进程会被杀掉
+USER postgres
+
+RUN /usr/local/bin/initdb -D "$PGDATA" -E UTF8 --locale=C && \
+    /usr/local/bin/pg_ctl -D "$PGDATA" -l /tmp/logfile start -w && \
+    /usr/local/bin/psql -c "CREATE USER system WITH PASSWORD '123456';" && \
+    /usr/local/bin/psql -c "CREATE DATABASE smallbank OWNER system;" && \
+    /usr/local/bin/psql -d smallbank -c "CREATE EXTENSION IF NOT EXISTS pageinspect;" && \
+    /usr/local/bin/psql -c "ALTER USER system WITH SUPERUSER;" && \
+    /usr/local/bin/pg_ctl -D "$PGDATA" stop
+
+# 4. 恢复默认用户为 root (如果有后续操作需要 root)
+# 或者保持为 postgres 以便容器启动时直接运行
+USER root
 
 # -----------------------------------------------------------------------------
 # 5. 安装 libpqxx (PostgreSQL C++ 客户端)
