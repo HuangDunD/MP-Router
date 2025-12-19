@@ -15,11 +15,17 @@ set(SERVER_SRC
         region/region_generator.cpp
         # Add any other .cpp files needed directly by 'serve' here
 )
+set(MLP_SRC
+        mlp/mlp.h
+        mlp/mlp.cpp
+        mlp/mlp_test.cpp
+)
 # --- MODIFICATION END ---
 
 # add_executable(serve ${SERVER_SRC} ${LOG_SRC})
 add_executable(offline_analyzer offline_analyze.cc)
 add_executable(create_table create_table.cc)
+add_executable(mlp_test ${MLP_SRC})
 
 add_library(metis STATIC ${METIS_SRC})
 add_library(logger STATIC ${LOG_SRC})
