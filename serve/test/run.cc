@@ -192,6 +192,10 @@ void init_key_page_map(pqxx::connection *conn0, SmartRouter* smart_router, Small
     for(auto& thread : threads) {
         thread.join();
     }
+#if MLP_PREDICTION
+    // after initializing the key-page map, train the MLP model
+    smart_router->mlp_train_after_init();
+#endif
     std::cout << "Data page mapping initialization completed." << std::endl;
 }
 
@@ -1323,8 +1327,8 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
 
     // kes 双机, 新版本
-    DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
-    DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
 
     // kes 四机, 新版本
     // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
@@ -1343,8 +1347,8 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
 
-    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
 

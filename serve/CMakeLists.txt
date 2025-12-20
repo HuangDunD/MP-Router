@@ -29,6 +29,7 @@ add_executable(mlp_test ${MLP_SRC})
 
 add_library(metis STATIC ${METIS_SRC})
 add_library(logger STATIC ${LOG_SRC})
+add_library(mlp STATIC ${MLP_SRC})
 
 # Link libraries to 'serve'
 # target_link_libraries(serve PRIVATE # Use PRIVATE or PUBLIC as appropriate

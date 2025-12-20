@@ -14,6 +14,9 @@
 #include <iostream>
 #include <string>
 #include <atomic>
+#include <limits>
+#include <thread>
+#include <cmath>
 
 #include "common.h"
 #include "btree_search.h"
@@ -25,6 +28,7 @@
 #include "workload_history.h"
 #include "config.h"
 #include "smallbank.h"
+#include "mlp/mlp.h"
 #include "ycsb.h"
 
 // SmartRouter: 一个针对 hot-key hash cache 设有严格内存预算的事务路由器。
@@ -320,6 +324,75 @@ public:
         start_router_cv.notify_all();
     }
 
+#if MLP_PREDICTION
+    // 仅在初始化结束后调用：对所有表的样本进行一次性训练
+    // epochs: 训练轮数; lr: 学习率; log_every: 日志间隔（轮）
+    void mlp_train_after_init(int epochs = 50, double lr = 1, int log_every = 1) {
+        std::vector<table_id_t> tables;
+        {
+            std::lock_guard<std::mutex> g(mlp_models_mtx_);
+            tables.reserve(mlp_models_.size());
+            for (auto &kv : mlp_models_) tables.push_back(kv.first);
+        }
+        std::vector<std::thread> workers;
+        workers.reserve(tables.size());
+        for (auto t : tables) {
+            workers.emplace_back([this, t, epochs, lr, log_every]() {
+                PerTableMLP* modelp = nullptr;
+                {
+                    std::lock_guard<std::mutex> g(mlp_models_mtx_);
+                    auto it = mlp_models_.find(t);
+                    if (it == mlp_models_.end()) return;
+                    modelp = it->second.get();
+                }
+                auto &model = *modelp;
+                int sz = 0;
+                double in_min, in_max, out_min, out_max;
+                {
+                    std::lock_guard<std::mutex> lk(model.mtx);
+                    sz = static_cast<int>(model.inputs.size());
+                    in_min = model.in_min; in_max = model.in_max;
+                    out_min = model.out_min; out_max = model.out_max;
+                }
+                if (sz < 16) {
+                    std::cout << "[MLP] table " << t << " samples=" << sz << ", skip training (insufficient)" << std::endl;
+                    return;
+                }
+                std::cout << "[MLP] table " << t << " training: samples=" << sz
+                          << ", epochs=" << epochs << ", lr=" << lr << std::endl;
+                for (int e = 0; e < epochs; ++e) {
+                    {
+                        std::lock_guard<std::mutex> lk(model.mtx);
+                        for (int i = 0; i < sz; ++i) {
+                            double xn = mlp_norm_(model.inputs[i], in_min, in_max);
+                            double yn = mlp_norm_(model.outputs[i], out_min, out_max);
+                            model.net.train({xn}, {yn}, lr);
+                        }
+                    }
+                    if (log_every > 0 && ((e + 1) % log_every == 0 || e + 1 == epochs)) {
+                        double mse = 0.0;
+                        {
+                            std::lock_guard<std::mutex> lk(model.mtx);
+                            for (int i = 0; i < sz; ++i) {
+                                double xn = mlp_norm_(model.inputs[i], in_min, in_max);
+                                auto pred = model.net.run({xn});
+                                if (pred.empty()) continue;
+                                double yhat = mlp_denorm_(pred[0], out_min, out_max);
+                                double err = yhat - model.outputs[i];
+                                mse += err * err;
+                            }
+                        }
+                        mse /= sz;
+                        std::cout << "[MLP] table " << t << " epoch " << (e + 1)
+                                  << "/" << epochs << " mse=" << mse << std::endl;
+                    }
+                }
+            });
+        }
+        for (auto &th : workers) th.join();
+    }
+#endif // MLP_PREDICTION
+
     // 可能Update SQL执行之后数据页所在的位置, 根据returning ctid 进行更新key-page映射
     // 如果key不存在, 则不进行任何操作
     inline void update_key_page(TxnQueueEntry* txn, std::vector<table_id_t>& table_ids, std::vector<itemkey_t>& keys, std::vector<bool>& rw, 
@@ -374,6 +447,7 @@ public:
 
     // init key-page mapping when load data
     inline void initial_key_page(table_id_t table_id, itemkey_t key, page_id_t page) {
+    #if !MLP_PREDICTION
         std::unique_lock<std::shared_mutex> lock(hot_mutex_);
         auto it = hot_key_map.find({table_id, key});
         if (it == hot_key_map.end()) {
@@ -400,6 +474,11 @@ public:
                         std::endl;
             }
         }
+    #else
+        // When using MLP prediction, we first construct the training data set
+        // 注意：上层并发调用，该函数内部需线程安全
+        mlp_add_sample(table_id, key, page);
+    #endif
     }
   
     // ******************* METIS ******************
@@ -419,20 +498,6 @@ public:
                                       // 12: metis cross and ownership cross unequal, 13: metis partial and ownership missing, 14: metis partial and ownership entirely
                                       // 15: metis partial and ownership cross equal, 16: metis partial and ownership cross unequal
     };
-
-    void getKeyOriginalPages(std::vector<table_id_t>& table_ids, std::vector<itemkey_t>& keys, std::vector<page_id_t>& original_pages) {
-        original_pages.clear();
-        std::shared_lock<std::shared_mutex> lock(hot_mutex_);
-        for(size_t i=0; i<keys.size(); i++) {
-            auto it = hot_key_map.find({table_ids[i], keys[i]});
-            if (it != hot_key_map.end()) {
-                original_pages.push_back(it->second.page);
-            }
-            else {
-                assert(false); // 这里不应该找不到
-            }
-        }
-    }
 
     // 根据table_ids和keys进行路由，返回目标节点ID
     SmartRouterResult get_route_primary(TxnQueueEntry* txn, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, 
@@ -1033,6 +1098,7 @@ private:
     // 查找 key。若在 hot hash 中找到，立即返回 page。
     // 否则可能查 B+tree 提示（在 .cc 实现），未命中返回 std::nullopt。
     inline HotEntry lookup(TxnQueueEntry* txn, table_id_t table_id, itemkey_t key, std::vector<pqxx::connection *> &thread_conns) {
+    #if !MLP_PREDICTION
         std::shared_lock<std::shared_mutex> lock(hot_mutex_);
         auto it = hot_key_map.find({table_id, key});
         if (it != hot_key_map.end()) {
@@ -1060,6 +1126,15 @@ private:
             txn->accessed_page_ids.push_back(entry.page); // 记录访问过的page id
             return entry;
         }
+    #else 
+        auto pred = mlp_predict(table_id, key);
+        HotEntry entry;
+        if (pred.has_value()) {
+            // hot hash 命中
+            entry.page = pred.value();
+        }
+        return entry;
+    #endif
     }
     
     // 插入映射。如果存储满了, 会在预算内驱逐。
@@ -1282,6 +1357,92 @@ private:
 		}
     }
 
+#if MLP_PREDICTION
+    struct PerTableMLP {
+        // Network: 1 input (key), 1 output (page), hidden as in mlp_test
+        mlp net{1, 2, 10, 1};
+        bool net_initialized = true;
+        // Raw training data (we normalize on the fly)
+        std::vector<double> inputs;   // keys as double
+        std::vector<double> outputs;  // pages as double
+        // Min-max for normalization
+        double in_min = std::numeric_limits<double>::max();
+        double in_max = std::numeric_limits<double>::lowest();
+        double out_min = std::numeric_limits<double>::max();
+        double out_max = std::numeric_limits<double>::lowest();
+        std::mutex mtx; // protect data and min/max
+    };
+    
+    static inline double mlp_norm_(double x, double lo, double hi) {
+        if (hi <= lo) return 0.0;
+        return (x - lo) / (hi - lo);
+    }
+
+    static inline double mlp_denorm_(double y, double lo, double hi) {
+        return y * (hi - lo) + lo;
+    }
+
+    // Background trainer removed: training is triggered once after initialization
+
+    void mlp_add_sample(table_id_t table, itemkey_t key, page_id_t page) {
+        std::unique_ptr<PerTableMLP>* model_ptr = nullptr;
+        {
+            std::lock_guard<std::mutex> g(mlp_models_mtx_);
+            auto it = mlp_models_.find(table);
+            if (it == mlp_models_.end()) {
+                auto m = std::make_unique<PerTableMLP>();
+                auto [it2, ok] = mlp_models_.emplace(table, std::move(m));
+                model_ptr = &it2->second;
+            } else {
+                model_ptr = &it->second;
+            }
+        }
+        auto& model = **model_ptr;
+        {
+            std::lock_guard<std::mutex> lk(model.mtx);
+            double x = static_cast<double>(key);
+            double y = static_cast<double>(page);
+            model.inputs.push_back(x);
+            model.outputs.push_back(y);
+            if (x < model.in_min) model.in_min = x;
+            if (x > model.in_max) model.in_max = x;
+            if (y < model.out_min) model.out_min = y;
+            if (y > model.out_max) model.out_max = y;
+        }
+        // No background trainer; training will be triggered after init
+    }
+
+    std::optional<page_id_t> mlp_predict(table_id_t table, itemkey_t key) {
+        std::unique_ptr<PerTableMLP> *model_ptr = nullptr;
+        {
+            std::lock_guard<std::mutex> g(mlp_models_mtx_);
+            auto it = mlp_models_.find(table);
+            if (it == mlp_models_.end()) return std::nullopt;
+            model_ptr = &it->second;
+        }
+        auto& model = **model_ptr;
+        // Need at least some samples to have valid min/max
+        double x;
+        double lo, hi, out_lo, out_hi;
+        {
+            std::lock_guard<std::mutex> lk(model.mtx);
+            if (model.inputs.size() < 16) return std::nullopt;
+            x = static_cast<double>(key);
+            lo = model.in_min; hi = model.in_max;
+            out_lo = model.out_min; out_hi = model.out_max;
+        }
+        double xn = mlp_norm_(x, lo, hi);
+        std::vector<double> in = {xn};
+        auto pred = model.net.run(in);
+        if (pred.empty()) return std::nullopt;
+        double y = mlp_denorm_(pred[0], out_lo, out_hi);
+        if (!std::isfinite(y)) return std::nullopt;
+        if (y < 0) y = 0;
+        page_id_t page = static_cast<page_id_t>(std::llround(y));
+        return page;
+    }
+#endif // MLP_PREDICTION
+
 private:
     // 配置
     Config cfg_{};
@@ -1340,4 +1501,10 @@ private:
     bool start_router_ = false;
     std::condition_variable start_router_cv;
     std::mutex start_router_mutex;
+    
+#if MLP_PREDICTION
+    // --------- MLP-based key->page model (one model per table) ---------
+    std::unordered_map<table_id_t, std::unique_ptr<PerTableMLP>> mlp_models_;
+    std::mutex mlp_models_mtx_;
+#endif // MLP_PREDICTION
 };

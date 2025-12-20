@@ -14,7 +14,7 @@ include_directories(./)
 
 
 add_executable(run run.cc smallbank.cc ycsb.cc smart_router.cc friend_simulate.cc parse.cc)
-target_link_libraries(run global metis logger ${METIS_LIBRARY} ${GKLIB_LIBRARY} ${PQXX_LIBRARY} ${PQ_LIBRARY} pgcommon pgport)
+target_link_libraries(run global mlp metis logger ${METIS_LIBRARY} ${GKLIB_LIBRARY} ${PQXX_LIBRARY} ${PQ_LIBRARY} pgcommon pgport)
 
 add_executable(indexed_priority_queue_test indexed_priority_queue_test.cc)
 target_link_libraries(indexed_priority_queue_test)
