@@ -230,7 +230,9 @@ int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &requ
 // 传入的request_partition_node_map 的key是图节点id, value是占位符, 函数会将value更新为对应的分区id
 void NewMetis::get_metis_partitioning_result(std::unordered_map<uint64_t, idx_t> &request_partition_node_map) {
     // Lock-free read: load immutable snapshot.
-    auto current_map_sp = std::atomic_load_explicit(&active_partition_map_snapshot_, std::memory_order_acquire);
+    std::shared_ptr<const NewMetis::PartitionMap> current_map_sp;
+    if(!this->last_partition_finish) current_map_sp = std::atomic_load_explicit(&active_partition_map_snapshot_, std::memory_order_acquire);
+    else current_map_sp = active_partition_map_snapshot_;
 
     if (current_map_sp != nullptr) {
         for(auto& r: request_partition_node_map) {
@@ -251,8 +253,10 @@ void NewMetis::get_metis_partitioning_result(std::unordered_map<uint64_t, idx_t>
 
 node_id_t NewMetis::get_metis_partitioning_result(uint64_t request_partition_node) {
     // Lock-free read: load immutable snapshot.
-    auto current_map_sp = std::atomic_load_explicit(&active_partition_map_snapshot_, std::memory_order_acquire);
-
+    std::shared_ptr<const NewMetis::PartitionMap> current_map_sp;
+    if(!this->last_partition_finish) current_map_sp = std::atomic_load_explicit(&active_partition_map_snapshot_, std::memory_order_acquire);
+    else current_map_sp = active_partition_map_snapshot_;
+    
     if (current_map_sp != nullptr) {
         auto map_it = current_map_sp->find(request_partition_node);
         if (map_it != current_map_sp->end()) {
@@ -746,6 +750,10 @@ void NewMetis::partition_internal_graph(const std::string &output_partition_file
     logger_->info(
         "Partition results (RegionID,TableID,InnerRegionID,PartitionIndex) successfully written to " +
         output_partition_file);
+
+    if(this->stats_.total_partition_calls > MetisWarmupRound){
+        this->last_partition_finish = true;
+    }
 }
 
 void NewMetis::stabilize_partition_indices(

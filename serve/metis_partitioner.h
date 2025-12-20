@@ -149,6 +149,7 @@ private:
     // enable partition, 这里引入一个允许分区的控制函数
     bool enable_partition = true;
 
+    bool last_partition_finish = false;
     // random seed
     std::random_device rd;
     std::mt19937 gen_; // Mersenne Twister RNG
