@@ -782,6 +782,102 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
     std::cout << "Finished running smallbank transactions via stored procedures." << std::endl;
 }
 
+void run_ycsb_txns_empty(thread_params* params, Logger* logger_) {
+    // 设置线程名
+    pthread_setname_np(pthread_self(), ("dbconsp_n" + std::to_string(params->compute_node_id_connecter)
+                                                + "_t_" + std::to_string(params->thread_id)).c_str());
+
+    std::cout << "Running smallbank transactions via stored procedures..." << std::endl;
+
+    node_id_t compute_node_id = params->compute_node_id_connecter;
+    TxnQueue* txn_queue = txn_queues[compute_node_id];
+    SmartRouter* smart_router = params->smart_router;
+    SlidingTransactionInforTable *tit = params->tit;
+    YCSB* ycsb = params->ycsb;
+    assert(txn_queue != nullptr && smart_router != nullptr && smart_router != nullptr && ycsb != nullptr);
+
+    // 构造数组字符串：array['k1','k2',...]
+    auto build_array = [](const std::vector<itemkey_t>& v, size_t start, size_t count) {
+        std::string s = "array[";
+        for(size_t i = 0; i < count; ++i) {
+            if(i > 0) s += ",";
+            s += std::to_string(v[start + i]);
+        }
+        s += "]";
+        return s;
+    };
+
+    // init the thread connection for this compute node
+    auto con_str = DBConnection[compute_node_id];
+    auto con = new pqxx::connection(con_str);
+    if(!con->is_open()) {
+        std::cerr << "Failed to connect to database: " << con_str << std::endl;
+        assert(false);
+        exit(-1);
+    }
+
+    int con_batch_id = 0;
+    while (true) {
+        // 计时 
+        timespec pop_start_time, pop_end_time;
+        clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
+
+        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        // if(WarmupEnd)
+        //     logger_->info("Compute Node " + std::to_string(compute_node_id) + 
+        //                 " Thread " + std::to_string(params->thread_id) + 
+        //                 " popped " + std::to_string(txn_entries.size()) + " txns in batch " + 
+        //                 std::to_string(con_batch_id));
+
+        clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
+        double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
+                          (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
+        smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+
+        if (txn_entries.empty()) {
+            if(txn_queue->is_finished()) {
+                break;
+            } else if(txn_queue->is_batch_finished()) {
+                smart_router->notify_batch_finished(compute_node_id, params->thread_id, con_batch_id);
+                // 计时
+                timespec wait_start_time, wait_end_time;
+                clock_gettime(CLOCK_MONOTONIC, &wait_start_time);
+                smart_router->wait_for_next_batch(compute_node_id, params->thread_id, con_batch_id);
+                clock_gettime(CLOCK_MONOTONIC, &wait_end_time);
+                double wait_time = (wait_end_time.tv_sec - wait_start_time.tv_sec) * 1000.0 +
+                                   (wait_end_time.tv_nsec - wait_start_time.tv_nsec) / 1000000.0;
+                smart_router->add_worker_thread_wait_next_batch_time(params->compute_node_id_connecter, params->thread_id, wait_time);
+                con_batch_id++;
+                continue;
+            } else continue;
+        }
+
+        for (auto& txn_entry : txn_entries) {
+            exe_count++;
+            exec_txn_cnt_per_node[compute_node_id]++;
+
+            tx_id_t tx_id = txn_entry->tx_id;
+            int txn_type = txn_entry->txn_type;
+            std::vector<table_id_t> tables = ycsb->get_table_ids_by_txn_type();
+            assert(tables.size() > 0);
+            std::vector<itemkey_t> keys = txn_entry->keys;
+            assert(tables.size() == keys.size());
+            assert(txn_entry->keys.size() == 10);
+            std::vector<bool> rw = ycsb->get_rw_flags();
+
+            std::vector<page_id_t> ctid_ret_page_ids;
+            ctid_ret_page_ids = txn_entry->accessed_page_ids;
+
+            if(smart_router) {
+                smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
+                                                keys, rw, ctid_ret_page_ids, compute_node_id);
+            }
+
+            tit->mark_done(txn_entry); // 一体化：标记完成，删除由 TIT 统一管理
+        }
+    }
+    std::cout << "Finished running smallbank transactions via stored procedures." << std::endl;
+}
 
 void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [OPTIONS]" << std::endl;
@@ -1227,8 +1323,8 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
 
     // kes 双机, 新版本
-    // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
 
     // kes 四机, 新版本
     // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
@@ -1247,8 +1343,8 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
 
-    DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
-    DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
 
@@ -1341,7 +1437,7 @@ int main(int argc, char *argv[]) {
                                         : std::vector<std::string>{};
     BtreeIndexService *index_service = new BtreeIndexService(DBConnection, index_names, read_btree_mode, read_frequency);
     // initialize the transaction pool
-    SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, ComputeNodeCount*worker_threads*BatchRouterProcessSize);
+    SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, 2*ComputeNodeCount*worker_threads*BatchRouterProcessSize);
     TxnPool* txn_pool = new TxnPool(4, TxnPoolMaxSize, tit);
     auto shared_txn_queue = new SharedTxnQueue(tit, logger_, TxnQueueMaxSize);
     // initialize the transaction queues for each compute node connection
@@ -1404,7 +1500,7 @@ int main(int argc, char *argv[]) {
 
             if(Workload_Type == 0) {
                 if (use_sp)
-                    db_conn_threads.emplace_back(run_smallbank_empty, params, logger_);
+                    db_conn_threads.emplace_back(run_smallbank_txns_sp, params, logger_);
                 else
                     db_conn_threads.emplace_back(run_smallbank_txns, params, logger_);
             }
@@ -1434,7 +1530,7 @@ int main(int argc, char *argv[]) {
         print_diff_snapshot(snapshot0, snapshot1);
     }
     // Create a performance snapshot after warmup
-    int mid_snapshot_id = create_perf_kwr_snapshot(conn0);
+    // int mid_snapshot_id = create_perf_kwr_snapshot(conn0);
 
     // Wait for all threads to complete
     for(auto& thread : db_conn_threads) {
@@ -1485,8 +1581,8 @@ int main(int argc, char *argv[]) {
 
     // Generate performance report, file name inluding the timestamp
 
-    std::string report_file_warm_phase = kwr_report_name +  "_fisrt.html";
-    generate_perf_kwr_report(conn0, start_snapshot_id, mid_snapshot_id, report_file_warm_phase);
+    // std::string report_file_warm_phase = kwr_report_name +  "_fisrt.html";
+    // generate_perf_kwr_report(conn0, start_snapshot_id, mid_snapshot_id, report_file_warm_phase);
     std::string report_file_run_phase = kwr_report_name +  "_end.html";
     generate_perf_kwr_report(conn0, start_snapshot_id, end_snapshot_id, report_file_run_phase);
 

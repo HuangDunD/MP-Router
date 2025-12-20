@@ -102,7 +102,7 @@ public:
             double preprocess_txn_ms, wait_last_batch_finish_ms = 0.0;
             double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
-            double ownership_retrieval_and_devide_unconflicted_txn_ms, process_conflicted_txn_ms = 0.0;
+            double ownership_retrieval_and_devide_unconflicted_txn_ms, merge_and_construct_ipq_ms, process_conflicted_txn_ms = 0.0;
         
         // ! txn worker 时间分解
         std::vector<std::vector<double>> worker_thread_exec_time_ms;
@@ -931,24 +931,32 @@ public:
         time_stats_.wait_next_batch_ms_per_thread[node_id][thread_id] += wait_time_ms;
     }
 
-    void Record_time_ms() {
-        time_stats_.fetch_txn_from_pool_ms = 0.0; // 重置
-        time_stats_.schedule_total_ms = 0.0; // 重置
-        time_stats_.push_txn_to_queue_ms = 0.0; // 重置
-
-        for (const auto& t : time_stats_.fetch_txn_from_pool_ms_per_thread) {
-            time_stats_.fetch_txn_from_pool_ms += t;
+    void Record_time_ms(bool a, bool b, bool c) {
+        if(a) {
+            // fetch time
+            time_stats_.fetch_txn_from_pool_ms = 0.0; // 重置
+            for (const auto& t : time_stats_.fetch_txn_from_pool_ms_per_thread) {
+                time_stats_.fetch_txn_from_pool_ms += t;
+            }
+            time_stats_.fetch_txn_from_pool_ms /= router_worker_threads_; // 取平均
         }
-        time_stats_.fetch_txn_from_pool_ms /= router_worker_threads_; // 取平均
-        for (const auto& t : time_stats_.schedule_decision_ms_per_thread) {
-            time_stats_.schedule_total_ms += t;
+        if(b) {
+            // schedule time
+            time_stats_.schedule_total_ms = 0.0; // 重置
+            for (const auto& t : time_stats_.schedule_decision_ms_per_thread) {
+                time_stats_.schedule_total_ms += t;
+            }
+            time_stats_.schedule_total_ms /= router_worker_threads_; // 取平均
         }
-        time_stats_.schedule_total_ms /= router_worker_threads_; // 取平均
-        for (const auto& t : time_stats_.push_txn_to_queue_ms_per_thread) {
-            time_stats_.push_txn_to_queue_ms += t;
+        if(c) {
+            // push time
+            time_stats_.push_txn_to_queue_ms = 0.0; // 重置
+            for (const auto& t : time_stats_.push_txn_to_queue_ms_per_thread) {
+                time_stats_.push_txn_to_queue_ms += t;
+            }
+            time_stats_.push_txn_to_queue_ms /= router_worker_threads_; // 取平均
         }
-        time_stats_.push_txn_to_queue_ms /= router_worker_threads_; // 取平均
-    }
+    } 
 
     void sum_worker_thread_stat_time() {
         for(int i=0; i<ComputeNodeCount; i++) {

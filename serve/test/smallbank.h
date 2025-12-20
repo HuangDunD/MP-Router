@@ -302,7 +302,7 @@ public:
             pqxx::work txn(*conn0);
             txn.exec(R"SQL(
             ALTER TABLE checking SET ( 
-                autovacuum_enabled = on,
+                autovacuum_enabled = off,
                 autovacuum_vacuum_scale_factor = 0.05,   
                 autovacuum_vacuum_threshold = 500,       
                 autovacuum_analyze_scale_factor = 0.05,
@@ -312,7 +312,7 @@ public:
             std::cout << "Set checking table autovacuum parameters." << std::endl;
             txn.exec(R"SQL(
             ALTER TABLE savings SET ( 
-                autovacuum_enabled = on,
+                autovacuum_enabled = off,
                 autovacuum_vacuum_scale_factor = 0.05,   
                 autovacuum_vacuum_threshold = 500,       
                 autovacuum_analyze_scale_factor = 0.05,

@@ -80,7 +80,7 @@ struct RouterStatSnapshot {
     double preprocess_txn_ms, wait_last_batch_finish_ms = 0.0;
     double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
-    double ownership_retrieval_and_devide_unconflicted_txn_ms, process_conflicted_txn_ms = 0.0;
+    double ownership_retrieval_and_devide_unconflicted_txn_ms, merge_and_construct_ipq_ms, process_conflicted_txn_ms = 0.0;
     std::vector<double> pop_txn_total_ms_per_node;
     std::vector<double> wait_next_batch_total_ms_per_node;
     std::vector<double> sum_worker_thread_exec_time_ms_per_node;
@@ -154,6 +154,7 @@ struct RouterStatSnapshot {
         std::cout << "    Wait Last Batch Finish Time: " << wait_last_batch_finish_ms << " ms" << std::endl;
         std::cout << "    Ownership Retrieval And Devide Unconflicted Txn Time: " 
                   << ownership_retrieval_and_devide_unconflicted_txn_ms << " ms" << std::endl;
+        std::cout << "    Merge And Construct IPQ Time: " << merge_and_construct_ipq_ms << " ms" << std::endl;
         std::cout << "    Process Conflicted Txn Time: " << process_conflicted_txn_ms << " ms" << std::endl;
         std::cout << "  Push Txn To Queue Time: " << push_txn_to_queue_ms << " ms" << std::endl;
 
@@ -229,10 +230,13 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     // time breakdown
     clock_gettime(CLOCK_MONOTONIC, &snap.snapshot_ts);
     router->sum_worker_thread_stat_time(); // update the sum
-    if(SYSTEM_MODE >= 0 && SYSTEM_MODE <= 8) {
+    if(SYSTEM_MODE >= 0 && SYSTEM_MODE <= 8 || SYSTEM_MODE == 13) {
         // 对于这些模式, 是使用多线程router的，因此需要计算平均
-        router->Record_time_ms();
+        router->Record_time_ms(true, true, true);
+    } else if(SYSTEM_MODE == 11) {
+        router->Record_time_ms(false, false, true);
     }
+    
     SmartRouter::TimeBreakdown& tdb = router->get_time_breakdown();
     snap.fetch_txn_from_pool_ms = tdb.fetch_txn_from_pool_ms;
     snap.schedule_total_ms = tdb.schedule_total_ms;
@@ -241,6 +245,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.compute_conflict_ms = tdb.compute_conflict_ms;
     snap.wait_last_batch_finish_ms = tdb.wait_last_batch_finish_ms;
     snap.ownership_retrieval_and_devide_unconflicted_txn_ms = tdb.ownership_retrieval_and_devide_unconflicted_txn_ms;
+    snap.merge_and_construct_ipq_ms = tdb.merge_and_construct_ipq_ms;
     snap.process_conflicted_txn_ms = tdb.process_conflicted_txn_ms;
     snap.pop_txn_total_ms_per_node = tdb.pop_txn_total_ms_per_node;
     snap.wait_next_batch_total_ms_per_node = tdb.wait_next_batch_total_ms_per_node;
@@ -336,6 +341,7 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.compute_conflict_ms = b.compute_conflict_ms - a.compute_conflict_ms;
     d.wait_last_batch_finish_ms = b.wait_last_batch_finish_ms - a.wait_last_batch_finish_ms;
     d.ownership_retrieval_and_devide_unconflicted_txn_ms = b.ownership_retrieval_and_devide_unconflicted_txn_ms - a.ownership_retrieval_and_devide_unconflicted_txn_ms;
+    d.merge_and_construct_ipq_ms = b.merge_and_construct_ipq_ms - a.merge_and_construct_ipq_ms;
     d.process_conflicted_txn_ms = b.process_conflicted_txn_ms - a.process_conflicted_txn_ms;
     for(int i=0; i< ComputeNodeCount; i++) {
         d.pop_txn_total_ms_per_node.push_back( b.pop_txn_total_ms_per_node[i] - a.pop_txn_total_ms_per_node[i] );
