@@ -77,7 +77,7 @@ struct RouterStatSnapshot {
     double fetch_txn_from_pool_ms = 0.0;
     double schedule_total_ms = 0.0;
     double push_txn_to_queue_ms = 0.0;
-    double preprocess_txn_ms, wait_last_batch_finish_ms = 0.0;
+    double preprocess_txn_ms, wait_pending_txn_push_ms, wait_last_batch_finish_ms = 0.0;
     double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double ownership_retrieval_and_devide_unconflicted_txn_ms, merge_and_construct_ipq_ms, process_conflicted_txn_ms = 0.0;
@@ -151,6 +151,7 @@ struct RouterStatSnapshot {
         std::cout << "    Preprocess Txn Time: " << preprocess_txn_ms << " ms" << std::endl;
         std::cout << "      Merge Global Txid To Txn Map Time: " << merge_global_txid_to_txn_map_ms << " ms" << std::endl;
         std::cout << "      Compute Conflict Time: " << compute_conflict_ms << " ms" << std::endl;
+        std::cout << "    Wait Pending Txn Push Time: " << wait_pending_txn_push_ms << " ms" << std::endl;
         std::cout << "    Wait Last Batch Finish Time: " << wait_last_batch_finish_ms << " ms" << std::endl;
         std::cout << "    Ownership Retrieval And Devide Unconflicted Txn Time: " 
                   << ownership_retrieval_and_devide_unconflicted_txn_ms << " ms" << std::endl;
@@ -243,6 +244,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.preprocess_txn_ms = tdb.preprocess_txn_ms;
     snap.merge_global_txid_to_txn_map_ms = tdb.merge_global_txid_to_txn_map_ms;
     snap.compute_conflict_ms = tdb.compute_conflict_ms;
+    snap.wait_pending_txn_push_ms = tdb.wait_pending_txn_push_ms;
     snap.wait_last_batch_finish_ms = tdb.wait_last_batch_finish_ms;
     snap.ownership_retrieval_and_devide_unconflicted_txn_ms = tdb.ownership_retrieval_and_devide_unconflicted_txn_ms;
     snap.merge_and_construct_ipq_ms = tdb.merge_and_construct_ipq_ms;
@@ -339,6 +341,7 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.preprocess_txn_ms = b.preprocess_txn_ms - a.preprocess_txn_ms;
     d.merge_global_txid_to_txn_map_ms = b.merge_global_txid_to_txn_map_ms - a.merge_global_txid_to_txn_map_ms;
     d.compute_conflict_ms = b.compute_conflict_ms - a.compute_conflict_ms;
+    d.wait_pending_txn_push_ms = b.wait_pending_txn_push_ms - a.wait_pending_txn_push_ms;
     d.wait_last_batch_finish_ms = b.wait_last_batch_finish_ms - a.wait_last_batch_finish_ms;
     d.ownership_retrieval_and_devide_unconflicted_txn_ms = b.ownership_retrieval_and_devide_unconflicted_txn_ms - a.ownership_retrieval_and_devide_unconflicted_txn_ms;
     d.merge_and_construct_ipq_ms = b.merge_and_construct_ipq_ms - a.merge_and_construct_ipq_ms;

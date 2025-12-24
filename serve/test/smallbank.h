@@ -202,6 +202,11 @@ public:
                 generate_account_id(acc2, zipfian_gen);
             } while (acc2 == acc1);
         }
+        // 添加一个排序，确保acc1 < acc2
+        if (acc1 > acc2) {
+            std::swap(acc1, acc2);
+        }
+            
     }
 
     std::vector<table_id_t>& get_table_ids_by_txn_type(int txn_type) {

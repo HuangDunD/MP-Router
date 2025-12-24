@@ -103,7 +103,7 @@ public:
         double schedule_total_ms = 0.0;
         double push_txn_to_queue_ms = 0.0;
             // for batch scheduling
-            double preprocess_txn_ms, wait_last_batch_finish_ms = 0.0;
+            double preprocess_txn_ms, wait_pending_txn_push_ms, wait_last_batch_finish_ms = 0.0;
             double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double ownership_retrieval_and_devide_unconflicted_txn_ms, merge_and_construct_ipq_ms, process_conflicted_txn_ms = 0.0;
@@ -914,10 +914,6 @@ public:
                 (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
 
             // 使用pipeline模式时，事务已经在get_route_primary_batch_schedule_v2中被放入txn_queues_，这里不需要再做一次放入操作
-            for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
-                // 把该批的事务都分发完成，设置batch处理完成标志
-                txn_queues_[node_id]->set_batch_finished();
-            }
         }
         std::cout << "Router worker thread finished." << std::endl; 
     }
@@ -1507,4 +1503,26 @@ private:
     std::unordered_map<table_id_t, std::unique_ptr<PerTableMLP>> mlp_models_;
     std::mutex mlp_models_mtx_;
 #endif // MLP_PREDICTION
+
+    // --------- DAG Ready Scheduling ---------
+public:
+    // 注册一个尚未就绪的事务，用于后续ready时快速调度
+    void register_pending_txn(TxnQueueEntry* entry, int node_id) {
+        if (!entry) return;
+        std::lock_guard<std::mutex> lk(pending_mutex_);
+        pending_target_node_[entry->tx_id] = node_id;
+    }
+
+    int get_pending_txn_count() {
+        std::lock_guard<std::mutex> lk(pending_mutex_);
+        return pending_target_node_.size();
+    }
+
+    // TIT通知后续事务ready时调用：立即将其推入对应节点队列执行
+    void schedule_ready_txn(std::vector<TxnQueueEntry*> entries);
+
+private:
+    std::unordered_map<tx_id_t, int> pending_target_node_;
+    std::condition_variable pending_cv_;
+    std::mutex pending_mutex_;
 };

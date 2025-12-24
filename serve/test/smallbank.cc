@@ -122,12 +122,7 @@ void SmallBank::load_data(pqxx::connection *conn0) {
         int end = (i == num_threads - 1) ? smallbank_account : (i + 1) * chunk_size;
         threads.emplace_back(worker, start, end);
     }
-    std::thread friend_thread([&]() {
-        generate_friend_graph();
-    });
-
-    // Wait for friend thread to complete
-    friend_thread.join();
+    
     // Wait for all threads to complete
     for(auto& thread : threads) {
         thread.join();

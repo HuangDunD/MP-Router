@@ -1327,8 +1327,8 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
 
     // kes 双机, 新版本
-    // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
 
     // kes 四机, 新版本
     // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
@@ -1347,8 +1347,8 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
 
-    DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
-    DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
 
@@ -1387,6 +1387,12 @@ int main(int argc, char *argv[]) {
         }
         std::cout << "Tables and indexes created successfully." << std::endl;
 
+        // generate friend graph in a separate thread
+        std::cout << "Generating friend graph in a separate thread..." << std::endl;
+        std::thread friend_thread([&]() {
+            if(Workload_Type == 0) smallbank->generate_friend_graph();
+        });
+
         // load data into the database
         std::cout << "Loading data into the database..." << std::endl;
         if (Workload_Type == 0) {
@@ -1395,6 +1401,9 @@ int main(int argc, char *argv[]) {
             ycsb->load_data(conn0);
         }
         std::cout << "Data loaded successfully." << std::endl;
+        // Wait for friend thread to complete
+        friend_thread.join();
+        std::cout << "Friend graph generation completed." << std::endl;
     } else {
         std::cout << "Skipping data loading. "<< std::endl;
         std::cout << "Checking if tables exist..." << std::endl;
@@ -1411,6 +1420,12 @@ int main(int argc, char *argv[]) {
         } else {
             std::cout << "Check OK: Required tables exist in the database." << std::endl;
         }
+        // generate friend graph in a separate thread
+        std::cout << "Generating friend graph in a separate thread..." << std::endl;
+        std::thread friend_thread([&]() {
+            if(Workload_Type == 0) smallbank->generate_friend_graph();
+        });
+
         bool accounts_num_verify = false;
         if (Workload_Type == 0) {
             accounts_num_verify = smallbank->check_account_count(conn0, account_num);
@@ -1423,6 +1438,9 @@ int main(int argc, char *argv[]) {
         } else {
             std::cout << "Check OK: Account/Record count matches the expected count." << std::endl;
         }
+        // Wait for friend thread to complete
+        friend_thread.join();
+        std::cout << "Friend graph generation completed." << std::endl;
     }
     if(LOAD_DATA_ONLY) {
         std::cout << "Load data only mode enabled. Exiting after data load." << std::endl;
@@ -1454,6 +1472,11 @@ int main(int argc, char *argv[]) {
     SmartRouter::Config cfg{};
     SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, worker_threads, index_service, metis, logger_, smallbank, ycsb);
     std::cout << "Smart Router initialized." << std::endl;
+
+    // TIT: 当后续事务的入度变为0时，立即调度到目标节点
+    tit->set_ready_callback([smart_router](std::vector<TxnQueueEntry*> entry){
+        smart_router->schedule_ready_txn(std::move(entry));
+    });
 
     // Initialize the key-page map
     init_key_page_map(conn0, smart_router, smallbank, ycsb);

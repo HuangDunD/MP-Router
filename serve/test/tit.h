@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <cstdint>
+#include <functional>
 #include "txn_entry.h"
 #include "Logger.h"
 
@@ -22,7 +23,7 @@ public:
           slots_(txnTableSize),
           logger_(logger_ptr) {}
 
-    enum class TxnStatus { Empty, InProgress, Done, Evicted };
+    enum class TxnStatus { Empty, InRouteringProgress, InExecutorProgress, Done, Evicted };
 
     // 将事务指针写入环形表。若覆盖的槽位中旧指针已完成，则删除；
     // 若未完成，则移入延迟删除集合，等待其 mark_done 后再删除。
@@ -40,6 +41,7 @@ public:
         // 正式写入新指针与 tx_id
         slot.ptr.store(entry, std::memory_order_release);
         slot.tx_id.store(entry->tx_id, std::memory_order_release);
+        slot.status.store(TxnStatus::InRouteringProgress, std::memory_order_release);
 
         // 处理旧指针生命周期
         if (old_ptr) {
@@ -63,6 +65,12 @@ public:
 
     // 将某个事务标记为完成。若它仍在表中，则仅置位完成标记；
     // 若它已被环形覆盖而进入延迟集合，则在此处删除并移除。
+    // 设置当某个后续事务的入度(ref)变为0时的回调，用于立即调度
+    void set_ready_callback(std::function<void(std::vector<TxnQueueEntry*>)> cb) {
+        std::lock_guard<std::mutex> lk(defer_mutex_);
+        on_ready_ = std::move(cb);
+    }
+
     void mark_done(TxnQueueEntry* entry) {
         if (!entry) return;
         // std::cout << "Marking done " << entry->tx_id << "." << std::endl;
@@ -72,10 +80,26 @@ public:
         TxnQueueEntry* cur = slot.ptr.load(std::memory_order_acquire);
         tx_id_t cur_id = slot.tx_id.load(std::memory_order_acquire);
 
+        // 这里应该没有并发问题，因为同一个事务不可能被多个线程同时 mark_done
+        std::vector<TxnQueueEntry*> ready_txns;
+        for (auto after_txn : entry->after_txns) { 
+            // 通知后续事务引用计数减一
+            if(after_txn->ref.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                // fetch_sub 返回的是减一前的值，说明现在变为0了，后续事务可以执行了
+                // logger_->info("txn: " + std::to_string(entry->tx_id) + 
+                //             " mark done, notify after_txn: " + std::to_string(after_txn->tx_id) + " ready to execute.");
+                ready_txns.push_back(after_txn);
+            }
+        }
+        if(!ready_txns.empty()){
+            auto cb = on_ready_;
+            if (cb) cb(ready_txns);
+        }
 
         if (cur == entry && cur_id == entry->tx_id) {
             // 仍在表中：不立即删除，等待下一次覆盖回收
             entry->done.store(true, std::memory_order_release);
+            slot.status.store(TxnStatus::Done, std::memory_order_release);
             return;
         }
 
@@ -99,18 +123,46 @@ public:
         if (cur_id != txid) return TxnStatus::Evicted;
         auto* p = slot.ptr.load(std::memory_order_acquire);
         if (!p) return TxnStatus::Empty;
+        // 若事务对象已标记完成，则视为 Done；否则返回槽位记录的状态
         bool d = p->done.load(std::memory_order_acquire);
-        return d ? TxnStatus::Done : TxnStatus::InProgress;
+        if (d) return TxnStatus::Done;
+        return slot.status.load(std::memory_order_acquire);
     }
 
-    bool check_dependency_txn(TxnQueueEntry* txn_entry){ 
+    TxnQueueEntry* get_txnentry_by_txid(tx_id_t txid){
+        size_t idx = static_cast<size_t>(txid % txnTableSize_);
+        const Slot& slot = slots_[idx];
+        tx_id_t cur_id = slot.tx_id.load(std::memory_order_acquire);
+        if (cur_id != txid) return nullptr;
+        auto* p = slot.ptr.load(std::memory_order_acquire);
+        if (!p) return nullptr;
+        return p;
+    }
+
+    // 标记事务进入执行器阶段
+    void mark_enter_executor(TxnQueueEntry* entry) {
+        if (!entry) return;
+        size_t idx = static_cast<size_t>(entry->tx_id % txnTableSize_);
+        Slot& slot = slots_[idx];
+        TxnQueueEntry* cur = slot.ptr.load(std::memory_order_acquire);
+        tx_id_t cur_id = slot.tx_id.load(std::memory_order_acquire);
+        if (cur == entry && cur_id == entry->tx_id) {
+            slot.status.store(TxnStatus::InExecutorProgress, std::memory_order_release);
+        }
+        // 否则说明该事务已被新事务覆盖，忽略
+    }
+
+    bool check_dependency_txn(TxnQueueEntry* txn_entry, int call_id) { 
         bool wait = false; 
         for (auto dep_tx_id : txn_entry->dependencies) {
+            auto entry = get_txnentry_by_txid(dep_tx_id);
             auto status = get_status_by_tx_id(dep_tx_id);
             assert(status != TxnStatus::Empty);
-            if (status == TxnStatus::InProgress) {
+            if (status == TxnStatus::InRouteringProgress || status == TxnStatus::InExecutorProgress) {
                 wait = true;
-                logger_->warning("Transaction: " + std::to_string(txn_entry->tx_id) + " is waiting due to dependency in progress " + std::to_string(dep_tx_id));
+                logger_->warning("Callid: " + std::to_string(call_id) + " Transaction: " + std::to_string(txn_entry->tx_id) + " type: " + std::to_string(static_cast<int>(txn_entry->schedule_type))
+                    + " is waiting due to dependency in progress " + std::to_string(dep_tx_id) + " type: " + std::to_string(static_cast<int>(entry->schedule_type)) +
+                    " dependency txn Status: " + std::to_string(static_cast<int>(status)));
                 break;
             }
         }
@@ -121,6 +173,7 @@ private:
     struct Slot {
         std::atomic<TxnQueueEntry*> ptr{nullptr};
         std::atomic<tx_id_t> tx_id{0};
+        std::atomic<TxnStatus> status{TxnStatus::Empty};
     };
 
     size_t txnTableSize_;
@@ -129,6 +182,9 @@ private:
     // 已被覆盖但尚未完成的指针，待完成后删除
     std::unordered_set<TxnQueueEntry*> deferred_;
     std::mutex defer_mutex_;
+
+    // 当后续事务ready时调用的回调
+    std::function<void(std::vector<TxnQueueEntry*>)> on_ready_;
 
     Logger* logger_;
 };

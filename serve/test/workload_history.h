@@ -41,6 +41,14 @@ public:
         load_[node_id].fetch_add(1, std::memory_order_relaxed);
     }
 
+    // 记录多次事务路由
+    void record(int node_id, int count)
+    {
+        for (int i = 0; i < count; i++) {
+            record(node_id);
+        }
+    }
+
     // 获取当前所有节点窗口负载
     std::vector<int> get_loads() const
     {
