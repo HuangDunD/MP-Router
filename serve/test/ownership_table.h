@@ -28,6 +28,10 @@ public:
             table_[i].resize(MAX_DB_PAGE_NUM);
             for(page_id_t j = 0; j < MAX_DB_PAGE_NUM; j++) {
                 table_[i][j] = new OwnershipEntry();
+                table_[i][j]->mode = 1; // default exclusive ownership
+                // randomly assign owner
+                node_id_t owner = rand() % ComputeNodeCount;
+                table_[i][j]->owners.push_back(owner);
             }
         }
         // ownership_changes_per_txn_type 已在初始化列表中构造

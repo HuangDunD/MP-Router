@@ -37,15 +37,21 @@
 #define SmallBank_TX_TYPES 6
 enum class SmallBankTxType : int {
   kAmalgamate,
-  kBalance,
-  kDepositChecking,
   kSendPayment,
-  kTransactSaving,
+  kDepositChecking,
   kWriteCheck,
+  kBalance,
+  kTransactSavings
 };
 
-const std::string SmallBank_TX_NAME[SmallBank_TX_TYPES] = {"Amalgamate", "Balance", "DepositChecking", \
-"SendPayment", "TransactSaving", "WriteCheck"};
+const std::string SmallBank_TX_NAME[SmallBank_TX_TYPES] = {
+    "Amalgamate",
+    "SendPayment",
+    "DepositChecking",
+    "WriteCheck",
+    "Balance",
+    "TransactSavings"
+};
 
 // Table id
 enum class SmallBankTableType : uint64_t {
@@ -372,7 +378,14 @@ public:
         std::cout << "Table creation and pre-extension completed." << std::endl;
     }
     
-    void load_data(pqxx::connection *conn0);
+    // 表键→页映射，使用按 id 直接索引的向量以避免拷贝/搜索开销
+    struct TableKeyPageMap {
+        // 下标为账户 id(1..N)，值为对应数据页 page_id；0 表示未设置/异常
+        std::vector<int> checking_page;
+        std::vector<int> savings_page;
+    };
+
+    TableKeyPageMap load_data(pqxx::connection *conn0);
     
     void generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool);
 

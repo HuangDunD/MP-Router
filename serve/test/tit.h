@@ -66,12 +66,12 @@ public:
     // 将某个事务标记为完成。若它仍在表中，则仅置位完成标记；
     // 若它已被环形覆盖而进入延迟集合，则在此处删除并移除。
     // 设置当某个后续事务的入度(ref)变为0时的回调，用于立即调度
-    void set_ready_callback(std::function<void(std::vector<TxnQueueEntry*>)> cb) {
+    void set_ready_callback(std::function<void(std::vector<TxnQueueEntry*>, int)> cb) {
         std::lock_guard<std::mutex> lk(defer_mutex_);
         on_ready_ = std::move(cb);
     }
 
-    void mark_done(TxnQueueEntry* entry) {
+    void mark_done(TxnQueueEntry* entry, int finish_call_id = -1) {
         if (!entry) return;
         // std::cout << "Marking done " << entry->tx_id << "." << std::endl;
         // 直接按 tx_id 定位槽位
@@ -93,7 +93,7 @@ public:
         }
         if(!ready_txns.empty()){
             auto cb = on_ready_;
-            if (cb) cb(ready_txns);
+            if (cb) cb(ready_txns, finish_call_id);
         }
 
         if (cur == entry && cur_id == entry->tx_id) {
@@ -184,7 +184,7 @@ private:
     std::mutex defer_mutex_;
 
     // 当后续事务ready时调用的回调
-    std::function<void(std::vector<TxnQueueEntry*>)> on_ready_;
+    std::function<void(std::vector<TxnQueueEntry*>, int)> on_ready_;
 
     Logger* logger_;
 };

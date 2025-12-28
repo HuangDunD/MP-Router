@@ -49,13 +49,13 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
     }
 }
 
-void SmallBank::load_data(pqxx::connection *conn0) {
+SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
     auto smallbank_account = this->get_account_count();
     std::cout << "Loading data..." << std::endl;
     std::cout << "Will load " << smallbank_account << " accounts into checking and savings tables" << std::endl;
     // Load data into the database if needed
     // Insert data into checking and savings tables
-    const int num_threads = 16;  // Number of worker threads
+    const int num_threads = 30;  // Number of worker threads
     std::vector<std::thread> threads;
     const int chunk_size = smallbank_account / num_threads;
     // 这里创建一个导入数据的账户id的列表, 随机导入
@@ -65,7 +65,12 @@ void SmallBank::load_data(pqxx::connection *conn0) {
     std::random_device rd;
     std::mt19937 g(rd());
     std::shuffle(id_list.begin(), id_list.end(), g);
-    auto worker = [&id_list, smallbank_account](int start, int end) {
+    // 返回映射，按 id 直接索引，避免额外拷贝与查找开销
+    TableKeyPageMap ret;
+    ret.checking_page.resize(smallbank_account + 1);
+    ret.savings_page.resize(smallbank_account + 1);
+
+    auto worker = [&id_list, smallbank_account, &ret](int start, int end) {
         pqxx::connection conn00(DBConnection[0]);
         if (!conn00.is_open()) {
             std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
@@ -99,6 +104,8 @@ void SmallBank::load_data(pqxx::connection *conn0) {
                     // ctid 为 (page_id, tuple_index) 格式, 这里要把ctid转换为page_id
                     auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
                     int inserted_id = checking_result[0]["id"].as<int>();
+                    // 按 id 直接记录页号，避免拷贝 pair
+                    ret.checking_page[inserted_id] = page_id;
                 }
                 
                 // 执行savings表插入并获取位置信息
@@ -107,6 +114,7 @@ void SmallBank::load_data(pqxx::connection *conn0) {
                     std::string ctid = savings_result[0]["ctid"].as<std::string>();
                     auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
                     int inserted_id = savings_result[0]["id"].as<int>();
+                    ret.savings_page[inserted_id] = page_id;
                 }
                 
                 txn_create.commit();
@@ -144,6 +152,8 @@ void SmallBank::load_data(pqxx::connection *conn0) {
     }catch(const std::exception &e) {
         std::cerr << "Error while getting table size: " << e.what() << std::endl;
     }
+    // 返回映射供上层初始化 SmartRouter 的 key->page
+    return ret;
 }
 
 // Create or replace SmallBank stored procedures
@@ -199,6 +209,58 @@ void SmallBank::create_smallbank_stored_procedures(pqxx::connection* conn) {
             $$;
             )SQL");
 
+            // txn.exec(R"SQL(
+            // CREATE OR REPLACE FUNCTION sp_amalgamate(a1 INT, a2 INT)
+            // RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
+            // LANGUAGE plpgsql AS $$
+            // DECLARE
+            //     c1_ctid TID;
+            //     s1_ctid TID;
+            //     c2_ctid TID;
+            //     c1_bal INT;
+            //     s1_bal INT;
+            //     total_bal INT;
+            // BEGIN
+            //     -- 1) 先锁 checking 中 a1/a2 (固定顺序)
+            //     PERFORM 1
+            //     FROM checking c
+            //     WHERE c.id IN (a1, a2)
+            //     ORDER BY c.id
+            //     FOR UPDATE;
+
+            //     -- 2) 再锁 savings 中 a1 (固定在 checking 之后拿锁，形成全局顺序)
+            //     PERFORM 1
+            //     FROM savings s
+            //     WHERE s.id = a1
+            //     FOR UPDATE;
+
+            //     -- 3) 更新 checking(a1) -> 0
+            //     UPDATE checking c
+            //     SET balance = 0
+            //     WHERE c.id = a1
+            //     RETURNING c.ctid, c.balance INTO c1_ctid, c1_bal;
+
+            //     -- 4) 更新 savings(a1) -> 0
+            //     UPDATE savings s
+            //     SET balance = 0
+            //     WHERE s.id = a1
+            //     RETURNING s.ctid, s.balance INTO s1_ctid, s1_bal;
+
+            //     total_bal := COALESCE(c1_bal,0) + COALESCE(s1_bal,0);
+
+            //     -- 5) 更新 checking(a2) -> total
+            //     UPDATE checking c2
+            //     SET balance = total_bal
+            //     WHERE c2.id = a2
+            //     RETURNING c2.ctid, c2.balance INTO c2_ctid, balance;
+
+            //     RETURN QUERY SELECT 'checking'::text, a1, c1_ctid, 0, txid_current();
+            //     RETURN QUERY SELECT 'savings'::text,  a1, s1_ctid, 0, txid_current();
+            //     RETURN QUERY SELECT 'checking'::text, a2, c2_ctid, balance, txid_current();
+            // END;
+            // $$;
+            // )SQL");
+
             // SendPayment: a1.checking -= 10, a2.checking += 10
             txn.exec(R"SQL(
             CREATE OR REPLACE FUNCTION sp_send_payment(a1 INT, a2 INT)
@@ -224,6 +286,43 @@ void SmallBank::create_smallbank_stored_procedures(pqxx::connection* conn) {
                 RETURN QUERY SELECT 'checking'::text, a2, c2_ctid, c2_bal, txid_current();
             END; $$;
             )SQL");
+
+            // SendPayment: a1.checking -= 10, a2.checking += 10
+            // txn.exec(R"SQL(
+            // CREATE OR REPLACE FUNCTION sp_send_payment(a1 INT, a2 INT)
+            // RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
+            // LANGUAGE plpgsql AS $$
+            // DECLARE
+            //     v_txid BIGINT;
+            // BEGIN
+            //     v_txid := txid_current();
+
+            //     -- a1 == a2 时按常识应是 no-op(否则 CASE 会只命中第一条，变成 -10)
+            //     IF a1 = a2 THEN
+            //         RETURN QUERY
+            //         SELECT 'checking'::text, c.id, c.ctid, c.balance, v_txid
+            //         FROM checking c
+            //         WHERE c.id = a1;
+            //         RETURN;
+            //     END IF;
+
+            //     RETURN QUERY
+            //     WITH upd AS (
+            //         UPDATE checking AS c
+            //         SET balance = c.balance + CASE
+            //             WHEN c.id = a1 THEN -10
+            //             WHEN c.id = a2 THEN  10
+            //         END
+            //         WHERE c.id IN (a1, a2)
+            //         RETURNING c.id, c.ctid, c.balance
+            //     )
+            //     SELECT 'checking'::text, u.id, u.ctid, u.balance, v_txid
+            //     FROM upd u
+            //     ORDER BY u.id;
+
+            // END;
+            // $$;
+            // )SQL");
 
             // DepositChecking: a1.checking += 100
             txn.exec(R"SQL(
@@ -266,6 +365,30 @@ void SmallBank::create_smallbank_stored_procedures(pqxx::connection* conn) {
                 RETURN QUERY SELECT 'checking'::text, a1, c_ctid, c_bal, txid_current();
             END; $$;
             )SQL");
+
+            // // new WriteCheck: update savings(a1) -= 50, read checking(a1)
+            // txn.exec(R"SQL(
+            // CREATE OR REPLACE FUNCTION sp_write_check(a1 INT)
+            // RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
+            // LANGUAGE plpgsql AS $$
+            // DECLARE
+            //     c_ctid TID;
+            //     c_bal  INT;
+            //     s_ctid TID;
+            //     s_bal  INT;
+            // BEGIN
+            //     SELECT c.ctid, c.balance INTO c_ctid, c_bal
+            //     FROM checking c WHERE c.id = a1;
+
+            //     UPDATE savings s
+            //     SET balance = s.balance - 50
+            //     WHERE s.id = a1
+            //     RETURNING s.ctid, s.balance INTO s_ctid, s_bal;
+
+            //     RETURN QUERY SELECT 'checking'::text, a1, c_ctid, c_bal, txid_current();
+            //     RETURN QUERY SELECT 'savings'::text,  a1, s_ctid, s_bal, txid_current();
+            // END; $$;
+            // )SQL");
 
             // Balance: read checking(a1), savings(a1)
             txn.exec(R"SQL(

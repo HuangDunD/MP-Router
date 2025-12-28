@@ -29,6 +29,9 @@
 std::vector<TxnQueue*> txn_queues; // one queue per compute node
 std::vector<std::atomic<int>> exec_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
 
+// SmallBank 数据加载时产生的键→页映射（按 id 直接索引），用于初始化 Router
+static SmallBank::TableKeyPageMap g_smallbank_key_page_map;
+
 // thread parameters structure for DB connector threads
 struct thread_params
 {
@@ -515,7 +518,8 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         timespec pop_start_time, pop_end_time;
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        int call_id;
+        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
         // if(WarmupEnd)
         //     logger_->info("Compute Node " + std::to_string(compute_node_id) + 
         //                 " Thread " + std::to_string(params->thread_id) + 
@@ -546,6 +550,10 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         }
 
         for (auto& txn_entry : txn_entries) {
+            // 计时
+            timespec start_time, end_time;
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+
             exe_count++;
             exec_txn_cnt_per_node[compute_node_id]++;
 
@@ -567,10 +575,6 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             assert(tables.size() == keys.size());
             std::vector<bool> rw = smallbank->get_rw_by_txn_type(txn_type);
             std::vector<page_id_t> ctid_ret_page_ids;
-
-            // 计时
-            timespec start_time, end_time;
-            clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             // !不需要外层事务
             pqxx::nontransaction txn(*con);
@@ -640,8 +644,66 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
-            tit->mark_done(txn_entry); // 一体化：标记完成，删除由 TIT 统一管理
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+            tit->mark_done(txn_entry, call_id); // 一体化：标记完成，删除由 TIT 统一管理
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            double mark_done_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                               (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_mark_done_time(params->compute_node_id_connecter, params->thread_id, mark_done_time);
+            
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+            for (auto account : txn_entry->accounts) {
+                if (account == 1) {
+                    // log the hotspot exection
+                    logger_->info("Batch " + std::to_string(txn_entry->batch_id) + 
+                        " Node: " + std::to_string(compute_node_id) + 
+                        " txn id: " + std::to_string(txn_entry->tx_id) + 
+                        " access account " + std::to_string(account) + 
+                        " exec time: " + std::to_string(exec_time)
+                    );
+                }
+            }
+            if (exec_time > 10) 
+                logger_->warning("Node: " + std::to_string(compute_node_id) + "Transaction execution time exceeded 10 ms: " + std::to_string(exec_time) + 
+                " ms, call id: " + std::to_string(call_id) + " Txn op: " + [&]() {
+                    std::string os;
+                    os += "txn_type: " + std::to_string(txn_entry->txn_type) + " ";
+                    os += "table: ";
+                    for(int i= 0; i < tables.size(); i++) {
+                        os += std::to_string(tables[i]) + " ";
+                    }
+                    os += "key: ";
+                    for(int i= 0; i < keys.size(); i++) {
+                        os += std::to_string(keys[i]) + " ";
+                    }
+                    os += "original pages: ";
+                    for(int i= 0; i < txn_entry->accessed_page_ids.size(); i++) {
+                        os += std::to_string(txn_entry->accessed_page_ids[i]) + " ";
+                    }
+                    os += " return pages: ";
+                    for(int i= 0; i < ctid_ret_page_ids.size(); i++) {
+                        os += std::to_string(ctid_ret_page_ids[i]) + " ";
+                    }
+                    os += " group id: " + std::to_string(txn_entry->group_id) + " ";
+                    os += " dependency group ids: ";
+                    for(auto dep_id : txn_entry->dependency_group_id) {
+                        os += std::to_string(dep_id) + " ";
+                    }
+                    os += " batch id: " + std::to_string(txn_entry->batch_id) + " ";
+                    return os;
+                }());
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            double log_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                               (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_log_debug_info_time(params->compute_node_id_connecter, params->thread_id, log_time);
         }
+        struct timespec start_time, end_time;
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
+        logger_->info("Finished processing batch with call_id: " + std::to_string(call_id));
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        double log_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                           (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+        smart_router->add_worker_thread_log_debug_info_time(params->compute_node_id_connecter, params->thread_id, log_time);
     }
     std::cout << "Finished running smallbank transactions via stored procedures." << std::endl;
 }
@@ -1347,6 +1409,9 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
     // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
 
+    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+
     // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
@@ -1395,8 +1460,9 @@ int main(int argc, char *argv[]) {
 
         // load data into the database
         std::cout << "Loading data into the database..." << std::endl;
+        // 若为 SmallBank，记录键→页映射以便后续初始化 Router 时跳过 DB 扫描
         if (Workload_Type == 0) {
-            smallbank->load_data(conn0);
+            g_smallbank_key_page_map = smallbank->load_data(conn0);
         } else if (Workload_Type == 1) {
             ycsb->load_data(conn0);
         }
@@ -1462,24 +1528,50 @@ int main(int argc, char *argv[]) {
     SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, 2*ComputeNodeCount*worker_threads*BatchRouterProcessSize);
     TxnPool* txn_pool = new TxnPool(4, TxnPoolMaxSize, tit);
     auto shared_txn_queue = new SharedTxnQueue(tit, logger_, TxnQueueMaxSize);
+    auto pending_txn_queue = new PendingTxnSet(tit, logger_);
     // initialize the transaction queues for each compute node connection
     for (int i = 0; i < ComputeNodeCount; i++) { 
-        txn_queues.push_back(new TxnQueue(tit, shared_txn_queue, logger_, i, TxnQueueMaxSize));
+        txn_queues.push_back(new TxnQueue(tit, shared_txn_queue, pending_txn_queue, logger_, i, TxnQueueMaxSize));
     }
     // Initialize NewMetis
     NewMetis* metis = new NewMetis(logger_);
 
     SmartRouter::Config cfg{};
-    SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, worker_threads, index_service, metis, logger_, smallbank, ycsb);
+    SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, pending_txn_queue, worker_threads, index_service, metis, logger_, smallbank, ycsb);
     std::cout << "Smart Router initialized." << std::endl;
 
     // TIT: 当后续事务的入度变为0时，立即调度到目标节点
-    tit->set_ready_callback([smart_router](std::vector<TxnQueueEntry*> entry){
-        smart_router->schedule_ready_txn(std::move(entry));
+    tit->set_ready_callback([smart_router](std::vector<TxnQueueEntry*> entry, int finish_call_id){
+        smart_router->schedule_ready_txn(std::move(entry), finish_call_id);
     });
 
     // Initialize the key-page map
-    init_key_page_map(conn0, smart_router, smallbank, ycsb);
+    if (!SKIP_LOAD_DATA && Workload_Type == 0) {
+        int N = smallbank->get_account_count();
+        for (int id = 1; id <= N; ++id) {
+            if (id < (int)g_smallbank_key_page_map.checking_page.size()) {
+                int cpg = g_smallbank_key_page_map.checking_page[id];
+                if (cpg >= 0) {
+                    smart_router->initial_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, cpg);
+                }
+                else std::cout << "Warning: Invalid checking page for account " << id << std::endl;
+            }
+            if (id < (int)g_smallbank_key_page_map.savings_page.size()) {
+                int spg = g_smallbank_key_page_map.savings_page[id];
+                if (spg >= 0) {
+                    smart_router->initial_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, spg);
+                }
+                else std::cout << "Warning: Invalid savings page for account " << id << std::endl;
+            }
+        }
+#if MLP_PREDICTION
+        smart_router->mlp_train_after_init();
+#endif
+        std::cout << "Data page mapping initialization from load_data completed." << std::endl;
+    } else {
+        // 走原有从数据库扫描初始化的路径
+        init_key_page_map(conn0, smart_router, smallbank, ycsb);
+    }
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
@@ -1563,6 +1655,8 @@ int main(int argc, char *argv[]) {
     for(auto& thread : db_conn_threads) {
         thread.join();
     }
+    snapshot2 = take_router_snapshot(smart_router);
+
     // Stop the client transaction generation threads
     for(auto& thread : client_gen_txn_threads) {
         thread.join();
@@ -1581,7 +1675,6 @@ int main(int argc, char *argv[]) {
     std::cout << "\n=== Performance Report ===" << std::endl;
     std::cout << "System mode: " << SYSTEM_MODE << " !!!" << std::endl;
     if(smart_router) {
-        snapshot2 = take_router_snapshot(smart_router);
         print_diff_snapshot(snapshot1, snapshot2);
     }
     {

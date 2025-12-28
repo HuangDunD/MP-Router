@@ -29,4 +29,7 @@ struct TxnQueueEntry {
     std::vector<TxnQueueEntry*> after_txns; // 依赖当前事务的后续事务列表
     std::atomic<int> ref = 0; // 引用计数, 表示前序依赖事务数量
     TxnScheduleType schedule_type = TxnScheduleType::NONE; // 0: unconflict, 1: schedule_prior, 2: ownership_ok_back 
+    int group_id;
+    int batch_id;
+    std::vector<int> dependency_group_id;
 };

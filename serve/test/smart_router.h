@@ -112,10 +112,14 @@ public:
         std::vector<std::vector<double>> worker_thread_exec_time_ms;
         std::vector<std::vector<double>> pop_txn_from_queue_ms_per_thread;
         std::vector<std::vector<double>> wait_next_batch_ms_per_thread;
+        std::vector<std::vector<double>> mark_done_ms_per_thread;
+        std::vector<std::vector<double>> log_debug_info_ms_per_thread;
 
         std::vector<double> pop_txn_total_ms_per_node;
         std::vector<double> wait_next_batch_total_ms_per_node;
         std::vector<double> sum_worker_thread_exec_time_ms_per_node;
+        std::vector<double> mark_done_total_ms_per_node;
+        std::vector<double> log_debug_info_total_ms_per_node;
     };
 
     struct Stats {
@@ -185,7 +189,7 @@ public:
     };
 
 public:
-    explicit SmartRouter(const Config &cfg, TxnPool* txn_pool, std::vector<TxnQueue*> txn_queue, int worker_threads,
+    explicit SmartRouter(const Config &cfg, TxnPool* txn_pool, std::vector<TxnQueue*> txn_queue, PendingTxnSet* pending_txn_queue_, int worker_threads,
             BtreeIndexService *btree_service, NewMetis* metis = nullptr, Logger* logger_ptr = nullptr, SmallBank* smallbank = nullptr, YCSB* ycsb = nullptr)
         : cfg_(cfg),
           txn_pool_(txn_pool),
@@ -199,7 +203,9 @@ public:
           routed_txn_cnt_per_node(MaxComputeNodeCount), 
           batch_finished_flags(MaxComputeNodeCount, 0),
           workload_balance_penalty_weights_(MaxComputeNodeCount, 0),
+          remain_queue_balance_penalty_weights_(MaxComputeNodeCount, 0),
           load_tracker_(ComputeNodeCount),
+          pending_txn_queue_(pending_txn_queue_),
           smallbank_(smallbank),
           ycsb_(ycsb)
     {
@@ -213,10 +219,14 @@ public:
         time_stats_.pop_txn_from_queue_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
         time_stats_.wait_next_batch_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
         time_stats_.worker_thread_exec_time_ms.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.mark_done_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.log_debug_info_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
 
         time_stats_.pop_txn_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.wait_next_batch_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.sum_worker_thread_exec_time_ms_per_node.resize(ComputeNodeCount, 0.0); 
+        time_stats_.mark_done_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.log_debug_info_total_ms_per_node.resize(ComputeNodeCount, 0.0);
 
         // for logging access key
         #if LOG_ACCESS_KEY
@@ -274,6 +284,7 @@ public:
             pthread_setname_np(pthread_self(), thread_name.c_str());
             while(true){
                 this->compute_load_balance_penalty_weights();
+                this->compute_remain_queue_balance_penalty_weights();
                 std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 每100ms计算一次负载均衡惩罚权重
             }
         });
@@ -393,6 +404,16 @@ public:
     }
 #endif // MLP_PREDICTION
 
+    void forbid_update_hot_entry() {
+        std::unique_lock<std::shared_mutex> lock(hot_mutex_);
+        enable_hot_update = false; 
+    }
+
+    void allow_update_hot_entry() {
+        std::unique_lock<std::shared_mutex> lock(hot_mutex_);
+        enable_hot_update = true; 
+    }
+
     // 可能Update SQL执行之后数据页所在的位置, 根据returning ctid 进行更新key-page映射
     // 如果key不存在, 则不进行任何操作
     inline void update_key_page(TxnQueueEntry* txn, std::vector<table_id_t>& table_ids, std::vector<itemkey_t>& keys, std::vector<bool>& rw, 
@@ -425,7 +446,8 @@ public:
                 if (it != hot_key_map.end()) {
                     ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], ctid_ret_pages[i], routed_node_id);
                     ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], original_page, routed_node_id); 
-                    it->second.page = ctid_ret_pages[i];
+                    // 更新page
+                    if(enable_hot_update) it->second.page = ctid_ret_pages[i];
                     // 毫秒级时间戳
                     it->second.last_access_time = static_cast<uint64_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -992,6 +1014,14 @@ public:
         time_stats_.wait_next_batch_ms_per_thread[node_id][thread_id] += wait_time_ms;
     }
 
+    void add_worker_thread_mark_done_time(node_id_t node_id, int thread_id, double mark_done_time_ms) {
+        time_stats_.mark_done_ms_per_thread[node_id][thread_id] += mark_done_time_ms;
+    }
+
+    void add_worker_thread_log_debug_info_time(node_id_t node_id, int thread_id, double log_time_ms) {
+        time_stats_.log_debug_info_ms_per_thread[node_id][thread_id] += log_time_ms;
+    }
+
     void Record_time_ms(bool a, bool b, bool c) {
         if(a) {
             // fetch time
@@ -1035,6 +1065,16 @@ public:
             for (const auto& t : time_stats_.wait_next_batch_ms_per_thread[i]) {
                 time_stats_.wait_next_batch_total_ms_per_node[i] += t;
             }
+
+            time_stats_.mark_done_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.mark_done_ms_per_thread[i]) {
+                time_stats_.mark_done_total_ms_per_node[i] += t;
+            }
+
+            time_stats_.log_debug_info_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.log_debug_info_ms_per_thread[i]) {
+                time_stats_.log_debug_info_total_ms_per_node[i] += t;
+            }
         }
 
         return ;
@@ -1068,6 +1108,7 @@ private:
     std::vector<node_id_t> checkif_txn_ownership_ok(SchedulingCandidateTxn* sc, std::unordered_map<node_id_t, int>& ownership_node_count);
 
     std::vector<double> compute_load_balance_penalty_weights();
+    std::vector<double> compute_remain_queue_balance_penalty_weights();
 
     std::string get_txn_queue_now_status(){
         std::string res; 
@@ -1451,6 +1492,7 @@ private:
     std::unordered_map<DataItemKey, HotEntry, DataItemKeyHash> hot_key_map;
     std::list<DataItemKey> hot_lru_; // 前端为最新，后端为最旧
     std::shared_mutex hot_mutex_;
+    bool enable_hot_update = true;
 
     // 二级缓存: B+ 树的非叶子节点, 在路由层通过维护B+树的中间节点，通过pageinspect插件访问B+树的叶子节点获取key->page的映射
     BtreeIndexService *btree_service_;
@@ -1480,6 +1522,7 @@ private:
 
     // 负载均衡权重
     std::vector<double> workload_balance_penalty_weights_; // 权重越高, 说明负载越低; 负载越低的节点被选中的概率越大
+    std::vector<double> remain_queue_balance_penalty_weights_; // 权重越高, 说明剩余队列越短; 剩余队列越短的节点被选中的概率越大;
 
     // log access key
     std::mutex log_mutex;
@@ -1508,21 +1551,16 @@ private:
 public:
     // 注册一个尚未就绪的事务，用于后续ready时快速调度
     void register_pending_txn(TxnQueueEntry* entry, int node_id) {
-        if (!entry) return;
-        std::lock_guard<std::mutex> lk(pending_mutex_);
-        pending_target_node_[entry->tx_id] = node_id;
+        if (!entry) return; 
+        pending_txn_queue_->add_pendingtxn_on_node(entry, node_id);
     }
 
     int get_pending_txn_count() {
-        std::lock_guard<std::mutex> lk(pending_mutex_);
-        return pending_target_node_.size();
+        return pending_txn_queue_->get_pending_txn_count();
     }
 
     // TIT通知后续事务ready时调用：立即将其推入对应节点队列执行
-    void schedule_ready_txn(std::vector<TxnQueueEntry*> entries);
+    void schedule_ready_txn(std::vector<TxnQueueEntry*> entries, int finish_call_id);
 
-private:
-    std::unordered_map<tx_id_t, int> pending_target_node_;
-    std::condition_variable pending_cv_;
-    std::mutex pending_mutex_;
+    PendingTxnSet* pending_txn_queue_;
 };

@@ -84,6 +84,8 @@ struct RouterStatSnapshot {
     std::vector<double> pop_txn_total_ms_per_node;
     std::vector<double> wait_next_batch_total_ms_per_node;
     std::vector<double> sum_worker_thread_exec_time_ms_per_node;
+    std::vector<double> mark_done_total_ms_per_node;
+    std::vector<double> log_debug_info_total_ms_per_node;
 
     // Helpers
     void print_snapshot() const {
@@ -165,6 +167,8 @@ struct RouterStatSnapshot {
             std::cout << "  Average Pop Txn From Queue Time: " << pop_txn_total_ms_per_node[i] / worker_threads << " ms" << std::endl; 
             std::cout << "  Average Wait Next Batch Time: " << wait_next_batch_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
             std::cout << "  Average Worker Thread Exec Time: " << sum_worker_thread_exec_time_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            std::cout << "  Average Mark Done Time: " << mark_done_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            std::cout << "  Average Log Debug Info Time: " << log_debug_info_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
         }
         std::cout << "------------------------------------------" << std::endl;
         return;
@@ -253,6 +257,8 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.wait_next_batch_total_ms_per_node = tdb.wait_next_batch_total_ms_per_node;
     snap.sum_worker_thread_exec_time_ms_per_node = tdb.sum_worker_thread_exec_time_ms_per_node;
     snap.push_txn_to_queue_ms = tdb.push_txn_to_queue_ms;
+    snap.mark_done_total_ms_per_node = tdb.mark_done_total_ms_per_node;
+    snap.log_debug_info_total_ms_per_node = tdb.log_debug_info_total_ms_per_node;
     return snap;
 }
 
@@ -350,6 +356,8 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
         d.pop_txn_total_ms_per_node.push_back( b.pop_txn_total_ms_per_node[i] - a.pop_txn_total_ms_per_node[i] );
         d.wait_next_batch_total_ms_per_node.push_back( b.wait_next_batch_total_ms_per_node[i] - a.wait_next_batch_total_ms_per_node[i] );
         d.sum_worker_thread_exec_time_ms_per_node.push_back( b.sum_worker_thread_exec_time_ms_per_node[i] - a.sum_worker_thread_exec_time_ms_per_node[i] );
+        d.mark_done_total_ms_per_node.push_back( b.mark_done_total_ms_per_node[i] - a.mark_done_total_ms_per_node[i] );
+        d.log_debug_info_total_ms_per_node.push_back( b.log_debug_info_total_ms_per_node[i] - a.log_debug_info_total_ms_per_node[i] );
     }
     d.push_txn_to_queue_ms = b.push_txn_to_queue_ms - a.push_txn_to_queue_ms;
     return d;
