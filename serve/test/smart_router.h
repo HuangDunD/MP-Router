@@ -635,6 +635,8 @@ public:
 
     void get_route_primary_batch_schedule_v2(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch, std::vector<pqxx::connection *> &thread_conns);
 
+    void get_route_primary_batch_schedule_v3(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch, std::vector<pqxx::connection *> &thread_conns);
+
     // 这个是路由层的主循环, 他不断从txn_pool中取出事务进行路由
     // 进行的路由决策会放入txn_queue中，供执行层消费
     void run_router_worker(int thread_id) {
@@ -926,7 +928,8 @@ public:
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             if(SYSTEM_MODE == 11) {
-                this->get_route_primary_batch_schedule_v2(txn_batch, thread_conns_vec);
+                // this->get_route_primary_batch_schedule_v2(txn_batch, thread_conns_vec);
+                this->get_route_primary_batch_schedule_v3(txn_batch, thread_conns_vec);
             }
             else assert(false);
 
@@ -1557,6 +1560,10 @@ public:
 
     int get_pending_txn_count() {
         return pending_txn_queue_->get_pending_txn_count();
+    }
+
+    int get_pending_txn_count_on_node(int node_id) {
+        return pending_txn_queue_->get_pending_txn_cnt_on_node(node_id);
     }
 
     // TIT通知后续事务ready时调用：立即将其推入对应节点队列执行

@@ -234,7 +234,7 @@ public:
         return total;
     }
 
-    int pending_txn_cnt_on_node(int node_id){
+    int get_pending_txn_cnt_on_node(int node_id){
         std::unique_lock<std::mutex> lock(pending_mutex_);
         return pending_txn_cnt_per_node_[node_id];
     }
@@ -298,7 +298,15 @@ public:
         if (notify) {
             pending_cv_.notify_all();
         }
-        logger_->info("[PendingTxnSet] Pop DAG-ready pending txns cnt: " + std::to_string(to_schedule.size()) 
+        logger_->info("[PendingTxnSet] Pop DAG-ready pending txns cnt: " + 
+            [&]() {
+                std::string s;
+                for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+                    int cnt = static_cast<int>(to_schedule[node_id].size());
+                    s += "Node " + std::to_string(node_id) + ": " + std::to_string(cnt) + "; ";
+                }
+                return s;
+            }()
             + " now pending txn cnt: " + [&]() {
                 std::string s;
                 for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
@@ -365,7 +373,8 @@ public:
         if(!dag_txn_queue_->empty()){
             // 优先取 DAG-ready，若过大则分块，并与 regular 批次做混合以降低冲突
             bool inflight_active = dag_txn_queue_->is_inflight_active();
-            if(inflight_active || dag_txn_queue_->top_batch_size() > worker_threads * 3) {
+            // if(inflight_active || dag_txn_queue_->top_batch_size() > worker_threads * 3) {
+            if(inflight_active || dag_txn_queue_->top_batch_size() > 10000) {
                 // !get the inflight chunk
                 bool last_chunk = false;
                 auto dag_chunk = std::move(dag_txn_queue_->pop_ready_chunk(&last_chunk));
@@ -648,7 +657,7 @@ public:
     }
 
     int get_pending_txn_cnt_on_node(int node_id) {
-        return pending_txn_queue_->pending_txn_cnt_on_node(node_id);
+        return pending_txn_queue_->get_pending_txn_cnt_on_node(node_id);
     }
 
     // shared txn queue operations
