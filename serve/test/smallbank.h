@@ -18,11 +18,11 @@
 
 /* STORED PROCEDURE EXECUTION FREQUENCIES (0-100) */
 #define FREQUENCY_AMALGAMATE 15
-#define FREQUENCY_BALANCE 15
-#define FREQUENCY_DEPOSIT_CHECKING 15
 #define FREQUENCY_SEND_PAYMENT 25
-#define FREQUENCY_TRANSACT_SAVINGS 15
+#define FREQUENCY_DEPOSIT_CHECKING 15
 #define FREQUENCY_WRITE_CHECK 15
+#define FREQUENCY_BALANCE 15
+#define FREQUENCY_TRANSACT_SAVINGS 15
 
 // #define FREQUENCY_AMALGAMATE 0
 // #define FREQUENCY_BALANCE 0
@@ -133,16 +133,16 @@ public:
         int r = rand() % 100;
         if (r < FREQUENCY_AMALGAMATE) {
             return 0; // Amalgamate
-        } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE) {
-            return 1; // Balance
-        } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE + FREQUENCY_DEPOSIT_CHECKING) {
+        } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_SEND_PAYMENT) {
+            return 1; // SendPayment
+        } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_SEND_PAYMENT + FREQUENCY_DEPOSIT_CHECKING) {
             return 2; // DepositChecking
-        } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE + FREQUENCY_DEPOSIT_CHECKING + FREQUENCY_SEND_PAYMENT) {
-            return 3; // SendPayment
-        } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_BALANCE + FREQUENCY_DEPOSIT_CHECKING + FREQUENCY_SEND_PAYMENT + FREQUENCY_TRANSACT_SAVINGS) {
-            return 4; // TransactSaving
+        } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_SEND_PAYMENT + FREQUENCY_DEPOSIT_CHECKING + FREQUENCY_WRITE_CHECK) {
+            return 3; // WriteCheck
+        } else if (r < FREQUENCY_AMALGAMATE + FREQUENCY_SEND_PAYMENT + FREQUENCY_DEPOSIT_CHECKING + FREQUENCY_WRITE_CHECK + FREQUENCY_BALANCE) {
+            return 4; // Balance
         } else {
-            return 5; // WriteCheck
+            return 5; // TransactSaving
         }
     }
 
@@ -299,8 +299,8 @@ public:
         // Create a new table and insert data
         try {
             pqxx::work txn(*conn0);
-            txn.exec("CREATE unlogged TABLE checking (id INT, balance INT, city INT, name CHAR(500)) WITH (FILLFACTOR = 50)");
-            txn.exec("CREATE unlogged TABLE savings (id INT, balance INT, city INT, name CHAR(500)) WITH (FILLFACTOR = 50)");
+            txn.exec("CREATE unlogged TABLE checking (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
+            txn.exec("CREATE unlogged TABLE savings (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
             // create index
             txn.exec("CREATE INDEX idx_checking_id ON checking (id)");
             txn.exec("CREATE INDEX idx_savings_id ON savings (id)");
@@ -373,8 +373,49 @@ public:
                 std::cerr << "Error while pre-extending savings table: " << e.what() << std::endl;
             }
         });
+
+        std::thread extend_thread3([](){
+            pqxx::connection conn_extend(DBConnection[0]);
+            if (!conn_extend.is_open()) {
+                std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+                return;
+            }
+            try{
+                // pg not support
+                pqxx::nontransaction txn(conn_extend);
+                // pre-extend table to avoid frequent page extend during txn processing
+                std::string extend_sql = "SELECT sys_extend('idx_checking_id', " + std::to_string(PreExtendIndexPageSize) + ")";
+                txn.exec(extend_sql);
+                std::cout << "Pre-extended idx_checking_id index." << std::endl;
+            }
+            catch (const std::exception &e) {
+                std::cerr << "Error while pre-extending idx_checking_id index: " << e.what() << std::endl;
+            }
+        });
+
+        std::thread extend_thread4([](){
+            pqxx::connection conn_extend(DBConnection[0]);
+            if (!conn_extend.is_open()) {
+                std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+                return;
+            }
+            try{
+                // pg not support
+                pqxx::nontransaction txn(conn_extend);
+                // pre-extend table to avoid frequent page extend during txn processing
+                std::string extend_sql = "SELECT sys_extend('idx_savings_id', " + std::to_string(PreExtendIndexPageSize) + ")";
+                txn.exec(extend_sql);
+                std::cout << "Pre-extended idx_savings_id index." << std::endl;
+            }
+            catch (const std::exception &e) {
+                std::cerr << "Error while pre-extending idx_savings_id index: " << e.what() << std::endl;
+            }
+        });
+        
         extend_thread1.join();
         extend_thread2.join();
+        extend_thread3.join();
+        extend_thread4.join();
         std::cout << "Table creation and pre-extension completed." << std::endl;
     }
     

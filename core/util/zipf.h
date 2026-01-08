@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <iostream>
 
 #include "util/fast_random.h"
 
@@ -15,7 +16,7 @@ inline long unsigned int GetCPUCycle() {
 
 class ZipfGen {
  public:
-  ZipfGen(uint64_t n, double theta, uint64_t rand_seed) {
+  ZipfGen(uint64_t n, double theta, uint64_t rand_seed, uint64_t num_buckets = 4, std::vector<uint64_t>* hottest_keys_ptr = nullptr) {
     assert(n > 0);
     if (theta > 0.992 && theta < 1)
       fprintf(stderr, "warning: theta > 0.992 will be inaccurate due to approximation\n");
@@ -28,10 +29,26 @@ class ZipfGen {
       return;
     }
     assert(theta == -1. || (theta >= 0. && theta < 1.) || theta >= 40.);
-    n_ = n;
+    
+    num_buckets_ = num_buckets > 0 ? num_buckets : 1;
+    if (n < num_buckets_) num_buckets_ = 1;
+    n_ = n / num_buckets_;
+    if (n_ == 0) n_ = 1;
+
+    std::string hottest_keys_info = " [";
+    for (int i=0; i< num_buckets_; i++) {
+      hottest_keys_info += std::to_string(i * n_);
+      if (i != num_buckets_ -1) hottest_keys_info += ", ";
+      if (hottest_keys_ptr) {
+          hottest_keys_ptr->push_back(i * n_ + 1); 
+      }
+    }
+    hottest_keys_info += "]";
+    // std::cout << "ZipfGen initialized: n=" << n << ", theta=" << theta << ", num_buckets=" << num_buckets_ << ", hottest_keys=" << hottest_keys_info << std::endl;
+
     theta_ = theta;
     if (theta == -1.) {
-      seq_ = rand_seed % n;
+      seq_ = rand_seed % n_;
       alpha_ = 0;  // unused
       thres_ = 0;  // unused
     } else if (theta > 0. && theta < 1.) {
@@ -63,6 +80,7 @@ class ZipfGen {
     eta_ = src.eta_;
     seq_ = src.seq_;
     rand_ = src.rand_;
+    num_buckets_ = src.num_buckets_;
   }
 
   ZipfGen(const ZipfGen& src, uint64_t rand_seed) {
@@ -76,6 +94,7 @@ class ZipfGen {
     eta_ = src.eta_;
     seq_ = src.seq_;
     rand_ = Rand(rand_seed);
+    num_buckets_ = src.num_buckets_;
   }
 
   ZipfGen& operator=(const ZipfGen& src) {
@@ -89,10 +108,14 @@ class ZipfGen {
     eta_ = src.eta_;
     seq_ = src.seq_;
     rand_ = src.rand_;
+    num_buckets_ = src.num_buckets_;
     return *this;
   }
 
-  void change_n(uint64_t n) { n_ = n; }
+  void change_n(uint64_t n) { 
+      n_ = n / num_buckets_; 
+      if (n_ == 0) n_ = 1;
+  }
 
   uint64_t next() {
     if (last_n_ != n_) {
@@ -105,15 +128,15 @@ class ZipfGen {
       dbl_n_ = (double)n_;
     }
 
+    uint64_t val = 0;
     if (theta_ == -1.) {
-      uint64_t v = seq_;
+      val = seq_;
       if (++seq_ >= n_) seq_ = 0;
-      return v;
     } else if (theta_ == 0.) {
       double u = rand_.next_f64();
-      return (uint64_t)(dbl_n_ * u);
+      val = (uint64_t)(dbl_n_ * u);
     } else if (theta_ >= 40.) {
-      return 0UL;
+      val = 0UL;
     } else {
       // from J. Gray et al. Quickly generating billion-record synthetic
       // databases. In SIGMOD, 1994.
@@ -122,16 +145,22 @@ class ZipfGen {
       double u = rand_.next_f64();
       double uz = u * zetan_;
       if (uz < 1.)
-        return 0UL;
+        val = 0UL;
       else if (uz < thres_)
-        return 1UL;
+        val = 1UL;
       else {
         uint64_t v =
             (uint64_t)(dbl_n_ * pow_approx(eta_ * (u - 1.) + 1., alpha_));
         if (v >= n_) v = n_ - 1;
-        return v;
+        val = v;
       }
     }
+    
+    if (num_buckets_ > 1) {
+        uint64_t bucket = (uint64_t)(rand_.next_f64() * num_buckets_);
+        return bucket * n_ + val;
+    }
+    return val;
   }
 
   static void test(double theta) {
@@ -224,4 +253,6 @@ class ZipfGen {
   uint64_t seq_;
   
   Rand rand_;
+
+  uint64_t num_buckets_;
 } __attribute__((aligned(128)));  // To prevent false sharing caused by adjacent cacheline prefetching

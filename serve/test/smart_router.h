@@ -30,6 +30,7 @@
 #include "smallbank.h"
 #include "mlp/mlp.h"
 #include "ycsb.h"
+#include "tpcc.h"
 
 // SmartRouter: 一个针对 hot-key hash cache 设有严格内存预算的事务路由器。
 // 它维护：
@@ -190,7 +191,7 @@ public:
 
 public:
     explicit SmartRouter(const Config &cfg, TxnPool* txn_pool, std::vector<TxnQueue*> txn_queue, PendingTxnSet* pending_txn_queue_, int worker_threads,
-            BtreeIndexService *btree_service, NewMetis* metis = nullptr, Logger* logger_ptr = nullptr, SmallBank* smallbank = nullptr, YCSB* ycsb = nullptr)
+            BtreeIndexService *btree_service, NewMetis* metis = nullptr, Logger* logger_ptr = nullptr, SmallBank* smallbank = nullptr, YCSB* ycsb = nullptr, TPCC* tpcc = nullptr)
         : cfg_(cfg),
           txn_pool_(txn_pool),
           txn_queues_(txn_queue),
@@ -207,7 +208,8 @@ public:
           load_tracker_(ComputeNodeCount),
           pending_txn_queue_(pending_txn_queue_),
           smallbank_(smallbank),
-          ycsb_(ycsb)
+          ycsb_(ycsb),
+          tpcc_(tpcc)
     {
         metis_->set_thread_pool(&threadpool);
         metis_->init_node_nums(cfg.partition_nums);
@@ -234,7 +236,6 @@ public:
             access_key_log_file.open(access_log_file_name, std::ios::out | std::ios::trunc);
             if (!access_key_log_file.is_open()) {
                 std::cerr << "Failed to open access key log file." << std::endl;
-                return -1;
             }
         #else 
             // delete existing log file if any
@@ -562,8 +563,11 @@ public:
                 smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
             } else if (Workload_Type == 1) { 
                 table_ids = ycsb_->get_table_ids_by_txn_type();
-                accounts_keys = txn->keys;
-            } 
+                accounts_keys = txn->ycsb_keys;
+            } else if (Workload_Type == 2) {
+                accounts_keys = txn->tpcc_keys;
+                table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, accounts_keys.size());
+            }
             else assert(false); // 不可能出现的情况
             assert(table_ids.size() == accounts_keys.size());
 
@@ -628,8 +632,12 @@ public:
         std::unordered_map<node_id_t, double> node_benefit_map;
         node_id_t will_route_node; // 最终决定路由到的节点
         bool is_scheduled = false; // 是否已经被调度, 避免重复调度
+        int hot_level = 0; // 热点级别
     };
 
+    void compute_benefit_for_node(SchedulingCandidateTxn* sc, std::unordered_map<node_id_t, int>& ownership_node_count, std::vector<double>& compute_node_workload_benefit,
+        double metis_benefit_weight, double ownership_benefit_weight, double load_balance_benefit_weight, double hot_prior_decision_weight); 
+     
     std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> get_route_primary_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch,
             std::vector<pqxx::connection *> &thread_conns);
 
@@ -697,9 +705,13 @@ public:
                     rw = smallbank_->get_rw_by_txn_type(txn_type);
                 } else if (Workload_Type == 1) { 
                     table_ids = ycsb_->get_table_ids_by_txn_type();
-                    keys = txn_entry->keys;
+                    keys = txn_entry->ycsb_keys;
                     rw = ycsb_->get_rw_flags();
-                } 
+                } else if (Workload_Type == 2) {
+                    keys = txn_entry->tpcc_keys;
+                    table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, keys.size());
+                    rw = tpcc_->get_rw_flags_by_txn_type(txn_type, keys.size());
+                }
                 else assert(false); // 不可能出现的情况
                 assert(table_ids.size() == keys.size());
 
@@ -721,7 +733,7 @@ public:
                 #endif
 
                 if(SYSTEM_MODE == 0) {
-                    routed_node_id = rand() % 2; // Randomly select node ID for system mode 0
+                    routed_node_id = rand() % ComputeNodeCount; // Randomly select node ID for system mode 0
                 }
                 else if(SYSTEM_MODE == 1){
                     std::vector<int> key_range_count(ComputeNodeCount, 0);
@@ -732,7 +744,15 @@ public:
                             choose_node = key / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
                         } else if (Workload_Type == 1) {
                             choose_node = key / (ycsb_->get_record_count() / ComputeNodeCount); // Range partitioning
+                        } else if (Workload_Type == 2) {
+                            table_id_t tid = table_ids[i];
+                            int total = tpcc_->get_total_keys(static_cast<TPCCTableType>(tid));
+                            if (total == 0) total = 1; 
+                            int range = total / ComputeNodeCount;
+                            if (range == 0) range = 1;
+                            choose_node = (key - 1) / range;
                         }
+                        if (choose_node >= ComputeNodeCount) choose_node = ComputeNodeCount - 1;
                         key_range_count[choose_node]++;
                     }
                     routed_node_id = std::distance(key_range_count.begin(), 
@@ -1513,6 +1533,7 @@ private:
 
     SmallBank* smallbank_ = nullptr;
     YCSB* ycsb_ = nullptr;
+    TPCC* tpcc_ = nullptr;
     
     // 事务池
     TxnPool* txn_pool_ = nullptr;

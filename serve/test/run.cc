@@ -18,6 +18,7 @@
 
 #include "smallbank.h"
 #include "ycsb.h"
+#include "tpcc.h"
 #include "common.h"
 #include "btree_search.h"
 #include "smart_router.h"
@@ -43,6 +44,7 @@ struct thread_params
     SlidingTransactionInforTable* tit = nullptr;  // pointer to the global transaction information table
     SmallBank* smallbank = nullptr;
     YCSB* ycsb = nullptr;
+    TPCC* tpcc = nullptr;
 };
 
 // A streambuf that tees output to two destinations (console + file)
@@ -112,21 +114,29 @@ void generate_perf_kwr_report(pqxx::connection *conn0, int start_snapshot_id, in
     }
 }
 
-void init_key_page_map(pqxx::connection *conn0, SmartRouter* smart_router, SmallBank* smallbank, YCSB* ycsb) {
+void init_key_page_map(pqxx::connection *conn0, SmartRouter* smart_router, SmallBank* smallbank, YCSB* ycsb, TPCC* tpcc) {
     int keys_num;
     if(Workload_Type == 0){
         keys_num = smallbank->get_account_count();
     } else if (Workload_Type == 1){
         keys_num = ycsb->get_record_count();
+    } else if (Workload_Type == 2){
+        // For TPC-C, we iterate over warehouses for simplicity in this init function structure,
+        // but actually we need to init all tables.
+        // Let's just use num_warehouses as the loop count and handle logic inside.
+        keys_num = tpcc->get_num_warehouses();
     } else {
         std::cerr << "Unknown Workload_Type: " << Workload_Type << std::endl;
         return;
     }
     
-    const int num_threads = 16;  // Number of worker threads
+    int num_threads = 100;  // Number of worker threads
+    if (keys_num < num_threads) {
+        num_threads = keys_num;
+    }
     std::vector<std::thread> threads;
-    const int chunk_size = keys_num / num_threads;
-    auto worker = [smart_router](int start, int end) {
+    const int chunk_size = std::max(1, keys_num / num_threads);
+    auto worker = [smart_router, tpcc](int start, int end) {
         pqxx::connection conn00(DBConnection[0]);
         if (!conn00.is_open()) {
             std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
@@ -143,6 +153,51 @@ void init_key_page_map(pqxx::connection *conn0, SmartRouter* smart_router, Small
                 select_sql1 = "SELECT ctid, id FROM savings WHERE id = " + std::to_string(id) + ";";
             } else if (Workload_Type == 1){
                 select_sql0 = "SELECT ctid, id FROM usertable WHERE id = " + std::to_string(id) + ";";
+            } else if (Workload_Type == 2) {
+                // TPC-C initialization logic
+                // We need to init Warehouse, District, Customer, Stock for w_id = id
+                // This is a bit complex to fit into the existing loop structure which assumes 1 key = 1 row.
+                // But let's try to do it per warehouse.
+                int w_id = id;
+                try {
+                    pqxx::nontransaction txn_select(conn00);
+                    
+                    // Warehouse
+                    pqxx::result res = txn_select.exec("SELECT ctid, w_id FROM warehouse WHERE w_id = " + std::to_string(w_id));
+                    if (!res.empty()) {
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(res[0]["ctid"].as<std::string>());
+                        smart_router->initial_key_page((table_id_t)TPCCTableType::kWarehouse, tpcc->make_warehouse_key(w_id), page_id);
+                    }
+
+                    // District (10 per warehouse)
+                    for (int d = 1; d <= TPCC::DIST_PER_WARE; ++d) {
+                        res = txn_select.exec("SELECT ctid, d_w_id, d_id FROM district WHERE d_w_id = " + std::to_string(w_id) + " AND d_id = " + std::to_string(d));
+                        if (!res.empty()) {
+                            auto [page_id, tuple_index] = parse_page_id_from_ctid(res[0]["ctid"].as<std::string>());
+                            smart_router->initial_key_page((table_id_t)TPCCTableType::kDistrict, tpcc->make_district_key(w_id, d), page_id);
+                        }
+                    }
+                    
+                    // Customer (3000 per district)
+                    res = txn_select.exec("SELECT ctid, c_w_id, c_d_id, c_id FROM customer WHERE c_w_id = " + std::to_string(w_id));
+                    for (auto row : res) {
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(row["ctid"].as<std::string>());
+                        int d_id = row["c_d_id"].as<int>();
+                        int c_id = row["c_id"].as<int>();
+                        smart_router->initial_key_page((table_id_t)TPCCTableType::kCustomer, tpcc->make_customer_key(w_id, d_id, c_id), page_id);
+                    }
+
+                    // Stock (100000 per warehouse)
+                    res = txn_select.exec("SELECT ctid, s_w_id, s_i_id FROM stock WHERE s_w_id = " + std::to_string(w_id));
+                    for (auto row : res) {
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(row["ctid"].as<std::string>());
+                        int i_id = row["s_i_id"].as<int>();
+                        smart_router->initial_key_page((table_id_t)TPCCTableType::kStock, tpcc->make_stock_key(w_id, i_id), page_id);
+                    }
+                } catch (const std::exception &e) {
+                    std::cerr << "Error while selecting TPC-C data: " << e.what() << std::endl;
+                }
+                continue; // Skip the rest of the loop body
             } else {
                 std::cerr << "Unknown Workload_Type: " << Workload_Type << std::endl;
                 return;
@@ -174,9 +229,6 @@ void init_key_page_map(pqxx::connection *conn0, SmartRouter* smart_router, Small
                     auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
                     int inserted_id = select_result[0]["id"].as<int>();
                     smart_router->initial_key_page((table_id_t)YCSBTableType::kYCSBTable, inserted_id, page_id);
-                } else {
-                    std::cerr << "Unknown Workload_Type: " << Workload_Type << std::endl;
-                    return;
                 }
             } catch (const std::exception &e) {
                 std::cerr << "Error while selecting data: " << e.what() << std::endl;
@@ -653,14 +705,28 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             
             clock_gettime(CLOCK_MONOTONIC, &start_time);
             for (auto account : txn_entry->accounts) {
-                if (account == 1) {
-                    // log the hotspot exection
-                    logger_->info("Batch " + std::to_string(txn_entry->batch_id) + 
-                        " Node: " + std::to_string(compute_node_id) + 
-                        " txn id: " + std::to_string(txn_entry->tx_id) + 
-                        " access account " + std::to_string(account) + 
-                        " exec time: " + std::to_string(exec_time)
-                    );
+                for(auto key : hottest_keys) {
+                    if (account == key) {
+                        // log the hotspot exection
+                        logger_->info("Batch " + std::to_string(txn_entry->batch_id) + 
+                            " Node: " + std::to_string(compute_node_id) + 
+                            " txn id: " + std::to_string(txn_entry->tx_id) + 
+                            " txn type (smallbank): " + std::to_string(txn_entry->txn_type) + 
+                            " connector id: " + std::to_string(params->compute_node_id_connecter) + 
+                            " txn type (schedule): " + std::to_string((int)txn_entry->schedule_type) + 
+                            " access account " + std::to_string(account) + 
+                            " exec time: " + std::to_string(exec_time) + 
+                            " group id: " + std::to_string(txn_entry->group_id) + 
+                            " dependency group ids: " + [&]() {
+                                std::string os;
+                                for(auto dep_id : txn_entry->dependency_group_id) {
+                                    os += std::to_string(dep_id) + " ";
+                                }
+                                return os;
+                            }() +
+                            " batch id: " + std::to_string(txn_entry->batch_id)
+                        );
+                    }
                 }
             }
             if (exec_time > 10) 
@@ -791,9 +857,9 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             int txn_type = txn_entry->txn_type;
             std::vector<table_id_t> tables = ycsb->get_table_ids_by_txn_type();
             assert(tables.size() > 0);
-            std::vector<itemkey_t> keys = txn_entry->keys;
+            std::vector<itemkey_t> keys = txn_entry->ycsb_keys;
             assert(tables.size() == keys.size());
-            assert(txn_entry->keys.size() == 10);
+            assert(txn_entry->ycsb_keys.size() == 10);
             std::vector<bool> rw = ycsb->get_rw_flags();
 
             std::vector<page_id_t> ctid_ret_page_ids;
@@ -846,6 +912,187 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
         }
     }
     std::cout << "Finished running smallbank transactions via stored procedures." << std::endl;
+}
+
+void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
+    pthread_setname_np(pthread_self(), ("dbconsp_n" + std::to_string(params->compute_node_id_connecter)
+                                                + "_t_" + std::to_string(params->thread_id)).c_str());
+
+    std::cout << "Running TPC-C transactions via stored procedures..." << std::endl;
+
+    node_id_t compute_node_id = params->compute_node_id_connecter;
+    TxnQueue* txn_queue = txn_queues[compute_node_id];
+    SmartRouter* smart_router = params->smart_router;
+    SlidingTransactionInforTable *tit = params->tit;
+    TPCC* tpcc = params->tpcc;
+    assert(txn_queue != nullptr && smart_router != nullptr && tpcc != nullptr);
+
+    auto con_str = DBConnection[compute_node_id];
+    auto con = new pqxx::connection(con_str);
+    if(!con->is_open()) {
+        std::cerr << "Failed to connect to database: " << con_str << std::endl;
+        assert(false);
+        exit(-1);
+    }
+
+    int con_batch_id = 0;
+    while (true) {
+        timespec pop_start_time, pop_end_time;
+        clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
+
+        int call_id;
+        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
+
+        clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
+        double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
+                          (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
+        smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+
+        if (txn_entries.empty()) {
+            if(txn_queue->is_finished()) {
+                break;
+            } else if(txn_queue->is_batch_finished()) {
+                smart_router->notify_batch_finished(compute_node_id, params->thread_id, con_batch_id);
+                timespec wait_start_time, wait_end_time;
+                clock_gettime(CLOCK_MONOTONIC, &wait_start_time);
+                smart_router->wait_for_next_batch(compute_node_id, params->thread_id, con_batch_id);
+                clock_gettime(CLOCK_MONOTONIC, &wait_end_time);
+                double wait_time = (wait_end_time.tv_sec - wait_start_time.tv_sec) * 1000.0 +
+                                   (wait_end_time.tv_nsec - wait_start_time.tv_nsec) / 1000000.0;
+                smart_router->add_worker_thread_wait_next_batch_time(params->compute_node_id_connecter, params->thread_id, wait_time);
+                con_batch_id++;
+                continue;
+            } else continue;
+        }
+
+        for (auto& txn_entry : txn_entries) {
+            // 计时
+            timespec start_time, end_time;
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+            exe_count++;
+            exec_txn_cnt_per_node[compute_node_id]++;
+
+            tx_id_t tx_id = txn_entry->tx_id;
+            int txn_type = txn_entry->txn_type;
+            std::vector<itemkey_t> tpcc_params = txn_entry->tpcc_params;
+            TPCCTxType type = static_cast<TPCCTxType>(txn_type);
+
+            while (con->is_open() == false) {
+                std::cerr << "Connection is broken, reconnecting..." << std::endl;
+                delete con;
+                con = new pqxx::connection(con_str);
+            }
+
+            std::vector<itemkey_t> tpcc_keys = txn_entry->tpcc_keys;
+            assert(tpcc_keys.size() > 0);
+            std::vector<table_id_t> tables = tpcc->get_table_ids_by_txn_type(txn_type, tpcc_keys.size());
+            assert(tables.size() == tpcc_keys.size());
+            std::vector<bool> rw = tpcc->get_rw_flags_by_txn_type(txn_type, tpcc_keys.size());
+            std::vector<page_id_t> ctid_ret_page_ids; // Dummy for now as we didn't get ctids from SP
+
+            // !不需要外层事务
+            pqxx::nontransaction txn(*con);
+            
+            try{
+                pqxx::result res;
+                switch(type) {
+                    case TPCCTxType::kNewOrder: {
+                        if (tpcc_params.size() < 4) {
+                            assert(false);
+                        }
+                        int w_id = tpcc_params[0];
+                        int d_id = tpcc_params[1];
+                        int c_id = tpcc_params[2];
+                        int o_ol_cnt = tpcc_params[3];
+                        
+                        std::string i_ids_str = "{";
+                        std::string supply_w_ids_str = "{";
+                        std::string quantities_str = "{";
+                        
+                        for (int i = 0; i < o_ol_cnt; ++i) {
+                            int base = 4 + i * 3;
+                            if (base + 2 >= (int)tpcc_params.size()) break;
+                            
+                            if (i > 0) {
+                                i_ids_str += ",";
+                                supply_w_ids_str += ",";
+                                quantities_str += ",";
+                            }
+                            i_ids_str += std::to_string(tpcc_params[base]);
+                            supply_w_ids_str += std::to_string(tpcc_params[base+1]);
+                            quantities_str += std::to_string(tpcc_params[base+2]);
+                        }
+                        i_ids_str += "}";
+                        supply_w_ids_str += "}";
+                        quantities_str += "}";
+
+                        std::string sql = "SELECT * FROM tpcc_new_order(" + 
+                            std::to_string(w_id) + ", " + 
+                            std::to_string(d_id) + ", " + 
+                            std::to_string(c_id) + ", " + 
+                            std::to_string(o_ol_cnt) + ", '" + 
+                            i_ids_str + "', '" + 
+                            supply_w_ids_str + "', '" + 
+                            quantities_str + "')";
+                        
+                        res = txn.exec(sql);
+                        break;
+                    }
+                    case TPCCTxType::kPayment: {
+                        if (tpcc_params.size() < 4) {
+                            assert(false);
+                        }
+                        int w_id = tpcc_params[0];
+                        int d_id = tpcc_params[1];
+                        int c_id = tpcc_params[2];
+                        int h_amount = tpcc_params[3];
+
+                        std::string sql = "SELECT * FROM tpcc_payment(" + 
+                            std::to_string(w_id) + ", " + 
+                            std::to_string(d_id) + ", " + 
+                            std::to_string(w_id) + ", " + 
+                            std::to_string(d_id) + ", " + 
+                            std::to_string(c_id) + ", " + 
+                            std::to_string(h_amount) + ")";
+                        
+                        res = txn.exec(sql);
+                        break;
+                    }
+                    default:
+                        assert(false);
+                }
+
+                for (const auto& row : res) {
+                    std::string ctid_str = row["ctid"].as<std::string>();
+                    auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid_str);
+                    ctid_ret_page_ids.push_back(page_id);
+                }
+
+                if(smart_router) {
+                    smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
+                                                    tpcc_keys, rw, ctid_ret_page_ids, compute_node_id);
+                }
+            } catch (const std::exception &e) {
+                std::cerr << "Transaction (SP) failed: " << e.what() << std::endl;
+                logger_->info("Transaction (SP) failed: " + std::string(e.what()));
+            }
+            // 计时结束
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                               (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
+
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+            tit->mark_done(txn_entry, call_id); // 一体化：标记完成，删除由 TIT 统一管理
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            double mark_done_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                    (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_mark_done_time(params->compute_node_id_connecter, params->thread_id, mark_done_time);
+        }
+    }
+    
+    std::cout << "Finished running TPC-C transactions via stored procedures." << std::endl;
 }
 
 void run_ycsb_txns_empty(thread_params* params, Logger* logger_) {
@@ -926,9 +1173,9 @@ void run_ycsb_txns_empty(thread_params* params, Logger* logger_) {
             int txn_type = txn_entry->txn_type;
             std::vector<table_id_t> tables = ycsb->get_table_ids_by_txn_type();
             assert(tables.size() > 0);
-            std::vector<itemkey_t> keys = txn_entry->keys;
+            std::vector<itemkey_t> keys = txn_entry->ycsb_keys;
             assert(tables.size() == keys.size());
-            assert(txn_entry->keys.size() == 10);
+            assert(txn_entry->ycsb_keys.size() == 10);
             std::vector<bool> rw = ycsb->get_rw_flags();
 
             std::vector<page_id_t> ctid_ret_page_ids;
@@ -1053,6 +1300,7 @@ int main(int argc, char *argv[]) {
     
     // for smallbank
     int account_num = 300000; // Number of accounts to load
+    int warehouse_num = 10; // Number of warehouses for tpcc
 
     // btree read parameters
     int read_btree_mode = 0; // 0: read from conn0, 1: read from random conn
@@ -1075,13 +1323,16 @@ int main(int argc, char *argv[]) {
                     Workload_Type = 0;
                 } else if (workload_name == "ycsb") {
                     Workload_Type = 1;
-                } else {
-                    std::cerr << "Error: Unknown workload type '" << workload_name << "'. Supported types are 'smallbank' and 'ycsb'." << std::endl;
+                } else if (workload_name == "tpcc") {
+                    Workload_Type = 2;
+                }
+                else {
+                    std::cerr << "Error: Unknown workload type '" << workload_name << "'. Supported types are 'smallbank', 'ycsb', and 'tpcc'." << std::endl;
                     return -1;
                 }
                 std::cout << "Workload type set to: " << workload_name << std::endl;
             } else {
-                std::cerr << "Error: --workload requires a value (smallbank|ycsb)" << std::endl;
+                std::cerr << "Error: --workload requires a value (smallbank|ycsb|tpcc)" << std::endl;
                 return -1;
             }
         }
@@ -1189,6 +1440,23 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--warehouse-count") {
+            if (i + 1 < argc) {
+                warehouse_num = std::stoi(argv[++i]);
+                if (warehouse_num <= 0) {
+                    std::cerr << "Error: Warehouse count must be greater than 0" << std::endl;
+                    return -1;
+                }
+                if (warehouse_num > 10000) {
+                    std::cerr << "Warning: Warehouse count is very large (" << warehouse_num << "), this may take a long time" << std::endl;
+                }
+                std::cout << "Warehouse count set to: " << warehouse_num << std::endl;
+            } else {
+                std::cerr << "Error: --warehouse-count requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else if (arg == "--worker-threads") {
             if (i + 1 < argc) {
                 worker_threads = std::stoi(argv[++i]);
@@ -1276,6 +1544,34 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--sys_index_extend_size") {
+            if (i + 1 < argc) {
+                PreExtendIndexPageSize = std::stoi(argv[++i]);
+                if (PreExtendIndexPageSize < 0) {
+                    std::cerr << "Error: sys_index_extend_size must be non-negative" << std::endl;
+                    return -1;
+                }
+                std::cout << "System index extend size set to: " << PreExtendIndexPageSize << std::endl;
+            } else {
+                std::cerr << "Error: --sys_index_extend_size requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--affinity-txn-ratio") {
+            if (i + 1 < argc) {
+                AffinityTxnRatio = std::stod(argv[++i]);
+                if (AffinityTxnRatio < 0.0 || AffinityTxnRatio > 1.0) {
+                    std::cerr << "Error: AffinityTxnRatio must be between 0.0 and 1.0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Affinity transaction ratio set to: " << AffinityTxnRatio << std::endl;
+            } else {
+                std::cerr << "Error: --AffinityTxnRatio requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else if (arg == "--load-data-only") {
             LOAD_DATA_ONLY = true;
             std::cout << "Load data only mode enabled." << std::endl;
@@ -1293,7 +1589,12 @@ int main(int argc, char *argv[]) {
 
     // Display current configuration
     std::cout << "\n=== Configuration ===" << std::endl;
-    std::cout << "Workload: " << (Workload_Type == 0 ? "SmallBank" : "YCSB") << std::endl;
+    std::cout << "Workload: ";
+    if (Workload_Type == 0) std::cout << "SmallBank";
+    else if (Workload_Type == 1) std::cout << "YCSB";
+    else if (Workload_Type == 2) std::cout << "TPC-C";
+    else std::cout << "Unknown";
+    std::cout << std::endl;
     std::cout << "System mode: " << SYSTEM_MODE << " ----> ";
     switch (SYSTEM_MODE)
     {
@@ -1362,6 +1663,7 @@ int main(int argc, char *argv[]) {
     // --- Initialize Workload ---
     SmallBank* smallbank = nullptr;
     YCSB* ycsb = nullptr;
+    TPCC* tpcc = nullptr;
     if (Workload_Type == 0) {
         smallbank = new SmallBank(account_num, access_pattern);
         if(access_pattern == 1) smallbank->set_zipfian_theta(zipfian_theta);
@@ -1372,6 +1674,9 @@ int main(int argc, char *argv[]) {
         if(access_pattern == 1) ycsb->set_zipfian_theta(zipfian_theta);
         if(access_pattern == 2) ycsb->set_hotspot_params(hotspot_fraction, hotspot_access_prob);  
         std::cout << "YCSB benchmark initialized." << std::endl;
+    } else if (Workload_Type == 2) {
+        tpcc = new TPCC(warehouse_num); // Use the specified number of warehouses
+        std::cout << "TPC-C benchmark initialized with " << warehouse_num << " warehouses." << std::endl;
     }
 
     std::cout << "Worker threads: " << worker_threads << std::endl;
@@ -1389,14 +1694,14 @@ int main(int argc, char *argv[]) {
     // DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
 
     // kes 双机, 新版本
-    DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
-    DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
-
-    // kes 四机, 新版本
     // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
     // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
+
+    // kes 四机, 新版本
+    DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
+    DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
 
     // kes 单机
     // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
@@ -1449,11 +1754,15 @@ int main(int argc, char *argv[]) {
         } else if (Workload_Type == 1) {
             ycsb->create_table(conn0);
             if (use_sp) ycsb->create_ycsb_stored_procedures(conn0);
+        } else if (Workload_Type == 2) {
+            tpcc->create_table(conn0);
+            if (use_sp) tpcc->create_tpcc_stored_procedures(conn0);
         }
         std::cout << "Tables and indexes created successfully." << std::endl;
 
         // generate friend graph in a separate thread
         std::cout << "Generating friend graph in a separate thread..." << std::endl;
+        auto start_friend_gen = std::chrono::high_resolution_clock::now();
         std::thread friend_thread([&]() {
             if(Workload_Type == 0) smallbank->generate_friend_graph();
         });
@@ -1465,11 +1774,15 @@ int main(int argc, char *argv[]) {
             g_smallbank_key_page_map = smallbank->load_data(conn0);
         } else if (Workload_Type == 1) {
             ycsb->load_data(conn0);
+        } else if (Workload_Type == 2) {
+            tpcc->load_data();
         }
         std::cout << "Data loaded successfully." << std::endl;
         // Wait for friend thread to complete
         friend_thread.join();
-        std::cout << "Friend graph generation completed." << std::endl;
+        auto end_friend_gen = std::chrono::high_resolution_clock::now();
+        double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
+        std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
     } else {
         std::cout << "Skipping data loading. "<< std::endl;
         std::cout << "Checking if tables exist..." << std::endl;
@@ -1478,6 +1791,8 @@ int main(int argc, char *argv[]) {
             tables_exist = smallbank->check_table_exists(conn0);
         } else if (Workload_Type == 1) {
             tables_exist = ycsb->check_table_exists(conn0);
+        } else if (Workload_Type == 2) {
+            tables_exist = tpcc->check_table_exists(conn0);
         }
         std::cout << "Table existence check completed." << std::endl;
         if (!tables_exist) {
@@ -1488,6 +1803,7 @@ int main(int argc, char *argv[]) {
         }
         // generate friend graph in a separate thread
         std::cout << "Generating friend graph in a separate thread..." << std::endl;
+        auto start_friend_gen = std::chrono::high_resolution_clock::now();
         std::thread friend_thread([&]() {
             if(Workload_Type == 0) smallbank->generate_friend_graph();
         });
@@ -1497,6 +1813,8 @@ int main(int argc, char *argv[]) {
             accounts_num_verify = smallbank->check_account_count(conn0, account_num);
         } else if (Workload_Type == 1) {
             accounts_num_verify = ycsb->check_record_count(conn0, account_num);
+        } else if (Workload_Type == 2) {
+            accounts_num_verify = tpcc->check_warehouse_count(conn0, warehouse_num);
         }
         if (!accounts_num_verify) {
             std::cerr << "Error: Account/Record count in the database does not match the expected count. Please verify the data." << std::endl;
@@ -1506,7 +1824,9 @@ int main(int argc, char *argv[]) {
         }
         // Wait for friend thread to complete
         friend_thread.join();
-        std::cout << "Friend graph generation completed." << std::endl;
+        auto end_friend_gen = std::chrono::high_resolution_clock::now();
+        double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
+        std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
     }
     if(LOAD_DATA_ONLY) {
         std::cout << "Load data only mode enabled. Exiting after data load." << std::endl;
@@ -1520,9 +1840,12 @@ int main(int argc, char *argv[]) {
     // Initialize Smart Router anyway
     std::cout << "Initializing Smart Router..." << std::endl;
     // Create a BtreeService（索引名因 workload 不同而不同）
-    std::vector<std::string> index_names = Workload_Type == 0 ? std::vector<std::string>{"idx_checking_id", "idx_savings_id"}
-                                        : Workload_Type == 1 ? std::vector<std::string>{"idx_usertable_id"}
-                                        : std::vector<std::string>{};
+    std::vector<std::string> index_names;
+    if (Workload_Type == 0) index_names = {"idx_checking_id", "idx_savings_id"};
+    else if (Workload_Type == 1) index_names = {"idx_usertable_id"};
+    // else if (Workload_Type == 2) index_names = {"warehouse_pkey", "district_pkey", "customer_pkey", "stock_pkey"}; // TPC-C indexes
+    else if (Workload_Type == 2) index_names = {}; // TPC-C indexes
+    
     BtreeIndexService *index_service = new BtreeIndexService(DBConnection, index_names, read_btree_mode, read_frequency);
     // initialize the transaction pool
     SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, 2*ComputeNodeCount*worker_threads*BatchRouterProcessSize);
@@ -1537,7 +1860,7 @@ int main(int argc, char *argv[]) {
     NewMetis* metis = new NewMetis(logger_);
 
     SmartRouter::Config cfg{};
-    SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, pending_txn_queue, worker_threads, index_service, metis, logger_, smallbank, ycsb);
+    SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, pending_txn_queue, worker_threads, index_service, metis, logger_, smallbank, ycsb, tpcc);
     std::cout << "Smart Router initialized." << std::endl;
 
     // TIT: 当后续事务的入度变为0时，立即调度到目标节点
@@ -1570,7 +1893,7 @@ int main(int argc, char *argv[]) {
         std::cout << "Data page mapping initialization from load_data completed." << std::endl;
     } else {
         // 走原有从数据库扫描初始化的路径
-        init_key_page_map(conn0, smart_router, smallbank, ycsb);
+        init_key_page_map(conn0, smart_router, smallbank, ycsb, tpcc);
     }
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -1601,6 +1924,10 @@ int main(int argc, char *argv[]) {
             client_gen_txn_threads.emplace_back([i, txn_pool, ycsb]() {
                 ycsb->generate_ycsb_txns_worker(i, txn_pool);
             });
+        } else if (Workload_Type == 2) {
+            client_gen_txn_threads.emplace_back([i, txn_pool, tpcc]() {
+                tpcc->generate_tpcc_txns_worker(i, txn_pool);
+            });
         }
     }
 
@@ -1614,6 +1941,7 @@ int main(int argc, char *argv[]) {
             params->thread_count = worker_threads;
             params->smallbank = smallbank;
             params->ycsb = ycsb;
+            params->tpcc = tpcc;
             params->smart_router = smart_router;
             params->tit = tit;
 
@@ -1627,6 +1955,11 @@ int main(int argc, char *argv[]) {
                 if (use_sp) 
                     db_conn_threads.emplace_back(run_ycsb_txns_sp, params, logger_);
                 else assert(false && "Only support YCSB with stored procedures!");
+            }
+            else if (Workload_Type == 2) {
+                if (use_sp)
+                    db_conn_threads.emplace_back(run_tpcc_txns_sp, params, logger_);
+                else assert(false && "Only support TPC-C with stored procedures!");
             }
             // 测试路由吞吐量
             // db_conn_threads.emplace_back(run_smallbank_empty, params, logger_);
@@ -1692,8 +2025,15 @@ int main(int argc, char *argv[]) {
     for(int i =0; i<DBConnection.size(); i++){
         std::cout << "node " << i << " routed txn count: " << exec_txn_cnt_per_node[i] << std::endl;
     }
-    std::cout << "Total accounts loaded: " << account_num << std::endl;
-    std::cout << "Access pattern used: " << access_pattern_name << std::endl;
+    if (SYSTEM_MODE == 0 || SYSTEM_MODE == 1) {
+        std::cout << "Total accounts loaded: " << account_num << std::endl;
+        std::cout << "Access pattern used: " << access_pattern_name << std::endl;
+    }
+    else if (SYSTEM_MODE == 2) {
+        std::cout << "Warehouse count: " << warehouse_num << std::endl;
+        std::cout << "Access pattern used: " << access_pattern_name << std::endl;
+    }
+
     std::cout << "Total transactions executed: " << exe_count << std::endl;
     std::cout << "Elapsed time: " << ms << " milliseconds" << std::endl;
     double s = ms / 1000.0; // Convert milliseconds to seconds

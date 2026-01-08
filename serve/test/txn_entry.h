@@ -16,7 +16,12 @@ struct TxnQueueEntry {
     tx_id_t tx_id;
     int txn_type;
     std::vector<uint64_t> accounts; // for smallbank, store involved account ids, the table id is generated based on txn_type
-    std::vector<uint64_t> keys; // for ycsb, store involved record keys
+    std::vector<uint64_t> ycsb_keys; // for ycsb, store involved record keys
+    std::vector<uint64_t> tpcc_params; // for tpcc, store transaction parameters
+    std::vector<uint64_t> tpcc_keys; // for tpcc, store involved record keys
+
+    TxnQueueEntry(tx_id_t _tx_id, int _txn_type, std::vector<uint64_t> _accounts = {}, std::vector<uint64_t> _ycsb_keys = {}, std::vector<uint64_t> _tpcc_params = {}, std::vector<uint64_t> _tpcc_keys = {})
+        : tx_id(_tx_id), txn_type(_txn_type), accounts(_accounts), ycsb_keys(_ycsb_keys), tpcc_params(_tpcc_params), tpcc_keys(_tpcc_keys) {}
     
     int txn_decision_type = -1; // init to -1, and will be set during routing
     std::vector<page_id_t> accessed_page_ids; // the page ids this txn will access, set during routing

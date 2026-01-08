@@ -583,7 +583,20 @@ public:
         queue_cv_.wait(lock, [this, &entries]() {
             return current_queue_size_ + entries.size() < max_queue_size_;
         });
+        
         int i = 0;
+        // 1. Try to fill the last batch first
+        if (!txn_queue_.empty()) {
+            auto& last_batch = txn_queue_.back();
+            while (last_batch.size() < BatchExecutorPOPTxnSize && i < entries.size()) {
+                last_batch.push_back(entries[i]);
+                i++;
+                current_queue_size_++;
+                regular_txn_cnt++;
+            }
+        }
+
+        // 2. Create new batches for remaining entries
         while(i < entries.size()) {
             std::list<TxnQueueEntry*> batch;
             for(int j = 0; j < BatchExecutorPOPTxnSize && i < entries.size(); j++, i++) {

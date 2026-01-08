@@ -6,20 +6,22 @@ int worker_threads = 16;
 int ComputeNodeCount = 2;
 uint64_t ATTEMPTED_NUM = 10000000;
 int REGION_SIZE = 1000;
-double AffinitySampleRate = 0.1;
+double AffinitySampleRate = 1;
 int TPCC_WAREHOUSE_NUM = -1;
-double AffinityTxnRatio = 0.8;
-uint64_t PARTITION_INTERVAL = 100000;
+double AffinityTxnRatio = 0.2;
+uint64_t PARTITION_INTERVAL = 500000;
 std::string partition_log_file_ = "partitioning_log.log";
-int MetisWarmupRound = 10;
+int MetisWarmupRound = 1;
 bool WarmupEnd = false;
 int TxnPoolMaxSize = 500000;
 int TxnQueueMaxSize = 10000;
 int BatchRouterProcessSize = 10000;
 int BatchExecutorPOPTxnSize = 20;
 int PreExtendPageSize = 300000; // 预分配页面大小
+int PreExtendIndexPageSize = 50000; // 预分配索引页面大小
 bool LOAD_DATA_ONLY = false;
 bool SKIP_LOAD_DATA = false;
+std::vector<uint64_t> hottest_keys; // for debug
 
 // global variables
 int try_count = 10000;
