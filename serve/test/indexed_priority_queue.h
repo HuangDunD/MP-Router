@@ -89,6 +89,17 @@ class IPQ
 		}
 
 		/**
+		 * @brief check the position of a certain key
+		 * @param key the key to check for
+	     */
+		int get_item_heap_idx(T1 key)
+		{
+			if(pm.count(key)) // c++11
+				return pm[key];
+			return -1;
+		}
+
+		/**
 		 * @brief inserts a key-value pair into the heap
 		 * @param key the key to insert
 		 * @param value the key's associated priority
@@ -233,6 +244,158 @@ class IPQ
 				swap(i,node);
 				node = i;
 				i = std::floor((node-1)/2);
+			}
+		}
+};
+
+/**
+ * @brief Dense Indexed Priority Queue implementation optimized for contiguous integer keys 0..N-1.
+ * Uses std::vector instead of std::unordered_map for internal storage.
+ */
+template <class T2 = int, class Comp = std::less<T2>>
+class DenseIPQ
+{
+	private:
+		// Vectors indexed by key (0..capacity-1) for val and pm
+		std::vector<T2> val;  ///< key -> value (priority)
+		std::vector<int> pm;  ///< key -> heap_index, -1 if not in heap
+
+		// Vector indexed by heap_index (0..size_-1)
+		std::vector<int> im;  ///< heap_index -> key
+		
+		Comp comp;
+        int size_ = 0;
+
+	public:
+		DenseIPQ(int capacity = 0)
+		{
+            if (capacity > 0) reserve(capacity);
+		}
+
+        void reserve(int capacity) {
+            val.resize(capacity);
+            pm.resize(capacity, -1);
+            im.resize(capacity);
+        }
+
+        int size() const { return size_; }
+        bool empty() const { return size_ == 0; }
+
+		bool contains(int key) const
+		{
+            if (key < 0 || key >= pm.size()) return false;
+			return pm[key] != -1;
+		}
+
+		int get_item_heap_idx(int key) const
+		{
+            if (contains(key)) return pm[key];
+			return -1;
+		}
+
+		void insert(int key, T2 value)
+		{
+            if (key >= val.size()) {
+                // Auto-grow if needed, though pre-reserve is better
+                int new_cap = std::max(key + 1, (int)val.size() * 2);
+                val.resize(new_cap);
+                pm.resize(new_cap, -1);
+                im.resize(new_cap);
+            }
+            
+			val[key] = value;
+			pm[key] = size_;
+			im[size_] = key;
+			swim(size_);
+			size_++;
+		}
+
+		std::pair<int,T2> peek()
+		{
+            // assert(size_ > 0);
+			return {im[0], val[im[0]]};
+		}
+
+		std::pair<int,T2> pop()
+		{
+            // assert(size_ > 0);
+            int ret_key = im[0];
+            T2 ret_val = val[ret_key];
+			remove(ret_key); 
+			return {ret_key, ret_val};
+		}
+
+		void remove(int key)
+		{
+			if(!contains(key)) return;
+
+			int pos = pm[key];
+			swap(pos, size_-1);
+			size_--;
+
+			pm[key] = -1;
+            // No need to erase from val/im, just overwrite later
+			
+			sink(pos);
+			swim(pos);
+		}
+
+		void update(int key, T2 value)
+		{
+			if(!contains(key)) return;
+
+			int pos = pm[key];
+			T2 old = val[key];
+			val[key] = value;
+
+			if (comp(value, old)) {
+				swim(pos);
+			} else if (comp(old, value)) {
+				sink(pos);
+			}
+		}
+
+	private:
+		void swap(int i, int j)
+		{
+			pm[im[j]] = i;
+			pm[im[i]] = j;
+			int tmp = im[i];
+			im[i] = im[j];
+			im[j] = tmp;
+		}
+		
+		void sink(int node) 
+		{
+			while(true)
+			{
+				int left = (2*node)+1; 
+				int right = (2*node)+2;
+				int best;
+
+				if(left >= size_) break;
+
+				if(right >= size_)
+					best = left;
+				else
+					best = comp(val[im[left]], val[im[right]]) ? left : right;
+
+				if(!comp(val[im[best]], val[im[node]]))
+					break;
+
+				swap(best,node);
+				node = best;
+			}
+		}
+
+		void swim(int node) 
+		{
+			int i = (node-1)/2;
+			while(node > 0 && comp(val[im[node]], val[im[i]]))
+			{
+				swap(i,node);
+				node = i;
+				i = (node-1)/2;
 			}
 		}
 };

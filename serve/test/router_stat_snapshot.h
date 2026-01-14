@@ -80,7 +80,18 @@ struct RouterStatSnapshot {
     double preprocess_txn_ms, wait_pending_txn_push_ms, wait_last_batch_finish_ms = 0.0;
     double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
-    double ownership_retrieval_and_devide_unconflicted_txn_ms, merge_and_construct_ipq_ms, process_conflicted_txn_ms = 0.0;
+    double ownership_retrieval_and_devide_unconflicted_txn_ms = 0.0; 
+    double process_conflicted_txn_ms = 0.0;
+    double merge_and_construct_ipq_ms = 0.0;
+    double select_condidate_txns_ms = 0.0;
+    double compute_transfer_page_ms = 0.0;
+    double find_affected_txns_ms = 0.0;
+    double decide_txn_schedule_ms = 0.0;
+    double add_txn_dependency_ms = 0.0;
+    double push_prioritized_txns_ms = 0.0;
+    double push_end_txns_ms = 0.0;
+    double final_push_to_queues_ms = 0.0;
+
     std::vector<double> pop_txn_total_ms_per_node;
     std::vector<double> wait_next_batch_total_ms_per_node;
     std::vector<double> sum_worker_thread_exec_time_ms_per_node;
@@ -157,8 +168,16 @@ struct RouterStatSnapshot {
         std::cout << "    Wait Last Batch Finish Time: " << wait_last_batch_finish_ms << " ms" << std::endl;
         std::cout << "    Ownership Retrieval And Devide Unconflicted Txn Time: " 
                   << ownership_retrieval_and_devide_unconflicted_txn_ms << " ms" << std::endl;
-        std::cout << "    Merge And Construct IPQ Time: " << merge_and_construct_ipq_ms << " ms" << std::endl;
         std::cout << "    Process Conflicted Txn Time: " << process_conflicted_txn_ms << " ms" << std::endl;
+        std::cout << "      Merge And Construct IPQ Time: " << merge_and_construct_ipq_ms << " ms" << std::endl;
+        std::cout << "      Select Condidate Txns Time: " << select_condidate_txns_ms << " ms" << std::endl;
+        std::cout << "      Compute Transfer Page Time: " << compute_transfer_page_ms << " ms" << std::endl;
+        std::cout << "      Find Affected Txns Time: " << find_affected_txns_ms << " ms" << std::endl;
+        std::cout << "      Decide Txn Schedule Time: " << decide_txn_schedule_ms << " ms" << std::endl;
+        std::cout << "      Add Txn Dependency Time: " << add_txn_dependency_ms << " ms" << std::endl;
+        std::cout << "      Push Prioritized Txns Time: " << push_prioritized_txns_ms << " ms" << std::endl;
+        std::cout << "      Push End Txns Time: " << push_end_txns_ms << " ms" << std::endl;
+        std::cout << "      Final Push To Queues Time: " << final_push_to_queues_ms << " ms" << std::endl;
         std::cout << "  Push Txn To Queue Time: " << push_txn_to_queue_ms << " ms" << std::endl;
 
         std::cout << "[Worker Thread Time Breakdown] " << std::endl;
@@ -235,9 +254,9 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     // time breakdown
     clock_gettime(CLOCK_MONOTONIC, &snap.snapshot_ts);
     router->sum_worker_thread_stat_time(); // update the sum
-    if(SYSTEM_MODE >= 0 && SYSTEM_MODE <= 8 || SYSTEM_MODE == 13) {
+    if(SYSTEM_MODE >= 0 && SYSTEM_MODE <= 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
         // 对于这些模式, 是使用多线程router的，因此需要计算平均
-        router->Record_time_ms(true, true, true);
+        router->Record_time_ms(false, true, true);
     } else if(SYSTEM_MODE == 11) {
         router->Record_time_ms(false, false, true);
     }
@@ -253,6 +272,14 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.ownership_retrieval_and_devide_unconflicted_txn_ms = tdb.ownership_retrieval_and_devide_unconflicted_txn_ms;
     snap.merge_and_construct_ipq_ms = tdb.merge_and_construct_ipq_ms;
     snap.process_conflicted_txn_ms = tdb.process_conflicted_txn_ms;
+    snap.select_condidate_txns_ms = tdb.select_condidate_txns_ms;
+    snap.compute_transfer_page_ms = tdb.compute_transfer_page_ms;
+    snap.find_affected_txns_ms = tdb.find_affected_txns_ms;
+    snap.decide_txn_schedule_ms = tdb.decide_txn_schedule_ms;
+    snap.add_txn_dependency_ms = tdb.add_txn_dependency_ms;
+    snap.push_prioritized_txns_ms = tdb.push_prioritized_txns_ms;
+    snap.push_end_txns_ms = tdb.push_end_txns_ms;
+    snap.final_push_to_queues_ms = tdb.final_push_to_queues_ms;
     snap.pop_txn_total_ms_per_node = tdb.pop_txn_total_ms_per_node;
     snap.wait_next_batch_total_ms_per_node = tdb.wait_next_batch_total_ms_per_node;
     snap.sum_worker_thread_exec_time_ms_per_node = tdb.sum_worker_thread_exec_time_ms_per_node;
@@ -352,6 +379,14 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.ownership_retrieval_and_devide_unconflicted_txn_ms = b.ownership_retrieval_and_devide_unconflicted_txn_ms - a.ownership_retrieval_and_devide_unconflicted_txn_ms;
     d.merge_and_construct_ipq_ms = b.merge_and_construct_ipq_ms - a.merge_and_construct_ipq_ms;
     d.process_conflicted_txn_ms = b.process_conflicted_txn_ms - a.process_conflicted_txn_ms;
+    d.select_condidate_txns_ms = b.select_condidate_txns_ms - a.select_condidate_txns_ms;
+    d.compute_transfer_page_ms = b.compute_transfer_page_ms - a.compute_transfer_page_ms;
+    d.find_affected_txns_ms = b.find_affected_txns_ms - a.find_affected_txns_ms;
+    d.decide_txn_schedule_ms = b.decide_txn_schedule_ms - a.decide_txn_schedule_ms;
+    d.add_txn_dependency_ms = b.add_txn_dependency_ms - a.add_txn_dependency_ms;
+    d.push_prioritized_txns_ms = b.push_prioritized_txns_ms - a.push_prioritized_txns_ms;
+    d.push_end_txns_ms = b.push_end_txns_ms - a.push_end_txns_ms;
+    d.final_push_to_queues_ms = b.final_push_to_queues_ms - a.final_push_to_queues_ms;
     for(int i=0; i< ComputeNodeCount; i++) {
         d.pop_txn_total_ms_per_node.push_back( b.pop_txn_total_ms_per_node[i] - a.pop_txn_total_ms_per_node[i] );
         d.wait_next_batch_total_ms_per_node.push_back( b.wait_next_batch_total_ms_per_node[i] - a.wait_next_batch_total_ms_per_node[i] );

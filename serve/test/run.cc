@@ -26,6 +26,7 @@
 #include "router_stat_snapshot.h"
 #include "txn_queue.h"
 #include "tit.h"
+#include "config.h"
 
 std::vector<TxnQueue*> txn_queues; // one queue per compute node
 std::vector<std::atomic<int>> exec_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
@@ -39,6 +40,8 @@ struct thread_params
     node_id_t compute_node_id_connecter; // the compute node id this thread connects to
     int thread_id;
     int thread_count;
+    std::vector<double> *latency_record = nullptr; // pointer to the latency record vector
+    std::vector<double> *fetch_latency_record = nullptr; // pointer to the fetch latency record vector
 
     SmartRouter* smart_router = nullptr; // pointer to the smart router
     SlidingTransactionInforTable* tit = nullptr;  // pointer to the global transaction information table
@@ -370,7 +373,10 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
         // 执行std::list<TxnQueueEntry*> txn_entries中的每个事务
         for (auto& txn_entry : txn_entries) {
             exe_count++;
-            // statistics
+            if(!WarmupEnd && SYSTEM_MODE == 0 && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
+                WarmupEnd = true;
+                std::cout << "Warmup Ended for Mode 0, exe_count: " << exe_count << std::endl;
+            }
             exec_txn_cnt_per_node[compute_node_id]++;
 
             tx_id_t tx_id = txn_entry->tx_id;
@@ -385,6 +391,8 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
                 delete con;
                 con = new pqxx::connection(con_str);
             }
+            timespec start_time, end_time;
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
             pqxx::work* txn = new pqxx::work(*con);
 
             // init the table ids and keys
@@ -532,6 +540,18 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
                 std::cerr << "Transaction failed: " << e.what() << std::endl;
                 logger_->info("Transaction failed: " + std::string(e.what()));
             }
+            
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                               (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
+            if (WarmupEnd) {
+                if (params->latency_record) params->latency_record->push_back(exec_time);
+                if (params->fetch_latency_record && txn_entry->fetch_time > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                }
+            }
+
             tit->mark_done(txn_entry); // 一体化：标记完成，删除由 TIT 统一管理
             delete txn;
             // std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -607,6 +627,10 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             exe_count++;
+            if(!WarmupEnd && SYSTEM_MODE == 0 && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
+                WarmupEnd = true;
+                std::cout << "Warmup Ended for Mode 0, exe_count: " << exe_count << std::endl;
+            }
             exec_txn_cnt_per_node[compute_node_id]++;
 
             tx_id_t tx_id = txn_entry->tx_id;
@@ -696,6 +720,14 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
+            double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
+            if (WarmupEnd) {
+                if(params->latency_record) params->latency_record->push_back(exec_time);
+                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                }
+            }
+
             clock_gettime(CLOCK_MONOTONIC, &start_time);
             tit->mark_done(txn_entry, call_id); // 一体化：标记完成，删除由 TIT 统一管理
             clock_gettime(CLOCK_MONOTONIC, &end_time);
@@ -703,6 +735,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
             smart_router->add_worker_thread_mark_done_time(params->compute_node_id_connecter, params->thread_id, mark_done_time);
             
+        #if LOG_TXN_EXEC
             clock_gettime(CLOCK_MONOTONIC, &start_time);
             for (auto account : txn_entry->accounts) {
                 for(auto key : hottest_keys) {
@@ -729,7 +762,9 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                     }
                 }
             }
-            if (exec_time > 10) 
+        #endif
+        // #if LOG_TXN_EXEC
+            if (exec_time > 1000) 
                 logger_->warning("Node: " + std::to_string(compute_node_id) + "Transaction execution time exceeded 10 ms: " + std::to_string(exec_time) + 
                 " ms, call id: " + std::to_string(call_id) + " Txn op: " + [&]() {
                     std::string os;
@@ -762,7 +797,9 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             double log_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
             smart_router->add_worker_thread_log_debug_info_time(params->compute_node_id_connecter, params->thread_id, log_time);
+        // #endif
         }
+    #if LOG_TXN_EXEC
         struct timespec start_time, end_time;
         clock_gettime(CLOCK_MONOTONIC, &start_time);
         logger_->info("Finished processing batch with call_id: " + std::to_string(call_id));
@@ -770,6 +807,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         double log_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
                            (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
         smart_router->add_worker_thread_log_debug_info_time(params->compute_node_id_connecter, params->thread_id, log_time);
+    #endif 
     }
     std::cout << "Finished running smallbank transactions via stored procedures." << std::endl;
 }
@@ -907,6 +945,14 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
+
+            double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
+            if (WarmupEnd) {
+                if(params->latency_record) params->latency_record->push_back(exec_time);
+                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                }
+            }
 
             tit->mark_done(txn_entry); // 一体化：标记完成，删除由 TIT 统一管理
         }
@@ -1083,6 +1129,14 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
+            double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
+            if (WarmupEnd) {
+                if(params->latency_record) params->latency_record->push_back(exec_time);
+                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                }
+            }
+
             clock_gettime(CLOCK_MONOTONIC, &start_time);
             tit->mark_done(txn_entry, call_id); // 一体化：标记完成，删除由 TIT 统一管理
             clock_gettime(CLOCK_MONOTONIC, &end_time);
@@ -1211,7 +1265,7 @@ void print_usage(const char* program_name) {
     std::cout << "  " << program_name << " --system-mode 2 --account-count 100000" << std::endl;
 }
 
-void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool) {
+void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger_) {
     using namespace std::chrono;
     uint64_t exec_last_count = 0;
     uint64_t route_last_count = 0;
@@ -1243,6 +1297,8 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool) {
         double route_tps = (route_cur_count - route_last_count) / seconds;
         std::cout << "[Routed TPS] " << std::fixed << std::setprecision(2) << route_tps
                   << " txn/sec (total: " << exec_cur_count << "). ";
+        logger_->info("[Routed TPS] " + std::to_string(route_tps) +
+                      " txn/sec (total: " + std::to_string(exec_cur_count) + "). ");
         for(int i=0; i<ComputeNodeCount; i++) {
             int routed_cnt = routed_txn_cnt_per_node_snapshot[i] - routed_txn_cnt_per_node_last_snapshot[i];
             routed_txn_cnt_per_node_last_snapshot[i] = routed_txn_cnt_per_node_snapshot[i];
@@ -1263,6 +1319,8 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool) {
         for(int i=0; i<ComputeNodeCount; i++) txn_queue_size_snapshot[i] = txn_queues[i]->size();
         std::cout << "[Exec TPS] " << std::fixed << std::setprecision(2) << exec_tps
                   << " txn/sec (total: " << exec_cur_count << "). ";
+        logger_->info("[Exec TPS] " + std::to_string(exec_tps) +
+                      " txn/sec (total: " + std::to_string(exec_cur_count) + "). ");
         for(int i=0; i<ComputeNodeCount; i++) {
             int routed_cnt = exec_txn_cnt_per_node_snapshot[i] - exec_txn_cnt_per_node_last_snapshot[i];
             exec_txn_cnt_per_node_last_snapshot[i] = exec_txn_cnt_per_node_snapshot[i];
@@ -1580,6 +1638,20 @@ int main(int argc, char *argv[]) {
             SKIP_LOAD_DATA = true;
             std::cout << "Skip load data mode enabled." << std::endl;
         }
+        else if (arg == "--batch-size") {
+            if (i + 1 < argc) {
+                BatchRouterProcessSize = std::stoi(argv[++i]);
+                if (BatchRouterProcessSize <= 0) {
+                    std::cerr << "Error: Batch size must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Batch size set to: " << BatchRouterProcessSize << std::endl;
+            } else {
+                std::cerr << "Error: --batch-size requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else {
             std::cerr << "Error: Unknown argument " << arg << std::endl;
             print_usage(argv[0]);
@@ -1605,7 +1677,7 @@ int main(int argc, char *argv[]) {
         std::cout << "\033[31m  account hashing router \033[0m" << std::endl;
         break;
     case 2:
-        std::cout << "\033[31m  page hashing router \033[0m" << std::endl;
+        std::cout << "\033[31m  key hashing router \033[0m" << std::endl;
         break;
     case 3:
         std::cout << "\033[31m  page affinity router \033[0m" << std::endl;
@@ -1636,6 +1708,15 @@ int main(int argc, char *argv[]) {
         break;
     case 13: 
         std::cout << "\033[31m  score-based router \033[0m" << std::endl;
+        break;
+    case 23: 
+        std::cout << "\033[31m  score-based router with metis and load balancing \033[0m" << std::endl;
+        break;
+    case 24:
+        std::cout << "\033[31m  score-based router with page ownership and load balancing \033[0m" << std::endl;
+        break;
+    case 25:
+        std::cout << "\033[31m  score-based router with load balancing only \033[0m" << std::endl;
         break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
@@ -1932,6 +2013,12 @@ int main(int argc, char *argv[]) {
     }
 
     // !Start the transaction threads
+    std::vector<std::vector<double>> worker_latencies(ComputeNodeCount * worker_threads);
+    std::vector<std::vector<double>> worker_fetch_latencies(ComputeNodeCount * worker_threads);
+    // pre-reserve some space to avoid frequent reallocations, e.g. 1M per thread
+    for(auto& v : worker_latencies) v.reserve(1000000); 
+    for(auto& v : worker_fetch_latencies) v.reserve(1000000);
+
     std::vector<std::thread> db_conn_threads;
     for(int i = 0; i < ComputeNodeCount; i++) {
         for(int j = 0; j < worker_threads; j++) {
@@ -1939,6 +2026,8 @@ int main(int argc, char *argv[]) {
             params->compute_node_id_connecter = i;
             params->thread_id = j;
             params->thread_count = worker_threads;
+            params->latency_record = &worker_latencies[i * worker_threads + j];
+            params->fetch_latency_record = &worker_fetch_latencies[i * worker_threads + j];
             params->smallbank = smallbank;
             params->ycsb = ycsb;
             params->tpcc = tpcc;
@@ -1970,13 +2059,15 @@ int main(int argc, char *argv[]) {
     smart_router->start_router();
 
     // Start a separate thread to print TPS periodically
-    std::thread tps_thread(print_tps_loop, smart_router, txn_pool);
+    std::thread tps_thread(print_tps_loop, smart_router, txn_pool, logger_);
     tps_thread.detach(); // Detach the thread to run independently
 
     while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     std::cout << "\033[31m Warmup rounds completed. Create the smart router snapshot. \033[0m" << std::endl;
+    auto warmup_end_time = std::chrono::high_resolution_clock::now();
+    long long warmup_exe_count = exe_count;
     if(smart_router) { 
         snapshot1 = take_router_snapshot(smart_router);
         print_diff_snapshot(snapshot0, snapshot1);
@@ -2025,11 +2116,11 @@ int main(int argc, char *argv[]) {
     for(int i =0; i<DBConnection.size(); i++){
         std::cout << "node " << i << " routed txn count: " << exec_txn_cnt_per_node[i] << std::endl;
     }
-    if (SYSTEM_MODE == 0 || SYSTEM_MODE == 1) {
+    if (Workload_Type == 0 || Workload_Type == 1) {
         std::cout << "Total accounts loaded: " << account_num << std::endl;
         std::cout << "Access pattern used: " << access_pattern_name << std::endl;
     }
-    else if (SYSTEM_MODE == 2) {
+    else if (Workload_Type == 2) {
         std::cout << "Warehouse count: " << warehouse_num << std::endl;
         std::cout << "Access pattern used: " << access_pattern_name << std::endl;
     }
@@ -2039,11 +2130,70 @@ int main(int argc, char *argv[]) {
     double s = ms / 1000.0; // Convert milliseconds to seconds
     std::cout << "Throughput: " << exe_count / s << " transactions per second" << std::endl;
 
+    double ms_after_warmup = std::chrono::duration_cast<std::chrono::milliseconds>(end - warmup_end_time).count();
+    double s_after_warmup = ms_after_warmup / 1000.0;
+    long long txn_after_warmup = exe_count - warmup_exe_count;
+    std::cout << "Throughput (after warmup): " << txn_after_warmup / s_after_warmup << " transactions per second" << std::endl;
+
+    // --- Latency Statistics (After Warmup) ---
+    std::vector<double> all_latencies;
+    // reserve total size roughly
+    size_t total_size = 0;
+    for (const auto& v : worker_latencies) total_size += v.size();
+    all_latencies.reserve(total_size);
+    for (const auto& v : worker_latencies) {
+        all_latencies.insert(all_latencies.end(), v.begin(), v.end());
+    }
+    if (!all_latencies.empty()) {
+        std::sort(all_latencies.begin(), all_latencies.end());
+        double sum = 0;
+        for (double lat : all_latencies) sum += lat;
+        double avg = sum / all_latencies.size();
+        double p50 = all_latencies[static_cast<size_t>(all_latencies.size() * 0.50)];
+        double p95 = all_latencies[static_cast<size_t>(all_latencies.size() * 0.95)];
+        double p99 = all_latencies[static_cast<size_t>(all_latencies.size() * 0.99)];
+        
+        std::cout << "Latency Statistics (After Warmup):" << std::endl;
+        std::cout << "  Average: " << avg << " ms" << std::endl;
+        std::cout << "  P50: " << p50 << " ms" << std::endl;
+        std::cout << "  P95: " << p95 << " ms" << std::endl;
+        std::cout << "  P99: " << p99 << " ms" << std::endl;
+    } else {
+        std::cout << "No transactions recorded after warmup for latency stats." << std::endl;
+    }
+
+    // --- Fetch to Complete Latency Statistics (After Warmup) ---
+    std::vector<double> all_fetch_latencies;
+    total_size = 0;
+    for (const auto& v : worker_fetch_latencies) total_size += v.size();
+    all_fetch_latencies.reserve(total_size);
+    for (const auto& v : worker_fetch_latencies) {
+        all_fetch_latencies.insert(all_fetch_latencies.end(), v.begin(), v.end());
+    }
+    if (!all_fetch_latencies.empty()) {
+        std::sort(all_fetch_latencies.begin(), all_fetch_latencies.end());
+        double sum = 0;
+        for (double lat : all_fetch_latencies) sum += lat;
+        double avg = sum / all_fetch_latencies.size();
+        double p50 = all_fetch_latencies[static_cast<size_t>(all_fetch_latencies.size() * 0.50)];
+        double p95 = all_fetch_latencies[static_cast<size_t>(all_fetch_latencies.size() * 0.95)];
+        double p99 = all_fetch_latencies[static_cast<size_t>(all_fetch_latencies.size() * 0.99)];
+        
+        std::cout << "Fetch-to-Complete Latency Statistics (After Warmup):" << std::endl;
+        std::cout << "  Average: " << avg << " ms" << std::endl;
+        std::cout << "  P50: " << p50 << " ms" << std::endl;
+        std::cout << "  P95: " << p95 << " ms" << std::endl;
+        std::cout << "  P99: " << p99 << " ms" << std::endl;
+    } else {
+        std::cout << "No transactions recorded after warmup for fetch latency stats." << std::endl;
+    }
+
     // Generate performance report, file name inluding the timestamp
 
     // std::string report_file_warm_phase = kwr_report_name +  "_fisrt.html";
     // generate_perf_kwr_report(conn0, start_snapshot_id, mid_snapshot_id, report_file_warm_phase);
     std::string report_file_run_phase = kwr_report_name +  "_end.html";
+    // generate_perf_kwr_report(conn0, mid_snapshot_id, end_snapshot_id, report_file_run_phase);
     generate_perf_kwr_report(conn0, start_snapshot_id, end_snapshot_id, report_file_run_phase);
 
     // 关闭连接

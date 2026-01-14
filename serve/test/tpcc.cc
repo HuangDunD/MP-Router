@@ -696,11 +696,12 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
             txn_batch.push_back(txn_entry);
         }
         
-        if(SYSTEM_MODE != 11){
-            txn_pool->receive_txn_from_client_batch(txn_batch, thread_id);
-        } else {
-            txn_pool->receive_txn_from_client_batch(txn_batch, 0);
-        }
+        // if(SYSTEM_MODE != 11){
+        //     txn_pool->receive_txn_from_client_batch(txn_batch, thread_id);
+        // } else {
+        //     txn_pool->receive_txn_from_client_batch(txn_batch, 0);
+        // }
+        txn_pool->receive_txn_from_client_batch(txn_batch, 0);
     }
     txn_pool->stop_pool();
 }

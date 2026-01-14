@@ -80,7 +80,52 @@
             "program": "${workspaceFolder}/build/serve/test/run",
             "args": [
                 "--system-mode",
-                "8", 
+                "0",
+                "--skip-load-data", 
+                "--workload",
+                "smallbank",
+                "--access-pattern",
+                "2",
+                // "--zipfian-theta",
+                // "0.95",
+                "--hotspot-fraction",
+                "0.001", 
+                "--hotspot-prob",
+                "0.8",
+                "--account-count",
+                "500000",
+                "--worker-threads",
+                "16",
+                "--try-count",
+                "100000",
+                "--affinity-txn-ratio", 
+                "0.2"
+                
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build/serve/test/",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "(gdb)tpcc_test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/serve/test/run",
+            "args": [
+                "--workload",
+                "tpcc",
+                "--skip-load-data",
+                "--system-mode",
+                "13", 
                 "--access-pattern",
                 "0",
                 "--zipfian-theta",

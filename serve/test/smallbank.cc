@@ -35,12 +35,13 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
         }
         // Enqueue the transaction into the global transaction pool
         // txn_pool->receive_txn_from_client(txn_entry);
-        if(SYSTEM_MODE != 11){
-            txn_pool->receive_txn_from_client_batch(txn_batch, thread_id);
-        }
-        else {
-            txn_pool->receive_txn_from_client_batch(txn_batch, 0);
-        }
+        // if(SYSTEM_MODE != 11){
+        //     txn_pool->receive_txn_from_client_batch(txn_batch, thread_id);
+        // }
+        // else {
+        //     txn_pool->receive_txn_from_client_batch(txn_batch, 0);
+        // }
+        txn_pool->receive_txn_from_client_batch(txn_batch, 0);
     }
     txn_pool->stop_pool();
 
@@ -57,7 +58,7 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
     std::cout << "Will load " << smallbank_account << " accounts into checking and savings tables" << std::endl;
     // Load data into the database if needed
     // Insert data into checking and savings tables
-    const int num_threads = 30;  // Number of worker threads
+    const int num_threads = 50;  // Number of worker threads
     std::vector<std::thread> threads;
     const int chunk_size = smallbank_account / num_threads;
     // 这里创建一个导入数据的账户id的列表, 随机导入
@@ -139,6 +140,109 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
     }
     std::cout << "Data loaded successfully." << std::endl;
 
+    // try vacuum freeze 
+    try {
+        pqxx::nontransaction txn_vacuum(*conn0);
+        txn_vacuum.exec("VACUUM FREEZE checking;");
+        txn_vacuum.exec("VACUUM FREEZE savings;");
+        std::cout << "Vacuum freeze completed successfully." << std::endl;
+    }catch (const std::exception &e) {
+        std::cerr << "Error during vacuum freeze: " << e.what() << std::endl;
+    }
+
+    std::thread extend_thread1([](){
+        pqxx::connection conn_extend(DBConnection[0]);
+        if (!conn_extend.is_open()) {
+            std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+            return;
+        }
+        try{
+            // pg not support
+            pqxx::nontransaction txn(conn_extend);
+            // pre-extend table to avoid frequent page extend during txn processing
+            std::string extend_sql = "SELECT sys_extend('checking', " + std::to_string(PreExtendPageSize) + ")";
+            txn.exec(extend_sql);
+            std::cout << "Pre-extended checking table." << std::endl;
+        }
+        catch (const std::exception &e) {
+            std::cerr << "Error while pre-extending checking table: " << e.what() << std::endl;
+        }
+    });
+
+    std::thread extend_thread2([](){
+        pqxx::connection conn_extend(DBConnection[0]);
+        if (!conn_extend.is_open()) {
+            std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+            return;
+        }
+        try{
+            // pg not support
+            pqxx::nontransaction txn(conn_extend);
+            // pre-extend table to avoid frequent page extend during txn processing
+            std::string extend_sql = "SELECT sys_extend('savings', " + std::to_string(PreExtendPageSize) + ")";
+            txn.exec(extend_sql);
+            std::cout << "Pre-extended savings table." << std::endl;
+        }
+        catch (const std::exception &e) {
+            std::cerr << "Error while pre-extending savings table: " << e.what() << std::endl;
+        }
+    });
+
+    std::thread extend_thread3([](){
+        pqxx::connection conn_extend(DBConnection[0]);
+        if (!conn_extend.is_open()) {
+            std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+            return;
+        }
+        try{
+            // pg not support
+            pqxx::nontransaction txn(conn_extend);
+            // pre-extend table to avoid frequent page extend during txn processing
+            std::string extend_sql = "SELECT sys_extend('idx_checking_id', " + std::to_string(PreExtendIndexPageSize) + ")";
+            txn.exec(extend_sql);
+            std::cout << "Pre-extended idx_checking_id index." << std::endl;
+        }
+        catch (const std::exception &e) {
+            std::cerr << "Error while pre-extending idx_checking_id index: " << e.what() << std::endl;
+        }
+    });
+
+    std::thread extend_thread4([](){
+        pqxx::connection conn_extend(DBConnection[0]);
+        if (!conn_extend.is_open()) {
+            std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+            return;
+        }
+        try{
+            // pg not support
+            pqxx::nontransaction txn(conn_extend);
+            // pre-extend table to avoid frequent page extend during txn processing
+            std::string extend_sql = "SELECT sys_extend('idx_savings_id', " + std::to_string(PreExtendIndexPageSize) + ")";
+            txn.exec(extend_sql);
+            std::cout << "Pre-extended idx_savings_id index." << std::endl;
+        }
+        catch (const std::exception &e) {
+            std::cerr << "Error while pre-extending idx_savings_id index: " << e.what() << std::endl;
+        }
+    });
+
+    extend_thread1.join();
+    extend_thread2.join();
+    extend_thread3.join();
+    extend_thread4.join();
+
+    std::cout << "Table creation and pre-extension completed." << std::endl;
+
+    // try analyze
+    try {
+        pqxx::nontransaction txn_analyze(*conn0);
+        txn_analyze.exec("ANALYZE checking;");
+        txn_analyze.exec("ANALYZE savings;");
+        std::cout << "Analyze completed successfully." << std::endl;
+    }catch (const std::exception &e) {
+        std::cerr << "Error during analyze: " << e.what() << std::endl;
+    }
+
     // 输出一些导入数据的统计信息
     try{
         auto txn = pqxx::work(*conn0);
@@ -154,6 +258,39 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
     }catch(const std::exception &e) {
         std::cerr << "Error while getting table size: " << e.what() << std::endl;
     }
+
+    // // 在各个节点都执行一次select count(*)，确保数据同步完成
+    // try{
+    //     std::vector<std::thread> count_threads;
+    //     for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+    //         count_threads.emplace_back([node_id]() {
+    //             pqxx::connection conn_count(DBConnection[node_id]);
+    //             if (!conn_count.is_open()) {
+    //                 std::cerr << "Failed to connect to the database. conninfo" + DBConnection[node_id] << std::endl;
+    //                 return;
+    //             }
+    //             try{
+    //                 pqxx::nontransaction txn(conn_count);
+    //                 pqxx::result checking_count = txn.exec("SELECT COUNT(*) FROM checking;");
+    //                 pqxx::result savings_count = txn.exec("SELECT COUNT(*) FROM savings;");
+    //                 if(!checking_count.empty()){
+    //                     std::cout << "Node " << node_id << " - Checking table count: " << checking_count[0][0].as<int>() << std::endl;
+    //                 }
+    //                 if(!savings_count.empty()){
+    //                     std::cout << "Node " << node_id << " - Savings table count: " << savings_count[0][0].as<int>() << std::endl;
+    //                 }
+    //             }catch(const std::exception &e) {
+    //                 std::cerr << "Error while getting table count on node " << node_id << ": " << e.what() << std::endl;
+    //             }
+    //         });
+    //     }
+    //     for(auto& t : count_threads) {
+    //         t.join();
+    //     }
+    // }catch(const std::exception &e) {
+    //     std::cerr << "Error while executing count threads: " << e.what() << std::endl;
+    // }
+
     // 返回映射供上层初始化 SmartRouter 的 key->page
     return ret;
 }

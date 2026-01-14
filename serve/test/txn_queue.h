@@ -298,6 +298,7 @@ public:
         if (notify) {
             pending_cv_.notify_all();
         }
+        #if LOG_QUEUE_STATUS
         logger_->info("[PendingTxnSet] Pop DAG-ready pending txns cnt: " + 
             [&]() {
                 std::string s;
@@ -316,6 +317,7 @@ public:
                 return s;
             }()
         );
+        #endif
         return to_schedule;
     }
 
@@ -364,9 +366,11 @@ public:
         if(txn_queue_.empty() && dag_txn_queue_->empty() && (finished_ || batch_finished_)) {
             // indicate finished or batch finished, pop one from shared_queue, if shared_queue is empty, will returen {}
             batch_entries = std::move(shared_txn_queue_->pop_txn()); 
+        #if LOG_QUEUE_STATUS
             logger_->info("[TxnQueue Pop] call_id: " + std::to_string(call_id) + 
                             " Popping from shared txn queue of compute node " + std::to_string(node_id_) +
                             ", popped size: " + std::to_string(batch_entries.size()));
+        #endif
             return batch_entries;
         }
 
@@ -404,6 +408,7 @@ public:
 
                 // 统计与日志
                 current_queue_size_ -= static_cast<int>(dag_chunk.size() + reg_part.size());
+            #if LOG_QUEUE_STATUS
                 logger_->info("[TxnQueue Pop] call_id: " + std::to_string(call_id) +
                             " Popping mixed DAG+regular batch size " + std::to_string(dag_sz + reg_sz) +
                             " (dag=" + std::to_string(dag_sz) + ", regular=" + std::to_string(reg_sz) +
@@ -413,6 +418,12 @@ public:
                             ", schedule_txn_vec_cnt: " + std::to_string(schedule_txn_vec_cnt) +
                             ", regular_txn_cnt: " + std::to_string(regular_txn_cnt) +
                             ", regular_txn_vec_cnt: " + std::to_string(regular_txn_vec_cnt));
+            #endif
+
+                // ! Fix: Notify waiting threads (producers or other consumers)
+                if(current_queue_size_ <= max_queue_size_ * 0.8 || !txn_queue_.empty() || !dag_txn_queue_->empty()) {
+                    queue_cv_.notify_all();
+                }
 
                 lock.unlock(); // !释放锁
                 // 最后在锁外部将 dag_chunk 和 reg_part 随机打散合并返回
@@ -472,12 +483,14 @@ public:
                 current_queue_size_ -= static_cast<int>(batch_entries.size());
                 schedule_txn_cnt -= static_cast<int>(batch_entries.size());
                 schedule_txn_vec_cnt -= 1;
+            #if LOG_QUEUE_STATUS
                 logger_->info("[TxnQueue Pop] call_id: " + std::to_string(call_id) + 
                                 " Popping full DAG txn batch of size " + std::to_string(batch_entries.size()) + 
                                 " from txn queue of compute node " + std::to_string(node_id_) +
                                 ", current queue size: " + std::to_string(current_queue_size_) + 
                                 ", schedule_txn_cnt: " + std::to_string(schedule_txn_cnt) +
                                 ", schedule_txn_vec_cnt: " + std::to_string(schedule_txn_vec_cnt));
+            #endif
                 return std::move(batch_entries);
             }
         } else {
@@ -490,6 +503,7 @@ public:
             current_queue_size_ -= static_cast<int>(batch_entries.size());
             regular_txn_cnt -= static_cast<int>(batch_entries.size());
             regular_txn_vec_cnt -= 1;
+        #if LOG_QUEUE_STATUS
             logger_->info("[TxnQueue Pop] call_id: " + std::to_string(call_id) + " Popping regular txn batch of size " + 
                             std::to_string(batch_entries.size()) + " from txn queue of compute node " + std::to_string(node_id_) +
                             ", current queue size: " + std::to_string(current_queue_size_) + 
@@ -497,11 +511,12 @@ public:
                             ", schedule_txn_vec_cnt: " + std::to_string(schedule_txn_vec_cnt) +
                             ", regular_txn_cnt: " + std::to_string(regular_txn_cnt) +
                             ", regular_txn_vec_cnt: " + std::to_string(regular_txn_vec_cnt));
+        #endif
         }
 
-        // 通知可能阻塞的生产者线程
-        if(current_queue_size_ <= max_queue_size_ * 0.8) {
-            queue_cv_.notify_one();
+        // 通知可能阻塞的生产者线程或消费者线程
+        if(current_queue_size_ <= max_queue_size_ * 0.8 || !txn_queue_.empty() || !dag_txn_queue_->empty()) {
+            queue_cv_.notify_all();
         }
         lock.unlock(); // !释放锁
         // add dependency check here, 这里只建议依赖吧, 先统计输出一下, 感觉改成类似确定性的思路不好做
@@ -543,6 +558,7 @@ public:
         schedule_txn_cnt += size;
         schedule_txn_vec_cnt += 1;
         dag_txn_queue_->push_ready_batch(std::move(entries));
+    #if LOG_QUEUE_STATUS
         logger_->info("[TxnQueue Push Front] Pushed combined txn batch of size " + 
                         std::to_string(size) + " to front of txn queue of compute node " + std::to_string(node_id_) +
                         ", current queue size: " + std::to_string(current_queue_size_) + 
@@ -550,6 +566,7 @@ public:
                         ", schedule_txn_vec_cnt: " + std::to_string(schedule_txn_vec_cnt) +
                         ", regular_txn_cnt: " + std::to_string(regular_txn_cnt) +
                         ", regular_txn_vec_cnt: " + std::to_string(regular_txn_vec_cnt));
+    #endif
         queue_cv_.notify_one();
     }
 
@@ -782,9 +799,13 @@ public:
             if (stop_ && txn_pool_.size() < batch_size) {
                 return {}; // 如果停止且池中事务不足，返回空向量
             }
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            double now_ms = ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
             for (int i = 0; i < batch_size; i++) {
                 TxnQueueEntry* entry = txn_pool_.front();
                 txn_pool_.pop_front();
+                entry->fetch_time = now_ms;
                 batch_txns->push_back(entry);
             }
         }

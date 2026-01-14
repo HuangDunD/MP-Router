@@ -29,6 +29,7 @@ struct TxnQueueEntry {
     std::atomic<bool> done{false}; // 由执行线程标记完成；内存回收交由 TIT 管理
     std::vector<tx_id_t> dependencies; // 路由层决定的这些事务的前序事务，也就是执行这些事务之前检查一下TIT表中以来的事务状态是否已经done，否则拖延一小段时间再执行
     uint64_t first_exec_time = 0; // 判定为前面的依赖的事务还没执行完成, 稍微延后一会
+    double fetch_time = 0.0; // 事务被从池中取出的时间
 
     // 拓扑图相关
     std::vector<TxnQueueEntry*> after_txns; // 依赖当前事务的后续事务列表

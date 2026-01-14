@@ -13,3 +13,4 @@ offlineLoad_tpcc.txt
 *.png
 *.log
 result/*
+draw/figs/*

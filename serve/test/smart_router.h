@@ -107,7 +107,18 @@ public:
             double preprocess_txn_ms, wait_pending_txn_push_ms, wait_last_batch_finish_ms = 0.0;
             double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
-            double ownership_retrieval_and_devide_unconflicted_txn_ms, merge_and_construct_ipq_ms, process_conflicted_txn_ms = 0.0;
+            double ownership_retrieval_and_devide_unconflicted_txn_ms = 0.0; 
+            double process_conflicted_txn_ms = 0.0;
+                double merge_and_construct_ipq_ms = 0.0;
+                double select_condidate_txns_ms = 0.0;
+                double compute_transfer_page_ms = 0.0;
+                double find_affected_txns_ms = 0.0;
+                double decide_txn_schedule_ms = 0.0;
+                double add_txn_dependency_ms = 0.0;
+                double push_prioritized_txns_ms = 0.0;
+                double push_end_txns_ms = 0.0;
+                double final_push_to_queues_ms = 0.0;
+
         
         // ! txn worker 时间分解
         std::vector<std::vector<double>> worker_thread_exec_time_ms;
@@ -200,7 +211,7 @@ public:
           logger(logger_ptr),
           btree_service_(btree_service),
           metis_(metis),
-          threadpool(worker_threads, *logger), 
+          threadpool(2 * worker_threads, *logger), 
           routed_txn_cnt_per_node(MaxComputeNodeCount), 
           batch_finished_flags(MaxComputeNodeCount, 0),
           workload_balance_penalty_weights_(MaxComputeNodeCount, 0),
@@ -243,17 +254,23 @@ public:
         #endif
 
         // start the router thread
-        if(SYSTEM_MODE <= 8 || SYSTEM_MODE == 13){
+        if(SYSTEM_MODE <= 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
             router_worker_threads_ = worker_threads_;
-            for(int i=0; i<worker_threads_; i++) {
-                std::thread router_thread([this, i]() {
-                    std::string thread_name = "SmartRouter_" + std::to_string(i);
-                    pthread_setname_np(pthread_self(), thread_name.c_str());
-                    this->run_router_worker(i);
-                });
-                pthread_setname_np(router_thread.native_handle(), ("SmartRouter_" + std::to_string(i)).c_str());
-                router_thread.detach();
-            }
+            // for(int i=0; i<worker_threads_; i++) {
+            //     std::thread router_thread([this, i]() {
+            //         std::string thread_name = "SmartRouter_" + std::to_string(i);
+            //         pthread_setname_np(pthread_self(), thread_name.c_str());
+            //         this->run_router_worker(i);
+            //     });
+            //     pthread_setname_np(router_thread.native_handle(), ("SmartRouter_" + std::to_string(i)).c_str());
+            //     router_thread.detach();
+            // }
+            std::thread router_thread([this]() {
+                std::string thread_name = "SmartRouter";
+                pthread_setname_np(pthread_self(), thread_name.c_str());
+                this->run_router_worker_new();
+            });
+            router_thread.detach();
         }
         else if (SYSTEM_MODE == 9 || SYSTEM_MODE == 10) {
             router_worker_threads_ = 1; // SYSTEM_MODE 9 和 10 只启动一个路由线程
@@ -633,10 +650,11 @@ public:
         node_id_t will_route_node; // 最终决定路由到的节点
         bool is_scheduled = false; // 是否已经被调度, 避免重复调度
         int hot_level = 0; // 热点级别
+        int dense_id = -1; // 线程本地稠密ID, 用于优化IPQ
     };
 
     void compute_benefit_for_node(SchedulingCandidateTxn* sc, std::unordered_map<node_id_t, int>& ownership_node_count, std::vector<double>& compute_node_workload_benefit,
-        double metis_benefit_weight, double ownership_benefit_weight, double load_balance_benefit_weight, double hot_prior_decision_weight); 
+        double metis_benefit_weight, double ownership_benefit_weight, double load_balance_benefit_weight); 
      
     std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> get_route_primary_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch,
             std::vector<pqxx::connection *> &thread_conns);
@@ -648,7 +666,7 @@ public:
     // 这个是路由层的主循环, 他不断从txn_pool中取出事务进行路由
     // 进行的路由决策会放入txn_queue中，供执行层消费
     void run_router_worker(int thread_id) {
-        assert((SYSTEM_MODE >=0 && SYSTEM_MODE <=8) || SYSTEM_MODE == 13); 
+        assert((SYSTEM_MODE >=0 && SYSTEM_MODE <=8) || SYSTEM_MODE == 13 || (SYSTEM_MODE >=23 && SYSTEM_MODE <=25)); 
         // for routing needed db connections, each routing thread has its own connections
         std::vector<pqxx::connection*> thread_conns_vec;
         for(int i=0; i<ComputeNodeCount; i++) {
@@ -760,9 +778,15 @@ public:
                 }
                 else if(SYSTEM_MODE == 2) {
                     // get page_id from checking_page_map
-                    routed_node_id = rand() % ComputeNodeCount; // Fallback to random node if not found
+                    std::vector<int> key_hash_cnt(ComputeNodeCount, 0);
+                    for(auto key: keys) {
+                        // 使用乘法Hash打散，避免直接取模导致的热点集中
+                        size_t hash_val = key * 9973; 
+                        key_hash_cnt[hash_val % ComputeNodeCount]++;
+                    }
+                    routed_node_id = std::distance(key_hash_cnt.begin(), std::max_element(key_hash_cnt.begin(), key_hash_cnt.end()));
                 }
-                else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13) {
+                else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
                     SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, rw, thread_conns_vec);
                     if(result.success) {
                         routed_node_id = result.smart_router_id;
@@ -903,6 +927,257 @@ public:
         std::cout << "Router worker thread finished." << std::endl; 
     }
     
+    // ! 这个函数是run_router_worker 的对应, 相比之下, 我们把他和run_router_batch_worker_pipeline 的模式对应, 都是一次拿一个batch的事务, 然后在这里交给多线程来处理
+    void run_router_worker_new() {
+        assert((SYSTEM_MODE >=0 && SYSTEM_MODE <=8) || SYSTEM_MODE == 13 || (SYSTEM_MODE >=23 && SYSTEM_MODE <=25)); 
+        // for routing needed db connections, each routing thread has its own connections
+        std::vector<std::vector<pqxx::connection*>> all_thread_conns(worker_threads_);
+        for(int t=0; t<worker_threads_; t++) {
+            for(int i=0; i<ComputeNodeCount; i++) {
+                pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
+                all_thread_conns[t].push_back(conn);
+            }
+        }
+
+        // wait for router start work
+        std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
+        start_router_cv.wait(start_router_lock, [this]() { 
+            return start_router_; 
+        });
+        start_router_lock.unlock();
+
+        batch_id = -1; // 对于流水线模式，初始batch_id为-1，因为同步点get_route_primary_batch_schedule_v2中会先+1
+        while (true) {
+            // 计时
+            struct timespec start_time, end_time;
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+            // pipeline 模式下，batch_id在get_route_primary_batch_schedule_v2中自增, 这里相当于是拿的下一个batch的事务
+            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, 0);
+
+            // 计时
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            time_stats_.fetch_txn_from_pool_ms +=
+                (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+
+            logger->info("Router Worker: Fetching batch " + std::to_string(batch_id + 1) + " from txn pool.");
+            if (txn_batch == nullptr || txn_batch->empty()) {
+                // 说明事务池已经运行完成
+                for(auto txn_queue : txn_queues_) {
+                    txn_queue->set_finished();
+                }
+                batch_cv.notify_all(); // 通知所有等待的计算节点线程结束
+                break;
+            }
+            // assert(txn_batch->size() == BatchRouterProcessSize);
+            
+            // 计时
+            struct timespec wait_start_time, wait_end_time;
+            clock_gettime(CLOCK_MONOTONIC, &wait_start_time);
+            // !0.0 等待上一个batch所有db connector线程完成该批次的路由
+            {
+                std::unique_lock<std::mutex> lock(batch_mutex); 
+                batch_cv.wait(lock, [this]() { 
+                    for(int i=0; i<ComputeNodeCount; i++) {
+                        // 宽松 check if the queue is empty
+                        if(txn_queues_[i]->size() == 0 && txn_queues_[i]->is_shared_queue_empty()) {
+                            return true;
+                        }
+                    }
+                    return false;
+                });
+            }
+
+            {
+                std::unique_lock<std::mutex> lock(batch_mutex); 
+                batch_id ++;
+                for(int i=0; i<ComputeNodeCount; i++) {
+                    txn_queues_[i]->set_process_batch_id(batch_id);
+                }
+                batch_cv.notify_all();
+            }
+
+            // 计时结束
+            clock_gettime(CLOCK_MONOTONIC, &wait_end_time);
+            time_stats_.wait_last_batch_finish_ms += 
+                (wait_end_time.tv_sec - wait_start_time.tv_sec) * 1000.0 + (wait_end_time.tv_nsec - wait_start_time.tv_nsec) / 1000000.0;
+            logger->info("Waiting last batch finish time: " + std::to_string(
+                (wait_end_time.tv_sec - wait_start_time.tv_sec) * 1000.0 + (wait_end_time.tv_nsec - wait_start_time.tv_nsec) / 1000000.0) + " ms");
+
+            // 开始调度
+            // 计时
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+            std::vector<std::future<void>> futures;
+            size_t batch_size = txn_batch->size();
+
+            for(int t=0; t<worker_threads_; t++) {
+                futures.emplace_back(threadpool.enqueue([this, &txn_batch, t, batch_size, &all_thread_conns]() {
+                    auto& thread_conns_vec = all_thread_conns[t];
+                    std::vector<std::vector<TxnQueueEntry*>> local_node_txns(ComputeNodeCount);
+                    
+                    for(size_t i = t; i < batch_size; i += worker_threads_) {
+                        TxnQueueEntry* txn_entry = (*txn_batch)[i];
+
+                        // --- Decision Logic ---
+                        struct timespec decision_begin_time, decision_end_time;
+                        clock_gettime(CLOCK_MONOTONIC, &decision_begin_time);
+
+                        tx_id_t tx_id = txn_entry->tx_id;
+                        int txn_type = txn_entry->txn_type;
+
+                        // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
+                        std::vector<itemkey_t> keys;
+                        std::vector<table_id_t> table_ids; 
+                        std::vector<bool> rw;
+
+                        if(Workload_Type == 0) {
+                            itemkey_t account1 = txn_entry->accounts[0];
+                            itemkey_t account2 = txn_entry->accounts[1];
+                            table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
+                            smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
+                            rw = smallbank_->get_rw_by_txn_type(txn_type);
+                        } else if (Workload_Type == 1) { 
+                            table_ids = ycsb_->get_table_ids_by_txn_type();
+                            keys = txn_entry->ycsb_keys;
+                            rw = ycsb_->get_rw_flags();
+                        } else if (Workload_Type == 2) {
+                            keys = txn_entry->tpcc_keys;
+                            table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, keys.size());
+                            rw = tpcc_->get_rw_flags_by_txn_type(txn_type, keys.size());
+                        }
+                        // assert(table_ids.size() == keys.size());
+
+                        // Init the routed node id
+                        int routed_node_id = 0; // Default node ID
+                        
+                        // ! decide the routed_node_id based on SYSTEM_MODE
+                        #if LOG_ACCESS_KEY
+                            // 写日志记录一下
+                            std::unique_lock<std::mutex> lock(log_mutex);
+                            if(access_key_log_file.is_open()) {
+                                int i=0;
+                                for(i=0; i<table_ids.size()-1; i++) access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "},";
+                                access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "}" << std::endl;
+                                access_key_log_file.flush();
+                            }
+                            for (auto key: keys) key_freq[key]++;
+                            lock.unlock();
+                        #endif
+
+                        if(SYSTEM_MODE == 0) {
+                            routed_node_id = rand() % ComputeNodeCount; // Randomly select node ID for system mode 0
+                        }
+                        else if(SYSTEM_MODE == 1){
+                            std::vector<int> key_range_count(ComputeNodeCount, 0);
+                            for(size_t i=0; i<keys.size(); i++) {
+                                itemkey_t key = keys[i];
+                                node_id_t choose_node;
+                                if(Workload_Type == 0) {
+                                    choose_node = key / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
+                                } else if (Workload_Type == 1) {
+                                    choose_node = key / (ycsb_->get_record_count() / ComputeNodeCount); // Range partitioning
+                                } else if (Workload_Type == 2) {
+                                    table_id_t tid = table_ids[i];
+                                    int total = tpcc_->get_total_keys(static_cast<TPCCTableType>(tid));
+                                    if (total == 0) total = 1; 
+                                    int range = total / ComputeNodeCount;
+                                    if (range == 0) range = 1;
+                                    choose_node = (key - 1) / range;
+                                }
+                                if (choose_node >= ComputeNodeCount) choose_node = ComputeNodeCount - 1;
+                                key_range_count[choose_node]++;
+                            }
+                            routed_node_id = std::distance(key_range_count.begin(), 
+                                                    std::max_element(key_range_count.begin(), key_range_count.end()));
+                        }
+                        else if(SYSTEM_MODE == 2) {
+                            // get page_id from checking_page_map
+                            std::vector<int> key_hash_cnt(ComputeNodeCount, 0);
+                            for(auto key: keys) {
+                                // 使用乘法Hash打散，避免直接取模导致的热点集中
+                                size_t hash_val = key * 9973; 
+                                key_hash_cnt[hash_val % ComputeNodeCount]++;
+                            }
+                            routed_node_id = std::distance(key_hash_cnt.begin(), std::max_element(key_hash_cnt.begin(), key_hash_cnt.end()));
+                        }
+                        else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
+                            SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, rw, thread_conns_vec);
+                            if(result.success) {
+                                routed_node_id = result.smart_router_id;
+                                if(SYSTEM_MODE == 3) txn_entry->txn_decision_type = result.sys_3_decision_type; 
+                                else if(SYSTEM_MODE == 8) txn_entry->txn_decision_type = result.sys_8_decision_type; 
+                            }
+                            else {
+                                // fallback to random
+                                routed_node_id = rand() % ComputeNodeCount;
+                            //  std::cerr << "Warning: SmartRouter get_route_primary failed: " << result.error_message << std::endl;
+                            }
+                        }
+                        else if(SYSTEM_MODE == 4) {
+                            routed_node_id = 0; // All to node 0 for single
+                        }
+                        else assert(false); // unknown mode
+
+                        clock_gettime(CLOCK_MONOTONIC, &decision_end_time);
+                        time_stats_.schedule_decision_ms_per_thread[t] += 
+                            (decision_end_time.tv_sec - decision_begin_time.tv_sec) * 1000.0 + 
+                            (decision_end_time.tv_nsec - decision_begin_time.tv_nsec) / 1000000.0;
+
+                        // 计时
+                        struct timespec push_begin_time, push_end_time;
+                        clock_gettime(CLOCK_MONOTONIC, &push_begin_time);
+                        
+                        // 将事务放入线程本地 buffer
+                        local_node_txns[routed_node_id].push_back(txn_entry);
+
+                        // 如果达到批量大小，则批量推送
+                        if(local_node_txns[routed_node_id].size() >= BatchExecutorPOPTxnSize){
+                            txn_queues_[routed_node_id]->push_txn_back_batch(local_node_txns[routed_node_id]);
+                            routed_txn_cnt_per_node[routed_node_id].fetch_add(local_node_txns[routed_node_id].size(), std::memory_order_relaxed);
+                            for(int k=0; k<local_node_txns[routed_node_id].size(); k++) load_tracker_.record(routed_node_id);
+                            local_node_txns[routed_node_id].clear();
+                        }
+                        clock_gettime(CLOCK_MONOTONIC, &push_end_time);
+                        time_stats_.push_txn_to_queue_ms_per_thread[t] += 
+                            (push_end_time.tv_sec - push_begin_time.tv_sec) * 1000.0 + 
+                            (push_end_time.tv_nsec - push_begin_time.tv_nsec) / 1000000.0;
+                    }
+
+                    // Flush remaining
+                    struct timespec push_begin_time, push_end_time;
+                    clock_gettime(CLOCK_MONOTONIC, &push_begin_time);
+                    for(int node_id = 0; node_id < ComputeNodeCount; node_id++){
+                        if(!local_node_txns[node_id].empty()){
+                            txn_queues_[node_id]->push_txn_back_batch(local_node_txns[node_id]);
+                            routed_txn_cnt_per_node[node_id].fetch_add(local_node_txns[node_id].size(), std::memory_order_relaxed);
+                            for(int k=0; k<local_node_txns[node_id].size(); k++) load_tracker_.record(node_id);
+                            local_node_txns[node_id].clear();
+                        }
+                    }
+                    clock_gettime(CLOCK_MONOTONIC, &push_end_time);
+                    time_stats_.push_txn_to_queue_ms_per_thread[t] += 
+                        (push_end_time.tv_sec - push_begin_time.tv_sec) * 1000.0 + 
+                        (push_end_time.tv_nsec - push_begin_time.tv_nsec) / 1000000.0;
+                }));
+            }
+
+            for(auto& f : futures) {
+                f.get();
+            }
+
+            for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+                // 把该批的事务都分发完成，设置batch处理完成标志
+                txn_queues_[node_id]->set_batch_finished();
+            }
+
+            // 计时
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            time_stats_.schedule_total_ms += 
+                (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+        }
+        std::cout << "Router worker thread finished." << std::endl;
+    }
+
     void run_router_batch_worker_pipeline() {
         assert(SYSTEM_MODE == 11);         
         // for routing needed db connections, each routing thread has its own connections

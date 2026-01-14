@@ -31,7 +31,7 @@ int NewMetis::build_internal_graph(std::unordered_map<uint64_t, node_id_t> &requ
             }
         }
         // Trigger on the very first call, ensuring milestone is updated to prevent immediate re-trigger if interval is small
-        if (current_call_count == 1) {
+        if (current_call_count == 1000) {
             should_trigger_partition = true;
             uint64_t expected_first_milestone = 0;
             // Only update if it's still 0, to ensure the first call claims a distinct milestone value

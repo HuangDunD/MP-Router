@@ -336,87 +336,87 @@ public:
         catch (const std::exception &e) {
             std::cerr << "Error while setting checking table autovacuum: " << e.what() << std::endl;
         }
-        std::thread extend_thread1([](){
-            pqxx::connection conn_extend(DBConnection[0]);
-            if (!conn_extend.is_open()) {
-                std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
-                return;
-            }
-            try{
-                // pg not support
-                pqxx::nontransaction txn(conn_extend);
-                // pre-extend table to avoid frequent page extend during txn processing
-                std::string extend_sql = "SELECT sys_extend('checking', " + std::to_string(PreExtendPageSize) + ")";
-                txn.exec(extend_sql);
-                std::cout << "Pre-extended checking table." << std::endl;
-            }
-            catch (const std::exception &e) {
-                std::cerr << "Error while pre-extending checking table: " << e.what() << std::endl;
-            }
-        });
+        // std::thread extend_thread1([](){
+        //     pqxx::connection conn_extend(DBConnection[0]);
+        //     if (!conn_extend.is_open()) {
+        //         std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+        //         return;
+        //     }
+        //     try{
+        //         // pg not support
+        //         pqxx::nontransaction txn(conn_extend);
+        //         // pre-extend table to avoid frequent page extend during txn processing
+        //         std::string extend_sql = "SELECT sys_extend('checking', " + std::to_string(PreExtendPageSize) + ")";
+        //         txn.exec(extend_sql);
+        //         std::cout << "Pre-extended checking table." << std::endl;
+        //     }
+        //     catch (const std::exception &e) {
+        //         std::cerr << "Error while pre-extending checking table: " << e.what() << std::endl;
+        //     }
+        // });
 
-        std::thread extend_thread2([](){
-            pqxx::connection conn_extend(DBConnection[0]);
-            if (!conn_extend.is_open()) {
-                std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
-                return;
-            }
-            try{
-                // pg not support
-                pqxx::nontransaction txn(conn_extend);
-                // pre-extend table to avoid frequent page extend during txn processing
-                std::string extend_sql = "SELECT sys_extend('savings', " + std::to_string(PreExtendPageSize) + ")";
-                txn.exec(extend_sql);
-                std::cout << "Pre-extended savings table." << std::endl;
-            }
-            catch (const std::exception &e) {
-                std::cerr << "Error while pre-extending savings table: " << e.what() << std::endl;
-            }
-        });
+        // std::thread extend_thread2([](){
+        //     pqxx::connection conn_extend(DBConnection[0]);
+        //     if (!conn_extend.is_open()) {
+        //         std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+        //         return;
+        //     }
+        //     try{
+        //         // pg not support
+        //         pqxx::nontransaction txn(conn_extend);
+        //         // pre-extend table to avoid frequent page extend during txn processing
+        //         std::string extend_sql = "SELECT sys_extend('savings', " + std::to_string(PreExtendPageSize) + ")";
+        //         txn.exec(extend_sql);
+        //         std::cout << "Pre-extended savings table." << std::endl;
+        //     }
+        //     catch (const std::exception &e) {
+        //         std::cerr << "Error while pre-extending savings table: " << e.what() << std::endl;
+        //     }
+        // });
 
-        std::thread extend_thread3([](){
-            pqxx::connection conn_extend(DBConnection[0]);
-            if (!conn_extend.is_open()) {
-                std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
-                return;
-            }
-            try{
-                // pg not support
-                pqxx::nontransaction txn(conn_extend);
-                // pre-extend table to avoid frequent page extend during txn processing
-                std::string extend_sql = "SELECT sys_extend('idx_checking_id', " + std::to_string(PreExtendIndexPageSize) + ")";
-                txn.exec(extend_sql);
-                std::cout << "Pre-extended idx_checking_id index." << std::endl;
-            }
-            catch (const std::exception &e) {
-                std::cerr << "Error while pre-extending idx_checking_id index: " << e.what() << std::endl;
-            }
-        });
+        // std::thread extend_thread3([](){
+        //     pqxx::connection conn_extend(DBConnection[0]);
+        //     if (!conn_extend.is_open()) {
+        //         std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+        //         return;
+        //     }
+        //     try{
+        //         // pg not support
+        //         pqxx::nontransaction txn(conn_extend);
+        //         // pre-extend table to avoid frequent page extend during txn processing
+        //         std::string extend_sql = "SELECT sys_extend('idx_checking_id', " + std::to_string(PreExtendIndexPageSize) + ")";
+        //         txn.exec(extend_sql);
+        //         std::cout << "Pre-extended idx_checking_id index." << std::endl;
+        //     }
+        //     catch (const std::exception &e) {
+        //         std::cerr << "Error while pre-extending idx_checking_id index: " << e.what() << std::endl;
+        //     }
+        // });
 
-        std::thread extend_thread4([](){
-            pqxx::connection conn_extend(DBConnection[0]);
-            if (!conn_extend.is_open()) {
-                std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
-                return;
-            }
-            try{
-                // pg not support
-                pqxx::nontransaction txn(conn_extend);
-                // pre-extend table to avoid frequent page extend during txn processing
-                std::string extend_sql = "SELECT sys_extend('idx_savings_id', " + std::to_string(PreExtendIndexPageSize) + ")";
-                txn.exec(extend_sql);
-                std::cout << "Pre-extended idx_savings_id index." << std::endl;
-            }
-            catch (const std::exception &e) {
-                std::cerr << "Error while pre-extending idx_savings_id index: " << e.what() << std::endl;
-            }
-        });
+        // std::thread extend_thread4([](){
+        //     pqxx::connection conn_extend(DBConnection[0]);
+        //     if (!conn_extend.is_open()) {
+        //         std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+        //         return;
+        //     }
+        //     try{
+        //         // pg not support
+        //         pqxx::nontransaction txn(conn_extend);
+        //         // pre-extend table to avoid frequent page extend during txn processing
+        //         std::string extend_sql = "SELECT sys_extend('idx_savings_id', " + std::to_string(PreExtendIndexPageSize) + ")";
+        //         txn.exec(extend_sql);
+        //         std::cout << "Pre-extended idx_savings_id index." << std::endl;
+        //     }
+        //     catch (const std::exception &e) {
+        //         std::cerr << "Error while pre-extending idx_savings_id index: " << e.what() << std::endl;
+        //     }
+        // });
         
-        extend_thread1.join();
-        extend_thread2.join();
-        extend_thread3.join();
-        extend_thread4.join();
-        std::cout << "Table creation and pre-extension completed." << std::endl;
+        // extend_thread1.join();
+        // extend_thread2.join();
+        // extend_thread3.join();
+        // extend_thread4.join();
+        // std::cout << "Table creation and pre-extension completed." << std::endl;
     }
     
     // 表键→页映射，使用按 id 直接索引的向量以避免拷贝/搜索开销

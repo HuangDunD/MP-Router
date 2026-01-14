@@ -29,12 +29,13 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
         }
         // Enqueue the transaction into the global transaction pool
         // txn_pool->receive_txn_from_client(txn_entry);
-        if(SYSTEM_MODE != 11){
-            txn_pool->receive_txn_from_client_batch(txn_batch, thread_id);
-        }
-        else {
-            txn_pool->receive_txn_from_client_batch(txn_batch, 0);
-        }
+        // if(SYSTEM_MODE != 11){
+        //     txn_pool->receive_txn_from_client_batch(txn_batch, thread_id);
+        // }
+        // else {
+        //     txn_pool->receive_txn_from_client_batch(txn_batch, 0);
+        // }
+        txn_pool->receive_txn_from_client_batch(txn_batch, 0);
     }
     txn_pool->stop_pool();
 
