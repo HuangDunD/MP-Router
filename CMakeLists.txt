@@ -12,15 +12,30 @@ set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 set(CMAKE_CXX_STANDARD 20)
 
 # 强制静态链接
-set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
-set(BUILD_SHARED_LIBS OFF)
-set(CMAKE_EXE_LINKER_FLAGS "-static")
+# set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+# set(BUILD_SHARED_LIBS OFF)
+# set(CMAKE_EXE_LINKER_FLAGS "-static")
 
 include(FindThreads)
 
 include_directories($ENV{HOME}/local/include)
 link_directories($ENV{HOME}/local/lib)
 link_directories(/usr/lib/postgresql/14/lib)
+
+include_directories(/root/yashandb-client/include)
+
+# 查找 libpq
+find_library(YS_LIBRARY 
+    yascli PATHS 
+    /root/yashandb-client/lib
+    PATH_SUFFIXES lib
+)
+if (NOT YS_LIBRARY)
+    message(FATAL_ERROR "libyascli (YashanDB client) not found!")
+else()
+    message(STATUS "Found libyascli: ${YS_LIBRARY}")
+endif()
+
 
 # 在用户目录下寻找 metis.h
 find_path(METIS_INCLUDE_DIR metis.h

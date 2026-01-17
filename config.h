@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include "common.h"
 /*********************** For common **********************/
 
 // ! pay attention: need modify this when use different workload
@@ -23,6 +24,9 @@
 // 定义算法版本 0: random 1: affinity 2: single 3: perfect
 extern int SYSTEM_MODE; 
 
+// 定义数据库类型 0: PostgreSQL 1: YashanDB
+extern int DB_TYPE;
+
 // 定义所跑的workload 0:smallbank 1:tpcc
 #define WORKLOAD_MODE 1 // 0: ycsb 1: tpcc
 #define LOG_ACCESS_KEY 0 // 0: no log 1: log
@@ -42,7 +46,8 @@ extern int SYSTEM_MODE;
 extern std::string partition_log_file_; 
 
 extern int worker_threads; // 工作线程数量, 路由和RAC节点建立的连接数
-extern std::vector<std::string> DBConnection;
+extern std::vector<std::string> DBConnection; // for PostgreSQL
+extern std::vector<YashanConnInfo> YashanDBConnections; // for YashanDB
 extern int ComputeNodeCount; // 计算节点数量
 extern uint64_t ATTEMPTED_NUM;
 extern int REGION_SIZE;
@@ -60,6 +65,7 @@ extern int PreExtendIndexPageSize; // 预分配索引页面大小
 extern bool LOAD_DATA_ONLY; // 仅加载数据模式
 extern bool SKIP_LOAD_DATA; // 跳过加载数据模式
 extern std::vector<uint64_t> hottest_keys; // for debug
+extern int NumBucket;
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;

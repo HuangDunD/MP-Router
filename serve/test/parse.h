@@ -5,3 +5,5 @@
 
 std::pair<int, int> parse_page_id_from_ctid(const std::string& ctid); 
 int64_t decode_hex_key(const std::string &hex_str);
+int oracle_base64_val(char c) ;
+page_id_t parse_yashan_rowid(const std::string& rowid_str);

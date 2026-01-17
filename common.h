@@ -31,3 +31,10 @@ using timestamp_t = uint64_t; // Timestamp type
 #define LOG_FILE_NAME "LOG_FILE"   
 
 #define kInvalidPageId -1
+
+// YashanDB compatible methods
+struct YashanConnInfo {
+    std::string ip_port;
+    std::string user;
+    std::string password;
+};

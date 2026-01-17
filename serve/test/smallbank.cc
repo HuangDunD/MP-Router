@@ -1,4 +1,514 @@
 #include "smallbank.h"
+#include <regex>
+#include <sstream>
+#include <vector>
+#include <iostream>
+
+// Try to include yacli.h if available, otherwise we might need to mock or ensure path is correct
+// Assuming it is in the same directory or include path
+#include "yacli.h" 
+
+#define YAC_CALL_VOID(proc)                      \
+    do {                                         \
+        if ((YacResult)(proc) != YAC_SUCCESS) {  \
+            std::cerr << "YashanDB Error in " << #proc << std::endl; \
+            return;                              \
+        }                                        \
+    } while (0)
+
+#define YAC_CALL_RET(proc, ret_val)              \
+    do {                                         \
+        if ((YacResult)(proc) != YAC_SUCCESS) {  \
+            std::cerr << "YashanDB Error in " << #proc << std::endl; \
+            return ret_val;                      \
+        }                                        \
+    } while (0)
+
+// Helper class for RAII of Yashan handles
+class YacHandleGuard {
+public:
+    YacHandleGuard(YacHandle& h, YacHandleType t) : handle(h), type(t) {}
+    ~YacHandleGuard() {
+        if (handle != NULL) {
+            yacFreeHandle(type, handle);
+            handle = NULL;
+        }
+    }
+    YacHandle& handle;
+    YacHandleType type;
+};
+
+void SmallBank::create_table_yashan() { 
+    std::cout << "Creating tables in YashanDB..." << std::endl;
+    YashanConnInfo info = YashanDBConnections[0]; // Use the first connection info for table creation
+
+    YacHandle env = NULL;
+    YacHandle conn = NULL;
+    YacHandle stmt = NULL;
+
+    yacAllocHandle(YAC_HANDLE_ENV, NULL, &env);
+    yacAllocHandle(YAC_HANDLE_DBC, env, &conn);
+    
+    auto YacResult = yacConnect(conn, (YacChar*)info.ip_port.c_str(), YAC_NULL_TERM_STR, 
+                   (YacChar*)info.user.c_str(), YAC_NULL_TERM_STR, 
+                   (YacChar*)info.password.c_str(), YAC_NULL_TERM_STR);
+    if (YacResult != YAC_SUCCESS) {
+        std::cerr << "Failed to connect to YashanDB for create table" << std::endl;
+        // Print error detailed... omitted for brevity
+        yacFreeHandle(YAC_HANDLE_DBC, conn);
+        yacFreeHandle(YAC_HANDLE_ENV, env);
+        return;
+    }
+    
+    yacAllocHandle(YAC_HANDLE_STMT, conn, &stmt);
+
+    // Helper lambda to run execute
+    auto execSQL = [&](const char* sql) {
+        if(yacDirectExecute(stmt, (YacChar*)sql, YAC_NULL_TERM_STR) != YAC_SUCCESS) {
+            std::cerr << "Failed to execute: " << sql << std::endl;
+            YacInt32 errCode;
+            char msg[1024];
+            YacTextPos pos;
+            yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
+            std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+        }
+    };
+
+    // 1. Drop tables
+    // execSQL("DROP TABLE checking CASCADE CONSTRAINTS"); // Oracle syntax often needs CASCADE CONSTRAINTS
+    // execSQL("DROP TABLE savings CASCADE CONSTRAINTS");
+
+    // 2. Create tables. Yashan/Oracle types: INT/INTEGER -> NUMBER(38), or INTEGER.
+    // Using INTEGER is fine.
+    // checking(id INT PRIMARY KEY, user_id INT, balance INT)
+    // savings(id INT PRIMARY KEY, user_id INT, balance INT)
+    
+    // Note: Yashan might not support DROP IF EXISTS directly in standard SQL mode like PG, usually handled by catching error or PL/SQL block.
+    // Here we just tried direct execute.
+    
+    const char* create_checking = "CREATE TABLE checking ("
+                                  "id INTEGER PRIMARY KEY, "
+                                  "balance INTEGER, "
+                                  "city INTEGER, "
+                                  "name CHAR(200))";
+    
+    const char* create_savings = "CREATE TABLE savings ("
+                                 "id INTEGER PRIMARY KEY, "
+                                 "balance INTEGER, "
+                                 "city INTEGER, "
+                                 "name CHAR(200))";
+
+    execSQL(create_checking);
+    execSQL(create_savings);
+    
+    std::cout << "YashanDB tables created." << std::endl;
+    
+    yacFreeHandle(YAC_HANDLE_STMT, stmt);
+    yacDisconnect(conn);
+    yacFreeHandle(YAC_HANDLE_DBC, conn);
+    yacFreeHandle(YAC_HANDLE_ENV, env);
+}
+
+SmallBank::TableKeyPageMap SmallBank::load_data_yashan() {
+    std::cout << "Loading data into YashanDB..." << std::endl;
+    auto smallbank_account = this->get_account_count();
+    YashanConnInfo info = YashanDBConnections[0]; // Use the first connection info for data loading
+    
+    // Same shuffle logic as PG load_data to ensure consistent distribution if using consistent seed
+    std::vector<int> id_list;
+    id_list.reserve(smallbank_account);
+    for(int i = 1; i <= smallbank_account; i++) id_list.push_back(i);
+    std::random_device rd;
+    // std::mt19937 g(rd()); 
+    // Use fixed seed for reproducibility if needed, or rd()
+    std::mt19937 g(0); // Using fixed seed 0 to match what might be needed for determinism, or use rd()
+    std::shuffle(id_list.begin(), id_list.end(), g);
+
+    TableKeyPageMap ret;
+    ret.checking_page.resize(smallbank_account + 1, 0);
+    ret.savings_page.resize(smallbank_account + 1, 0);
+
+    const int num_threads = 50; // Increased threads
+    std::vector<std::thread> threads;
+    const int chunk_size = smallbank_account / num_threads;
+
+    auto worker = [&](int start_index, int end_index) {
+        YacHandle env = NULL;
+        YacHandle conn = NULL;
+        YacHandle stmt = NULL;
+
+        yacAllocHandle(YAC_HANDLE_ENV, NULL, &env);
+        yacAllocHandle(YAC_HANDLE_DBC, env, &conn);
+        if (yacConnect(conn, (YacChar*)info.ip_port.c_str(), YAC_NULL_TERM_STR, 
+                    (YacChar*)info.user.c_str(), YAC_NULL_TERM_STR, 
+                    (YacChar*)info.password.c_str(), YAC_NULL_TERM_STR) != YAC_SUCCESS) {
+            std::cerr << "Worker thread failed to connect YashanDB" << std::endl;
+            yacFreeHandle(YAC_HANDLE_DBC, conn);
+            yacFreeHandle(YAC_HANDLE_ENV, env);
+            return;
+        }
+        
+        // Turn off AutoCommit for batch speed
+        yacSetConnAttr(conn, YAC_ATTR_AUTOCOMMIT, (YacPointer)0, 0);
+
+        // Prepare statements
+        // CHECKING
+        const char* ins_check = "INSERT INTO checking (id, balance, city, name) VALUES (?, ?, ?, ?)";
+        YacHandle stmt_check = NULL;
+        yacAllocHandle(YAC_HANDLE_STMT, conn, &stmt_check);
+        yacPrepare(stmt_check, (YacChar*)ins_check, YAC_NULL_TERM_STR);
+        
+        // SAVINGS
+        const char* ins_save = "INSERT INTO savings (id, balance, city, name) VALUES (?, ?, ?, ?)";
+        YacHandle stmt_save = NULL;
+        yacAllocHandle(YAC_HANDLE_STMT, conn, &stmt_save);
+        yacPrepare(stmt_save, (YacChar*)ins_save, YAC_NULL_TERM_STR);
+
+        // Batch size
+        const int BATCH_SIZE = 4000;
+        YacUint32 paramSetSize = BATCH_SIZE;
+
+        YacInt32 id_arr[BATCH_SIZE];
+        YacInt32 bal_arr[BATCH_SIZE];
+        YacInt32 city_arr[BATCH_SIZE];
+        char name_arr[BATCH_SIZE][201]; // Flat array for strings?? No, C multidim array is flat.
+        
+        YacInt32 bal_save_arr[BATCH_SIZE];
+        
+        // Bind parameters for checking
+        yacSetStmtAttr(stmt_check, YAC_ATTR_PARAMSET_SIZE, &paramSetSize, sizeof(YacUint32));
+        yacBindParameter(stmt_check, 1, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, id_arr, sizeof(YacInt32), sizeof(YacInt32), NULL);
+        yacBindParameter(stmt_check, 2, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, bal_arr, sizeof(YacInt32), sizeof(YacInt32), NULL);
+        yacBindParameter(stmt_check, 3, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, city_arr, sizeof(YacInt32), sizeof(YacInt32), NULL);
+        yacBindParameter(stmt_check, 4, YAC_PARAM_INPUT, YAC_SQLT_CHAR, name_arr, 200, 201, NULL); // len=200, stride=201
+
+        // Bind parameters for savings
+        yacSetStmtAttr(stmt_save, YAC_ATTR_PARAMSET_SIZE, &paramSetSize, sizeof(YacUint32));
+        yacBindParameter(stmt_save, 1, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, id_arr, sizeof(YacInt32), sizeof(YacInt32), NULL);
+        yacBindParameter(stmt_save, 2, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, bal_save_arr, sizeof(YacInt32), sizeof(YacInt32), NULL);
+        yacBindParameter(stmt_save, 3, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, city_arr, sizeof(YacInt32), sizeof(YacInt32), NULL);
+        yacBindParameter(stmt_save, 4, YAC_PARAM_INPUT, YAC_SQLT_CHAR, name_arr, 200, 201, NULL);
+
+        int count = 0;
+        int city_cnt = static_cast<int>(SmallBankCityType::Count);
+
+        for(int i = start_index; i < end_index; i++) {
+            // id comes from shuffled list
+            if (i >= id_list.size()) break;
+            int cur_id = id_list[i];
+            int idx = count;
+            
+            id_arr[idx] = cur_id;
+            bal_arr[idx] = 1000 + ((cur_id - 1) % 1000);
+            bal_save_arr[idx] = 1000 + ((cur_id - 1) % 1000);
+            city_arr[idx] = ((cur_id - 1) / (smallbank_account / city_cnt) ) % city_cnt;
+            
+            std::string name = "Account_" + std::to_string(cur_id);
+            strncpy(name_arr[idx], name.c_str(), 200);
+            name_arr[idx][200] = '\0'; // Ensure null term if needed, though CHAR(200) fixed width
+            
+            count++;
+            if(count == BATCH_SIZE) {
+                if (yacExecute(stmt_check) != YAC_SUCCESS) std::cerr << "Insert Check Failed" << std::endl;
+                if (yacExecute(stmt_save) != YAC_SUCCESS) std::cerr << "Insert Save Failed" << std::endl;
+                count = 0;
+            }
+        }
+        
+        if(count > 0) {
+            YacUint32 remain = count;
+            yacSetStmtAttr(stmt_check, YAC_ATTR_PARAMSET_SIZE, &remain, sizeof(YacUint32));
+            if (yacExecute(stmt_check) != YAC_SUCCESS) std::cerr << "Insert Check Remain Failed" << std::endl;
+            
+            yacSetStmtAttr(stmt_save, YAC_ATTR_PARAMSET_SIZE, &remain, sizeof(YacUint32));
+            if (yacExecute(stmt_save) != YAC_SUCCESS) std::cerr << "Insert Save Remain Failed" << std::endl;
+        }
+
+        yacCommit(conn);
+        
+        yacFreeHandle(YAC_HANDLE_STMT, stmt_check);
+        yacFreeHandle(YAC_HANDLE_STMT, stmt_save);
+        yacDisconnect(conn);
+        yacFreeHandle(YAC_HANDLE_DBC, conn);
+        yacFreeHandle(YAC_HANDLE_ENV, env);
+    };
+
+    for(int i=0; i<num_threads; i++) {
+        int start = i * chunk_size;
+        int end = (i == num_threads - 1) ? smallbank_account : (i+1) * chunk_size;
+        threads.emplace_back(worker, start, end);
+    }
+    
+    for(auto& t : threads) t.join();
+    
+    // Fetch all ROWIDs to populate ret
+    {
+        std::cout << "Fetching all ROWIDs..." << std::endl;
+        YacHandle env = NULL;
+        YacHandle conn = NULL;
+        yacAllocHandle(YAC_HANDLE_ENV, NULL, &env);
+        yacAllocHandle(YAC_HANDLE_DBC, env, &conn);
+        if(yacConnect(conn, (YacChar*)info.ip_port.c_str(), YAC_NULL_TERM_STR, 
+                   (YacChar*)info.user.c_str(), YAC_NULL_TERM_STR, 
+                   (YacChar*)info.password.c_str(), YAC_NULL_TERM_STR) == YAC_SUCCESS) {
+            
+            auto fetch_rowids = [&](const char* table_name, std::vector<page_id_t>& page_map) {
+                YacHandle stmt = NULL;
+                yacAllocHandle(YAC_HANDLE_STMT, conn, &stmt);
+                std::string sql = "SELECT id, ROWID FROM " + std::string(table_name);
+                if (yacDirectExecute(stmt, (YacChar*)sql.c_str(), YAC_NULL_TERM_STR) == YAC_SUCCESS) {
+                    YacInt32 id;
+                    YacChar rowid_buf[64];
+                    YacInt32 ind;
+                    
+                    yacBindColumn(stmt, 1, YAC_SQLT_INTEGER, &id, sizeof(id), &ind);
+                    yacBindColumn(stmt, 2, YAC_SQLT_CHAR, rowid_buf, sizeof(rowid_buf), &ind);
+                    
+                    YacUint32 fetched_rows = 0;
+                    while(true) {
+                        YacResult fres = yacFetch(stmt, &fetched_rows);
+                        if (fres == YAC_SUCCESS || fres == YAC_SUCCESS_WITH_INFO) {
+                            // Single row fetch default if not array bound? 
+                            // yacFetch usually requires array binding to return > 1 row, 
+                            // or it returns 1 row if no array size set. 
+                            // Assuming default param size 1.
+                            if (id >= 0 && id < page_map.size()) {
+                                page_map[id] = parse_yashan_rowid((char*)rowid_buf);
+                            }
+                        } else if (fres == 100) { // SQL_NO_DATA
+                            break;
+                        } else {
+                            break;
+                        }
+                    }
+                } else {
+                     std::cerr << "Failed to select ROWID from " << table_name << std::endl;
+                }
+                yacFreeHandle(YAC_HANDLE_STMT, stmt);
+            };
+            
+            fetch_rowids("checking", ret.checking_page);
+            fetch_rowids("savings", ret.savings_page);
+            
+            yacDisconnect(conn);
+            yacFreeHandle(YAC_HANDLE_DBC, conn);
+            yacFreeHandle(YAC_HANDLE_ENV, env);
+        } else {
+            std::cerr << "Failed to connect for fetching ROWIDs" << std::endl;
+        }
+    }
+    
+    std::cout << "YashanDB data loaded." << std::endl;
+    // Note: Yashan ROWID retrieval in bulk load is not straightforward without RETURNING BULK COLLECT
+    // For now, we skip populating `ret` map with exact page IDs.
+    
+    return ret;
+}
+
+void SmallBank::create_smallbank_stored_procedures_yashan() {
+    std::cout << "Creating stored procedures in YashanDB..." << std::endl;
+    YashanConnInfo info = YashanDBConnections[0];
+
+    YacHandle env = NULL;
+    YacHandle conn = NULL;
+    YacHandle stmt = NULL;
+
+    yacAllocHandle(YAC_HANDLE_ENV, NULL, &env);
+    yacAllocHandle(YAC_HANDLE_DBC, env, &conn);
+    
+    if (yacConnect(conn, (YacChar*)info.ip_port.c_str(), YAC_NULL_TERM_STR, 
+                   (YacChar*)info.user.c_str(), YAC_NULL_TERM_STR, 
+                   (YacChar*)info.password.c_str(), YAC_NULL_TERM_STR) != YAC_SUCCESS) {
+        std::cerr << "Connect failed." << std::endl;
+        yacFreeHandle(YAC_HANDLE_DBC, conn);
+        yacFreeHandle(YAC_HANDLE_ENV, env);
+        return;
+    }
+    
+    yacAllocHandle(YAC_HANDLE_STMT, conn, &stmt);
+    auto execSQL = [&](const std::string& sql) {
+        if(yacDirectExecute(stmt, (YacChar*)sql.c_str(), YAC_NULL_TERM_STR) != YAC_SUCCESS) {
+             std::cerr << "Failed to execute Schema change." << std::endl;
+             YacInt32 errCode;
+             char msg[1024];
+             YacTextPos pos;
+             yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
+             std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+        }
+    };
+
+    // sp_amalgamate
+    // Using OUT parameter REFCURSOR for returning results
+    std::string sp_amalgamate = R"(
+    CREATE OR REPLACE PROCEDURE sp_amalgamate(
+        a1 IN INTEGER, 
+        a2 IN INTEGER, 
+        p_cursor OUT SYS_REFCURSOR
+    ) AS
+        v_bal1 INTEGER;
+        v_bal2 INTEGER;
+        v_total_bal INTEGER;
+        v_final_bal INTEGER;
+        v_rid1 VARCHAR(100);
+        v_rid2 VARCHAR(100);
+        v_rid3 VARCHAR(100);
+    BEGIN
+        -- 1. Get current balance and lock row for checking a1
+        SELECT balance, ROWID INTO v_bal1, v_rid1 FROM checking WHERE id = a1 FOR UPDATE;
+        
+        -- 2. Get current balance and lock row for savings a1
+        SELECT balance, ROWID INTO v_bal2, v_rid2 FROM savings WHERE id = a1 FOR UPDATE;
+        
+        -- Calculate total
+        v_total_bal := COALESCE(v_bal1, 0) + COALESCE(v_bal2, 0);
+        
+        -- Update a1 accounts to 0
+        UPDATE checking SET balance = 0 WHERE ROWID = v_rid1;
+        UPDATE savings SET balance = 0 WHERE ROWID = v_rid2;
+        
+        -- 3. Update checking a2
+        SELECT balance, ROWID INTO v_final_bal, v_rid3 FROM checking WHERE id = a2 FOR UPDATE;
+        v_final_bal := COALESCE(v_final_bal, 0) + v_total_bal;
+        UPDATE checking SET balance = v_final_bal WHERE ROWID = v_rid3;
+        
+        OPEN p_cursor FOR
+            SELECT 'checking' AS rel, a1 AS id, v_rid1 AS ctid, 0 AS balance FROM DUAL
+            UNION ALL
+            SELECT 'savings', a1, v_rid2, 0 FROM DUAL
+            UNION ALL
+            SELECT 'checking', a2, v_rid3, v_final_bal FROM DUAL;
+    END;
+    )";
+    
+    // sp_send_payment
+    std::string sp_send_payment = R"(
+    CREATE OR REPLACE PROCEDURE sp_send_payment(
+        a1 IN INTEGER, 
+        a2 IN INTEGER,
+        p_cursor OUT SYS_REFCURSOR
+    ) AS
+        v_rid1 VARCHAR(100);
+        v_bal1 INTEGER;
+        v_rid2 VARCHAR(100);
+        v_bal2 INTEGER;
+    BEGIN
+        -- Update a1
+        SELECT balance, ROWID INTO v_bal1, v_rid1 FROM checking WHERE id = a1 FOR UPDATE;
+        v_bal1 := v_bal1 - 10;
+        UPDATE checking SET balance = v_bal1 WHERE ROWID = v_rid1;
+        
+        -- Update a2
+        SELECT balance, ROWID INTO v_bal2, v_rid2 FROM checking WHERE id = a2 FOR UPDATE;
+        v_bal2 := v_bal2 + 10;
+        UPDATE checking SET balance = v_bal2 WHERE ROWID = v_rid2;
+        
+        OPEN p_cursor FOR
+            SELECT 'checking' AS rel, a1 AS id, v_rid1 AS ctid, v_bal1 AS balance FROM DUAL
+            UNION ALL
+            SELECT 'checking' AS rel, a2 AS id, v_rid2 AS ctid, v_bal2 AS balance FROM DUAL;
+    END;
+    )";
+    
+    // sp_deposit_checking
+    std::string sp_deposit_checking = R"(
+    CREATE OR REPLACE PROCEDURE sp_deposit_checking(
+        a1 IN INTEGER,
+        p_amount IN INTEGER,
+        p_cursor OUT SYS_REFCURSOR
+    ) AS
+        v_rid1 VARCHAR(100);
+        v_bal1 INTEGER;
+    BEGIN
+        SELECT balance, ROWID INTO v_bal1, v_rid1 FROM checking WHERE id = a1 FOR UPDATE;
+        v_bal1 := v_bal1 + p_amount;
+        UPDATE checking SET balance = v_bal1 WHERE ROWID = v_rid1;
+        
+        OPEN p_cursor FOR SELECT 'checking' AS rel, a1 AS id, v_rid1 AS ctid, v_bal1 AS balance FROM DUAL;
+    END;
+    )";
+
+    // sp_write_check
+    std::string sp_write_check = R"(
+    CREATE OR REPLACE PROCEDURE sp_write_check(
+        a1 IN INTEGER,
+        p_amount IN INTEGER,
+        p_cursor OUT SYS_REFCURSOR
+    ) AS
+        v_rid1 VARCHAR(100);
+        v_bal1 INTEGER;
+        v_rid2 VARCHAR(100);
+        v_bal2 INTEGER;
+    BEGIN
+        SELECT balance, ROWID INTO v_bal1, v_rid1 FROM savings WHERE id = a1 FOR UPDATE;
+        v_bal1 := v_bal1 - p_amount;
+        UPDATE savings SET balance = v_bal1 WHERE ROWID = v_rid1;
+        
+        IF v_bal1 < 0 THEN
+             SELECT balance, ROWID INTO v_bal2, v_rid2 FROM checking WHERE id = a1 FOR UPDATE;
+             v_bal2 := v_bal2 + v_bal1 - 1;
+             UPDATE checking SET balance = v_bal2 WHERE ROWID = v_rid2;
+             
+             v_bal1 := 0;
+             UPDATE savings SET balance = 0 WHERE ROWID = v_rid1;
+        ELSE
+             v_rid2 := ''; v_bal2 := 0; -- No change to checking
+        END IF;
+
+        OPEN p_cursor FOR 
+            SELECT 'savings' AS rel, a1 AS id, v_rid1 AS ctid, v_bal1 AS balance FROM DUAL;
+    END;
+    )";
+    
+    // sp_balance
+    std::string sp_balance = R"(
+    CREATE OR REPLACE PROCEDURE sp_balance(
+        a1 IN INTEGER,
+        p_cursor OUT SYS_REFCURSOR
+    ) AS
+        v_bal1 INTEGER;
+        v_bal2 INTEGER;
+    BEGIN
+        SELECT balance INTO v_bal1 FROM savings WHERE id = a1;
+        SELECT balance INTO v_bal2 FROM checking WHERE id = a1;
+        OPEN p_cursor FOR
+            SELECT 'savings' AS rel, a1 AS id, '' AS ctid, v_bal1 AS balance FROM DUAL
+            UNION ALL
+            SELECT 'checking' AS rel, a1 AS id, '' AS ctid, v_bal2 AS balance FROM DUAL;
+    END;
+    )";
+
+    // sp_transact_savings
+    std::string sp_transact_savings = R"(
+    CREATE OR REPLACE PROCEDURE sp_transact_savings(
+        a1 IN INTEGER,
+        p_amount IN INTEGER,
+        p_cursor OUT SYS_REFCURSOR
+    ) AS
+        v_rid1 VARCHAR(100);
+        v_bal1 INTEGER;
+    BEGIN
+        SELECT balance, ROWID INTO v_bal1, v_rid1 FROM savings WHERE id = a1 FOR UPDATE;
+        v_bal1 := v_bal1 + p_amount;
+        UPDATE savings SET balance = v_bal1 WHERE ROWID = v_rid1;
+        
+        OPEN p_cursor FOR SELECT 'savings' AS rel, a1 AS id, v_rid1 AS ctid, v_bal1 AS balance FROM DUAL;
+    END;
+    )";
+
+    execSQL(sp_amalgamate);
+    execSQL(sp_send_payment);
+    execSQL(sp_deposit_checking);
+    execSQL(sp_write_check);
+    execSQL(sp_balance);
+    execSQL(sp_transact_savings);
+
+    std::cout << "YashanDB stored procedures created." << std::endl;
+
+    yacFreeHandle(YAC_HANDLE_STMT, stmt);
+    yacDisconnect(conn);
+    yacFreeHandle(YAC_HANDLE_DBC, conn);
+    yacFreeHandle(YAC_HANDLE_ENV, env);
+}
 
 void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool) {
     // 设置线程名
@@ -11,7 +521,7 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
         uint64_t zipf_seed_mask = (uint64_t(1) << 48) - 1;
         // 仅让线程0负责填充全局hottest_keys，避免并发写冲突和重复填充
         std::vector<uint64_t>* hot_keys_ptr = (thread_id == 0) ? &hottest_keys : nullptr;
-        zipfian_gen = new ZipfGen(get_account_count(), zipfian_theta, zipf_seed & zipf_seed_mask, 2, hot_keys_ptr);
+        zipfian_gen = new ZipfGen(get_account_count(), zipfian_theta, zipf_seed & zipf_seed_mask, NumBucket, hot_keys_ptr);
     }
 
     // 全局一共进行 MetisWarmupRound * PARTITION_INTERVAL的冷启动事务生成，每个工作节点具有worker_threads个线程，每个线程生成try_count个事务
@@ -141,14 +651,14 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
     std::cout << "Data loaded successfully." << std::endl;
 
     // try vacuum freeze 
-    try {
-        pqxx::nontransaction txn_vacuum(*conn0);
-        txn_vacuum.exec("VACUUM FREEZE checking;");
-        txn_vacuum.exec("VACUUM FREEZE savings;");
-        std::cout << "Vacuum freeze completed successfully." << std::endl;
-    }catch (const std::exception &e) {
-        std::cerr << "Error during vacuum freeze: " << e.what() << std::endl;
-    }
+    // try {
+    //     pqxx::nontransaction txn_vacuum(*conn0);
+    //     txn_vacuum.exec("VACUUM FREEZE checking;");
+    //     txn_vacuum.exec("VACUUM FREEZE savings;");
+    //     std::cout << "Vacuum freeze completed successfully." << std::endl;
+    // }catch (const std::exception &e) {
+    //     std::cerr << "Error during vacuum freeze: " << e.what() << std::endl;
+    // }
 
     std::thread extend_thread1([](){
         pqxx::connection conn_extend(DBConnection[0]);
@@ -234,14 +744,14 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
     std::cout << "Table creation and pre-extension completed." << std::endl;
 
     // try analyze
-    try {
-        pqxx::nontransaction txn_analyze(*conn0);
-        txn_analyze.exec("ANALYZE checking;");
-        txn_analyze.exec("ANALYZE savings;");
-        std::cout << "Analyze completed successfully." << std::endl;
-    }catch (const std::exception &e) {
-        std::cerr << "Error during analyze: " << e.what() << std::endl;
-    }
+    // try {
+    //     pqxx::nontransaction txn_analyze(*conn0);
+    //     txn_analyze.exec("ANALYZE checking;");
+    //     txn_analyze.exec("ANALYZE savings;");
+    //     std::cout << "Analyze completed successfully." << std::endl;
+    // }catch (const std::exception &e) {
+    //     std::cerr << "Error during analyze: " << e.what() << std::endl;
+    // }
 
     // 输出一些导入数据的统计信息
     try{

@@ -15,7 +15,6 @@
 #include "config.h"
 // --- Thread Pool Class Definition (Paste the ThreadPool class code here) ---
 
-// thread_local std::vector<pqxx::connection*> connections_thread_local;
 class ThreadPool {
 public:
     ThreadPool(size_t threads, std::vector<std::string> &connections, Logger &lg);

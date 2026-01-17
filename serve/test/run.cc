@@ -27,6 +27,7 @@
 #include "txn_queue.h"
 #include "tit.h"
 #include "config.h"
+#include "yacli.h"
 
 std::vector<TxnQueue*> txn_queues; // one queue per compute node
 std::vector<std::atomic<int>> exec_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
@@ -71,7 +72,14 @@ private:
     std::streambuf* sb2_;
 };
 
-int create_perf_kwr_snapshot(pqxx::connection *conn0){
+int create_perf_kwr_snapshot(){
+    // new connection
+    pqxx::connection* conn0 = new pqxx::connection(DBConnection[0]);
+    if (conn0 == nullptr || !conn0->is_open()) {
+        std::cerr << "Failed to connect to the database. conninfo: " + DBConnection[0] << std::endl;
+        return -1;
+    }
+
     std::cout << "Getting the perf snapshot..." << std::endl;
     int snapshot_id = 0;
     std::string create_snapshot_sql = "SELECT * FROM perf.create_snapshot()";
@@ -89,10 +97,17 @@ int create_perf_kwr_snapshot(pqxx::connection *conn0){
     } catch (const std::exception &e) {
         std::cerr << "Error while creating snapshot: " << e.what() << std::endl;
     }
+    delete conn0;
     return snapshot_id;
 }
 
-void generate_perf_kwr_report(pqxx::connection *conn0, int start_snapshot_id, int end_snapshot_id, std::string file_name) {
+void generate_perf_kwr_report(int start_snapshot_id, int end_snapshot_id, std::string file_name) {
+    // new connection
+    pqxx::connection* conn0 = new pqxx::connection(DBConnection[0]);
+    if (conn0 == nullptr || !conn0->is_open()) {
+        std::cerr << "Failed to connect to the database. conninfo: " + DBConnection[0] << std::endl;
+        return;
+    }
     std::cout << "Generating performance report for snapshot IDs: " << start_snapshot_id << " to " << end_snapshot_id << std::endl;
     std::string report_sql = "SELECT * FROM perf.kwr_report_to_file(" + std::to_string(start_snapshot_id) + ", " 
             // + std::to_string(end_snapshot_id) + ", 'html', '/home/hcy/MP-Router/build/serve/test/" + file_name + "')";
@@ -115,9 +130,10 @@ void generate_perf_kwr_report(pqxx::connection *conn0, int start_snapshot_id, in
     } catch (const std::exception &e) {
         std::cerr << "Error while generating performance report: " << e.what() << std::endl;
     }
+    delete conn0;
 }
 
-void init_key_page_map(pqxx::connection *conn0, SmartRouter* smart_router, SmallBank* smallbank, YCSB* ycsb, TPCC* tpcc) {
+void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* ycsb, TPCC* tpcc) {
     int keys_num;
     if(Workload_Type == 0){
         keys_num = smallbank->get_account_count();
@@ -627,7 +643,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             exe_count++;
-            if(!WarmupEnd && SYSTEM_MODE == 0 && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
+            if(!WarmupEnd && (SYSTEM_MODE == 0 || SYSTEM_MODE == 2) && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
                 WarmupEnd = true;
                 std::cout << "Warmup Ended for Mode 0, exe_count: " << exe_count << std::endl;
             }
@@ -1335,6 +1351,237 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
     }
 }
 
+// Define helper macros if not already defined (copied from smallbank.cc or customized)
+#ifndef YAC_CALL_VOID
+#define YAC_CALL_VOID(proc)                      \
+    do {                                         \
+        if ((YacResult)(proc) != YAC_SUCCESS) {  \
+            std::cerr << "YashanDB Error in " << #proc << std::endl; \
+            return;                              \
+        }                                        \
+    } while (0)
+#endif
+
+void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
+    // 设置线程名
+    pthread_setname_np(pthread_self(), ("dbconya_n" + std::to_string(params->compute_node_id_connecter)
+                                                + "_t_" + std::to_string(params->thread_id)).c_str());
+
+    std::cout << "Running smallbank transactions via YashanDB (Client-side Logic/SP)..." << std::endl;
+
+    node_id_t compute_node_id = params->compute_node_id_connecter;
+    TxnQueue* txn_queue = txn_queues[compute_node_id];
+    SmartRouter* smart_router = params->smart_router;
+    SmallBank* smallbank = params->smallbank;
+    
+    // Connect to YashanDB
+    YashanConnInfo info = YashanDBConnections[compute_node_id];
+
+    YacHandle env = NULL;
+    YacHandle conn = NULL;
+    YacHandle stmt = NULL;
+
+    YAC_CALL_VOID(yacAllocHandle(YAC_HANDLE_ENV, NULL, &env));
+    YAC_CALL_VOID(yacAllocHandle(YAC_HANDLE_DBC, env, &conn));
+    
+    // Set auto commit (enable)
+    YAC_CALL_VOID(yacSetConnAttr(conn, YAC_ATTR_AUTOCOMMIT, (YacPointer)1, 0));
+
+    if (yacConnect(conn, (YacChar*)info.ip_port.c_str(), YAC_NULL_TERM_STR, 
+                   (YacChar*)info.user.c_str(), YAC_NULL_TERM_STR, 
+                   (YacChar*)info.password.c_str(), YAC_NULL_TERM_STR) != YAC_SUCCESS) {
+        std::cerr << "Failed to connect to YashanDB: " << info.ip_port << std::endl;
+        YacInt32 errCode;
+        char msg[1024];
+        YacTextPos pos;
+        yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
+        std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+        return;
+    }
+    
+    // Prepare Stored Procedures
+    YacHandle sp_stmts[6];
+    const char* sp_sqls[] = {
+        "BEGIN sp_amalgamate(:1, :2, :3); END;",       // 0: Amalgamate(a1, a2, cur)
+        "BEGIN sp_send_payment(:1, :2, :3); END;",     // 1: SendPayment(a1, a2, cur)
+        "BEGIN sp_deposit_checking(:1, :2, :3); END;", // 2: DepositChecking(a1, amount, cur)
+        "BEGIN sp_write_check(:1, :2, :3); END;",      // 3: WriteCheck(a1, amount, cur)
+        "BEGIN sp_balance(:1, :2); END;",              // 4: Balance(a1, cur)
+        "BEGIN sp_transact_savings(:1, :2, :3); END;"  // 5: TransactSavings(a1, amount, cur)
+    };
+    
+    for(int i=0; i<6; i++) {
+        YAC_CALL_VOID(yacAllocHandle(YAC_HANDLE_STMT, conn, &sp_stmts[i]));
+        if (yacPrepare(sp_stmts[i], (YacChar*)sp_sqls[i], YAC_NULL_TERM_STR) != YAC_SUCCESS) {
+            std::cerr << "Failed to prepare SP: " << sp_sqls[i] << std::endl;
+            YacInt32 errCode;
+            char msg[1024];
+            YacTextPos pos;
+            yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
+            std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+        }
+    }
+
+    // Cursor Handle (Output)
+    YacHandle cursor_ptr = NULL;        // The handle value (pointer) we get back is effectively a stmt handle
+    YacHandle cursor_handle_container = NULL; // We need a handle to bind? No, usually bind expects &StmtHandle.
+    // In ODBC/OCI, for Ref Cursor, you allocate a Statement Handle and pass it.
+    YAC_CALL_VOID(yacAllocHandle(YAC_HANDLE_STMT, conn, &cursor_handle_container));
+
+    int con_batch_id = 0;
+    while (true) {
+        // 1. Fetch Txn
+        timespec pop_start_time, pop_end_time;
+        clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
+
+        int call_id;
+        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
+
+
+        clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
+        double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
+                          (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
+        smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+
+        // 2. Handle Empty/Batch Finish
+        if (txn_entries.empty()) {
+            if(txn_queue->is_finished()) {
+                break;
+            } else if(txn_queue->is_batch_finished()) {
+                smart_router->notify_batch_finished(compute_node_id, params->thread_id, con_batch_id);
+                
+                timespec wait_start_time, wait_end_time;
+                clock_gettime(CLOCK_MONOTONIC, &wait_start_time);
+                smart_router->wait_for_next_batch(compute_node_id, params->thread_id, con_batch_id);
+                clock_gettime(CLOCK_MONOTONIC, &wait_end_time);
+                
+                double wait_time = (wait_end_time.tv_sec - wait_start_time.tv_sec) * 1000.0 +
+                                   (wait_end_time.tv_nsec - wait_start_time.tv_nsec) / 1000000.0;
+                smart_router->add_worker_thread_wait_next_batch_time(params->compute_node_id_connecter, params->thread_id, wait_time);
+                con_batch_id++;
+                continue;
+            } else continue;
+        }
+
+        // 3. Execute Txns
+        for (auto& txn_entry : txn_entries) {
+            timespec start_time, end_time;
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+            // Update stats
+            exec_txn_cnt_per_node[compute_node_id]++;
+
+            tx_id_t tx_id = txn_entry->tx_id;
+            int txn_type = txn_entry->txn_type;
+            itemkey_t account1 = txn_entry->accounts[0];
+            itemkey_t account2 = txn_entry->accounts[1];
+
+            std::vector<table_id_t>& tables = smallbank->get_table_ids_by_txn_type(txn_type);
+            std::vector<itemkey_t> keys;
+            smallbank->get_keys_by_txn_type(txn_type, account1, account2, keys);
+            std::vector<bool> rw = smallbank->get_rw_by_txn_type(txn_type);
+            
+            // Prepare inputs/outputs
+            YacInt32 acc1_val = (YacInt32)account1;
+            YacInt32 acc2_val = (YacInt32)account2;
+            YacInt32 amount_val = 0;
+            
+            YacHandle& stmt = sp_stmts[txn_type];
+            YacResult res = YAC_SUCCESS;
+
+            // Bind Common Parameters
+            res = yacBindParameter(stmt, 1, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, &acc1_val, sizeof(acc1_val), sizeof(acc1_val), NULL);
+            
+            if (txn_type == 0 || txn_type == 1) { // Amalgamate, SendPayment: (a1, a2, cur)
+                res = yacBindParameter(stmt, 2, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, &acc2_val, sizeof(acc2_val), sizeof(acc2_val), NULL);
+                res = yacBindParameter(stmt, 3, YAC_PARAM_OUTPUT, YAC_SQLT_CURSOR, &cursor_handle_container, 0, 0, NULL);
+            } else if (txn_type == 2 || txn_type == 3 || txn_type == 5) { // Deposit(a1, v), WriteCheck(a1, v), TransactSav(a1, v)
+                 if (txn_type == 2) amount_val = 1; // 1.3 -> 1
+                 if (txn_type == 3) amount_val = 5;
+                 if (txn_type == 5) amount_val = 20;
+                 res = yacBindParameter(stmt, 2, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, &amount_val, sizeof(amount_val), sizeof(amount_val), NULL);
+                 res = yacBindParameter(stmt, 3, YAC_PARAM_OUTPUT, YAC_SQLT_CURSOR, &cursor_handle_container, 0, 0, NULL);
+            } else if (txn_type == 4) { // Balance(a1, cur)
+                 res = yacBindParameter(stmt, 2, YAC_PARAM_OUTPUT, YAC_SQLT_CURSOR, &cursor_handle_container, 0, 0, NULL);
+            }
+
+            if (res != YAC_SUCCESS) {
+                std::cerr << "Bind failed txn=" << txn_type << std::endl;
+                YacInt32 errCode;
+                char msg[1024];
+                YacTextPos pos;
+                yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
+                std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+            }
+            
+            // Execute
+            if (yacExecute(stmt) != YAC_SUCCESS) {
+                std::cerr << "Exec failed txn=" << txn_type << std::endl;
+                YacInt32 errCode;
+                char msg[1024];
+                YacTextPos pos;
+                yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
+                std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+            } else {
+                // Success, now fetch from cursor
+                // Result columns: 1: rel(CHAR), 2: id(INT), 3: ctid(CHAR), 4: balance(INT)
+                YacChar rel_buf[32];
+                YacInt32 id_ret = 0;
+                YacChar ctid_buf[128];
+                YacInt32 bal_ret = 0;
+                YacInt32 ind = 0;
+                
+                // Define/Bind Output Columns on the Cursor Handle
+                yacBindColumn(cursor_handle_container, 1, YAC_SQLT_CHAR, rel_buf, sizeof(rel_buf), &ind);
+                yacBindColumn(cursor_handle_container, 2, YAC_SQLT_INTEGER, &id_ret, sizeof(id_ret), &ind);
+                yacBindColumn(cursor_handle_container, 3, YAC_SQLT_CHAR, ctid_buf, sizeof(ctid_buf), &ind);
+                yacBindColumn(cursor_handle_container, 4, YAC_SQLT_INTEGER, &bal_ret, sizeof(bal_ret), &ind);
+                
+                std::vector<page_id_t> ctid_ret_page_ids(keys.size(), 0);
+                
+                YacUint32 rows = 0;
+                while (yacFetch(cursor_handle_container, &rows) == YAC_SUCCESS || rows > 0) {
+                     std::string rel_str = (char*)rel_buf;
+                     page_id_t pid = parse_yashan_rowid(std::string((char*)ctid_buf));
+                     
+                     // Match to keys
+                     // keys[k] == id_ret AND table type matches rel_str
+                     SmallBankTableType needed_type;
+                     if (rel_str == "checking") needed_type = SmallBankTableType::kCheckingTable;
+                     else needed_type = SmallBankTableType::kSavingsTable;
+                     
+                     for(size_t k=0; k<keys.size(); k++) {
+                         if (keys[k] == (itemkey_t)id_ret && tables[k] == (table_id_t)needed_type) {
+                             ctid_ret_page_ids[k] = pid;
+                         }
+                     }
+                     
+                     // If ctid is empty (Balance txn), pid is 0, correctly mimics PG logic? 
+                     // Balance txn writes R R. No updates. ctid empty.
+                }
+                
+                // Update Router Stats
+                smart_router->update_key_page(txn_entry, tables, keys, rw, ctid_ret_page_ids, compute_node_id);
+            }
+            // Auto-commit enabled, no yacCommit needed.
+            
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 + 
+                               (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
+        }
+        
+        delete txn_entries.front(); 
+    }
+
+    for(int i=0; i<6; i++) yacFreeHandle(YAC_HANDLE_STMT, sp_stmts[i]);
+    yacFreeHandle(YAC_HANDLE_STMT, cursor_handle_container);
+    yacDisconnect(conn);
+    yacFreeHandle(YAC_HANDLE_DBC, conn);
+    yacFreeHandle(YAC_HANDLE_ENV, env);
+
+}
+
 int main(int argc, char *argv[]) {
     // Tee std::cout/std::cerr to both console and output.txt for easy collection
     static std::ofstream output_file("result.txt", std::ios::out | std::ios::trunc);
@@ -1652,6 +1899,34 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--db-type") {
+             if (i + 1 < argc) {
+                DB_TYPE = std::stoi(argv[++i]);
+                if (DB_TYPE != 0 && DB_TYPE != 1) {
+                    std::cerr << "Error: db-type must be 0 (PostgreSQL) or 1 (YashanDB)" << std::endl;
+                    return -1;
+                }
+                std::cout << "DB Type set to: " << (DB_TYPE == 0 ? "PostgreSQL" : "YashanDB") << std::endl;
+            } else {
+                std::cerr << "Error: --db-type requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--num-bucket") {
+            if (i + 1 < argc) {
+                NumBucket = std::stoi(argv[++i]);
+                if (NumBucket <= 0) {
+                    std::cerr << "Error: num-buckets must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Number of buckets set to: " << NumBucket << std::endl;
+            } else {
+                std::cerr << "Error: --num-bucket requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else {
             std::cerr << "Error: Unknown argument " << arg << std::endl;
             print_usage(argv[0]);
@@ -1766,157 +2041,210 @@ int main(int argc, char *argv[]) {
     // --- Load Database Connection Info ---
     std::cout << "Loading database connection info..." << std::endl;
 
-    // !!! need to update when changing the cluster environment
-    // DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
+    if(DB_TYPE == 0) {
+        std::cout << "Database Type: PostgreSQL" << std::endl;
+    
+        // !!! need to update when changing the cluster environment
+        // DBConnection.push_back("host=10.12.2.125 port=54321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.12.2.127 port=54321 user=system password=123456 dbname=smallbank");
 
-    // kes 双机, 旧版本
-    // DBConnection.push_back("host=10.10.2.41 port=54321 user=system password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
+        // kes 双机, 旧版本
+        // DBConnection.push_back("host=10.10.2.41 port=54321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.42 port=54321 user=system password=123456 dbname=smallbank");
 
-    // kes 双机, 新版本
-    // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+        // kes 双机, 新版本
+        // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
 
-    // kes 四机, 新版本
-    DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
-    DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
-    DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
-    DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
+        // kes 四机, 新版本
+        DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
 
-    // kes 单机
-    // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
+        // kes 单机
+        // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
 
-    // 147 本机 pg
-    // DBConnection.push_back("host=127.0.0.1 port=6432 user=hcy password=123456 dbname=smallbank"); // pg12
-    // DBConnection.push_back("host=127.0.0.1 port=6432 user=hcy password=123456 dbname=smallbank"); // pg12 
+        // 147 本机 pg
+        // DBConnection.push_back("host=127.0.0.1 port=6432 user=hcy password=123456 dbname=smallbank"); // pg12
+        // DBConnection.push_back("host=127.0.0.1 port=6432 user=hcy password=123456 dbname=smallbank"); // pg12 
 
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
+        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
+        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
 
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
 
-    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
-    // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
 
-    ComputeNodeCount = DBConnection.size();
-    std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
+        ComputeNodeCount = DBConnection.size();
+        std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
+    } else if (DB_TYPE == 1) {
+        std::cout << "Database Type: YashanDB" << std::endl;
+        // 崖山RAC
+        YashanDBConnections.clear();
+        YashanDBConnections.push_back({"10.10.2.35:1688", "sys", "Rdic12#025"});
+        YashanDBConnections.push_back({"10.10.2.37:1688", "sys", "Rdic12#025"});
+        YashanDBConnections.push_back({"10.10.2.39:1688", "sys", "Rdic12#025"});
+        YashanDBConnections.push_back({"10.10.2.40:1688", "sys", "Rdic12#025"});
+        ComputeNodeCount = YashanDBConnections.size();
+        std::cout << "YashanDB connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
+    }
 
-    std::vector<pqxx::connection*> conns;
-    try {
-        for(int i = 0; i < ComputeNodeCount; i++) {
-            pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
-            if (!conn->is_open()) {
-                std::cerr << "Failed to connect to the database. conninfo: " + DBConnection[i] << std::endl;
+    if (DB_TYPE == 0) {
+        //! --- PG series Database Connection ---
+        std::vector<pqxx::connection*> conns;
+        try {
+            for(int i = 0; i < ComputeNodeCount; i++) {
+                pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
+                if (!conn->is_open()) {
+                    std::cerr << "Failed to connect to the database. conninfo: " + DBConnection[i] << std::endl;
+                    return -1;
+                } else {
+                    std::cout << "Connected to the database node " << i << " successfully." << std::endl;
+                }
+                conns.push_back(conn);
+            }
+        } catch (const std::exception &e) {
+            std::cerr << "Error while connecting to KingBase: " + std::string(e.what()) << std::endl;
+            return -1;
+        }
+        assert(conns.size() == ComputeNodeCount);
+        pqxx::connection* conn0 = conns[0];
+
+        // --- Load Database Data ---
+        // Create table and indexes
+        if(!SKIP_LOAD_DATA) {
+            std::cout << "Creating tables and indexes..." << std::endl;
+            if (Workload_Type == 0) {
+                smallbank->create_table(conn0);
+                if (use_sp) smallbank->create_smallbank_stored_procedures(conn0);
+            } else if (Workload_Type == 1) {
+                ycsb->create_table(conn0);
+                if (use_sp) ycsb->create_ycsb_stored_procedures(conn0);
+            } else if (Workload_Type == 2) {
+                tpcc->create_table(conn0);
+                if (use_sp) tpcc->create_tpcc_stored_procedures(conn0);
+            }
+            std::cout << "Tables and indexes created successfully." << std::endl;
+
+            // generate friend graph in a separate thread
+            std::cout << "Generating friend graph in a separate thread..." << std::endl;
+            auto start_friend_gen = std::chrono::high_resolution_clock::now();
+            std::thread friend_thread([&]() {
+                if(Workload_Type == 0) smallbank->generate_friend_graph();
+            });
+
+            // load data into the database
+            std::cout << "Loading data into the database..." << std::endl;
+            // 若为 SmallBank，记录键→页映射以便后续初始化 Router 时跳过 DB 扫描
+            if (Workload_Type == 0) {
+                g_smallbank_key_page_map = smallbank->load_data(conn0);
+            } else if (Workload_Type == 1) {
+                ycsb->load_data(conn0);
+            } else if (Workload_Type == 2) {
+                tpcc->load_data();
+            }
+            std::cout << "Data loaded successfully." << std::endl;
+            // Wait for friend thread to complete
+            friend_thread.join();
+            auto end_friend_gen = std::chrono::high_resolution_clock::now();
+            double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
+            std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
+        } else {
+            std::cout << "Skipping data loading. "<< std::endl;
+            std::cout << "Checking if tables exist..." << std::endl;
+            bool tables_exist = false;
+            if (Workload_Type == 0) {
+                tables_exist = smallbank->check_table_exists(conn0);
+            } else if (Workload_Type == 1) {
+                tables_exist = ycsb->check_table_exists(conn0);
+            } else if (Workload_Type == 2) {
+                tables_exist = tpcc->check_table_exists(conn0);
+            }
+            std::cout << "Table existence check completed." << std::endl;
+            if (!tables_exist) {
+                std::cerr << "Error: Required tables do not exist in the database. Please load the data first." << std::endl;
                 return -1;
             } else {
-                std::cout << "Connected to the database node " << i << " successfully." << std::endl;
+                std::cout << "Check OK: Required tables exist in the database." << std::endl;
             }
-            conns.push_back(conn);
+            // generate friend graph in a separate thread
+            std::cout << "Generating friend graph in a separate thread..." << std::endl;
+            auto start_friend_gen = std::chrono::high_resolution_clock::now();
+            std::thread friend_thread([&]() {
+                if(Workload_Type == 0) smallbank->generate_friend_graph();
+            });
+
+            bool accounts_num_verify = false;
+            if (Workload_Type == 0) {
+                accounts_num_verify = smallbank->check_account_count(conn0, account_num);
+            } else if (Workload_Type == 1) {
+                accounts_num_verify = ycsb->check_record_count(conn0, account_num);
+            } else if (Workload_Type == 2) {
+                accounts_num_verify = tpcc->check_warehouse_count(conn0, warehouse_num);
+            }
+            if (!accounts_num_verify) {
+                std::cerr << "Error: Account/Record count in the database does not match the expected count. Please verify the data." << std::endl;
+                return -1;
+            } else {
+                std::cout << "Check OK: Account/Record count matches the expected count." << std::endl;
+            }
+            // Wait for friend thread to complete
+            friend_thread.join();
+            auto end_friend_gen = std::chrono::high_resolution_clock::now();
+            double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
+            std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
         }
-    } catch (const std::exception &e) {
-        std::cerr << "Error while connecting to KingBase: " + std::string(e.what()) << std::endl;
-        return -1;
+        if(LOAD_DATA_ONLY) {
+            std::cout << "Load data only mode enabled. Exiting after data load." << std::endl;
+            // Clean up connections
+            for(auto conn : conns) {
+                delete conn;
+            }
+            return 0;
+        }
     }
-    assert(conns.size() == ComputeNodeCount);
-    pqxx::connection* conn0 = conns[0];
+    else if (DB_TYPE == 1) {
+        if (!SKIP_LOAD_DATA) {
+            std::cout << "Starting YashanDB initialization..." << std::endl;
+            assert(YashanDBConnections.size() > 0);
+            assert(Workload_Type == 0); // 目前仅支持 SmallBank
+            // smallbank->create_table_yashan();
+            // smallbank->create_smallbank_stored_procedures_yashan();
+            
+            // generate friend graph in a separate thread
+            std::cout << "Generating friend graph in a separate thread..." << std::endl;
+            auto start_friend_gen = std::chrono::high_resolution_clock::now();
+            std::thread friend_thread([&]() {
+                if(Workload_Type == 0) smallbank->generate_friend_graph();
+            });
 
-    // --- Load Database Data ---
-    // Create table and indexes
-    if(!SKIP_LOAD_DATA) {
-        std::cout << "Creating tables and indexes..." << std::endl;
-        if (Workload_Type == 0) {
-            smallbank->create_table(conn0);
-            if (use_sp) smallbank->create_smallbank_stored_procedures(conn0);
-        } else if (Workload_Type == 1) {
-            ycsb->create_table(conn0);
-            if (use_sp) ycsb->create_ycsb_stored_procedures(conn0);
-        } else if (Workload_Type == 2) {
-            tpcc->create_table(conn0);
-            if (use_sp) tpcc->create_tpcc_stored_procedures(conn0);
-        }
-        std::cout << "Tables and indexes created successfully." << std::endl;
-
-        // generate friend graph in a separate thread
-        std::cout << "Generating friend graph in a separate thread..." << std::endl;
-        auto start_friend_gen = std::chrono::high_resolution_clock::now();
-        std::thread friend_thread([&]() {
-            if(Workload_Type == 0) smallbank->generate_friend_graph();
-        });
-
-        // load data into the database
-        std::cout << "Loading data into the database..." << std::endl;
-        // 若为 SmallBank，记录键→页映射以便后续初始化 Router 时跳过 DB 扫描
-        if (Workload_Type == 0) {
-            g_smallbank_key_page_map = smallbank->load_data(conn0);
-        } else if (Workload_Type == 1) {
-            ycsb->load_data(conn0);
-        } else if (Workload_Type == 2) {
-            tpcc->load_data();
-        }
-        std::cout << "Data loaded successfully." << std::endl;
-        // Wait for friend thread to complete
-        friend_thread.join();
-        auto end_friend_gen = std::chrono::high_resolution_clock::now();
-        double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
-        std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
-    } else {
-        std::cout << "Skipping data loading. "<< std::endl;
-        std::cout << "Checking if tables exist..." << std::endl;
-        bool tables_exist = false;
-        if (Workload_Type == 0) {
-            tables_exist = smallbank->check_table_exists(conn0);
-        } else if (Workload_Type == 1) {
-            tables_exist = ycsb->check_table_exists(conn0);
-        } else if (Workload_Type == 2) {
-            tables_exist = tpcc->check_table_exists(conn0);
-        }
-        std::cout << "Table existence check completed." << std::endl;
-        if (!tables_exist) {
-            std::cerr << "Error: Required tables do not exist in the database. Please load the data first." << std::endl;
-            return -1;
+            // load data into the database
+            // 若为 SmallBank，记录键→页映射以便后续初始化 Router 时跳过 DB 扫描
+            std::cout << "Loading data into YashanDB..." << std::endl;
+            if (Workload_Type == 0) {
+                g_smallbank_key_page_map = smallbank->load_data_yashan();
+            }
+            std::cout << "Data loaded into YashanDB successfully." << std::endl;
+            // Wait for friend thread to complete
+            friend_thread.join();
+            auto end_friend_gen = std::chrono::high_resolution_clock::now();
+            double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
+            std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
         } else {
-            std::cout << "Check OK: Required tables exist in the database." << std::endl;
+            assert(false && "Skipping data load for YashanDB is not supported yet.");
         }
-        // generate friend graph in a separate thread
-        std::cout << "Generating friend graph in a separate thread..." << std::endl;
-        auto start_friend_gen = std::chrono::high_resolution_clock::now();
-        std::thread friend_thread([&]() {
-            if(Workload_Type == 0) smallbank->generate_friend_graph();
-        });
-
-        bool accounts_num_verify = false;
-        if (Workload_Type == 0) {
-            accounts_num_verify = smallbank->check_account_count(conn0, account_num);
-        } else if (Workload_Type == 1) {
-            accounts_num_verify = ycsb->check_record_count(conn0, account_num);
-        } else if (Workload_Type == 2) {
-            accounts_num_verify = tpcc->check_warehouse_count(conn0, warehouse_num);
+        if(LOAD_DATA_ONLY) {
+            std::cout << "Load data only mode enabled. Exiting after data load." << std::endl;
+            return 0;
         }
-        if (!accounts_num_verify) {
-            std::cerr << "Error: Account/Record count in the database does not match the expected count. Please verify the data." << std::endl;
-            return -1;
-        } else {
-            std::cout << "Check OK: Account/Record count matches the expected count." << std::endl;
-        }
-        // Wait for friend thread to complete
-        friend_thread.join();
-        auto end_friend_gen = std::chrono::high_resolution_clock::now();
-        double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
-        std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
     }
-    if(LOAD_DATA_ONLY) {
-        std::cout << "Load data only mode enabled. Exiting after data load." << std::endl;
-        // Clean up connections
-        for(auto conn : conns) {
-            delete conn;
-        }
-        return 0;
-    }
+    else assert(false);
 
     // Initialize Smart Router anyway
     std::cout << "Initializing Smart Router..." << std::endl;
@@ -1927,7 +2255,8 @@ int main(int argc, char *argv[]) {
     // else if (Workload_Type == 2) index_names = {"warehouse_pkey", "district_pkey", "customer_pkey", "stock_pkey"}; // TPC-C indexes
     else if (Workload_Type == 2) index_names = {}; // TPC-C indexes
     
-    BtreeIndexService *index_service = new BtreeIndexService(DBConnection, index_names, read_btree_mode, read_frequency);
+    // BtreeIndexService *index_service = new BtreeIndexService(DBConnection, index_names, read_btree_mode, read_frequency); // !not used
+
     // initialize the transaction pool
     SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, 2*ComputeNodeCount*worker_threads*BatchRouterProcessSize);
     TxnPool* txn_pool = new TxnPool(4, TxnPoolMaxSize, tit);
@@ -1941,7 +2270,7 @@ int main(int argc, char *argv[]) {
     NewMetis* metis = new NewMetis(logger_);
 
     SmartRouter::Config cfg{};
-    SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, pending_txn_queue, worker_threads, index_service, metis, logger_, smallbank, ycsb, tpcc);
+    SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, pending_txn_queue, worker_threads, nullptr, metis, logger_, smallbank, ycsb, tpcc);
     std::cout << "Smart Router initialized." << std::endl;
 
     // TIT: 当后续事务的入度变为0时，立即调度到目标节点
@@ -1974,13 +2303,14 @@ int main(int argc, char *argv[]) {
         std::cout << "Data page mapping initialization from load_data completed." << std::endl;
     } else {
         // 走原有从数据库扫描初始化的路径
-        init_key_page_map(conn0, smart_router, smallbank, ycsb, tpcc);
+        init_key_page_map(smart_router, smallbank, ycsb, tpcc);
     }
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
     // Create a performance snapshot
-    int start_snapshot_id = create_perf_kwr_snapshot(conn0);
+    int start_snapshot_id = -1;
+    if(DB_TYPE == 0) start_snapshot_id = create_perf_kwr_snapshot();
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
     // --- Start Transaction Threads ---
@@ -2035,10 +2365,19 @@ int main(int argc, char *argv[]) {
             params->tit = tit;
 
             if(Workload_Type == 0) {
-                if (use_sp)
-                    db_conn_threads.emplace_back(run_smallbank_txns_sp, params, logger_);
-                else
+                if (use_sp) {
+                    if (DB_TYPE == 1) { // YashanDB
+                        db_conn_threads.emplace_back(run_yashan_smallbank_txns_sp, params, logger_);
+                    } else { // PostgreSQL
+                        db_conn_threads.emplace_back(run_smallbank_txns_sp, params, logger_);
+                    }
+                } else {
+                    if (DB_TYPE == 1) {
+                        std::cerr << "Error: YashanDB currently only supports SP mode (Client-side logic) for SmallBank." << std::endl;
+                        exit(-1);
+                    }
                     db_conn_threads.emplace_back(run_smallbank_txns, params, logger_);
+                }
             }
             else if (Workload_Type == 1) {
                 if (use_sp) 
@@ -2073,7 +2412,7 @@ int main(int argc, char *argv[]) {
         print_diff_snapshot(snapshot0, snapshot1);
     }
     // Create a performance snapshot after warmup
-    // int mid_snapshot_id = create_perf_kwr_snapshot(conn0);
+    // int mid_snapshot_id = create_perf_kwr_snapshot();
 
     // Wait for all threads to complete
     for(auto& thread : db_conn_threads) {
@@ -2091,7 +2430,8 @@ int main(int argc, char *argv[]) {
 
     // Create a performance snapshot after running transactions
     std::this_thread::sleep_for(std::chrono::seconds(2)); // sleep for a while to ensure all operations are completed
-    int end_snapshot_id = create_perf_kwr_snapshot(conn0);
+    int end_snapshot_id = -1;
+    if(DB_TYPE == 0) end_snapshot_id = create_perf_kwr_snapshot();
     std::cout << "Performance snapshots created: Start ID = " << start_snapshot_id 
               << ", End ID = " << end_snapshot_id << std::endl;
     
@@ -2113,7 +2453,7 @@ int main(int argc, char *argv[]) {
         std::cout << "Average txn exec ms: " << (exe_count > 0 ? total_exec_time / exe_count : 0.0) << " ms" << std::endl;
     }
     std::cout << "All transaction threads completed." << std::endl;
-    for(int i =0; i<DBConnection.size(); i++){
+    for(int i =0; i<ComputeNodeCount; i++){
         std::cout << "node " << i << " routed txn count: " << exec_txn_cnt_per_node[i] << std::endl;
     }
     if (Workload_Type == 0 || Workload_Type == 1) {
@@ -2194,12 +2534,7 @@ int main(int argc, char *argv[]) {
     // generate_perf_kwr_report(conn0, start_snapshot_id, mid_snapshot_id, report_file_warm_phase);
     std::string report_file_run_phase = kwr_report_name +  "_end.html";
     // generate_perf_kwr_report(conn0, mid_snapshot_id, end_snapshot_id, report_file_run_phase);
-    generate_perf_kwr_report(conn0, start_snapshot_id, end_snapshot_id, report_file_run_phase);
-
-    // 关闭连接
-    for(auto conn : conns) {
-        delete conn;
-    }
+    if(DB_TYPE == 0) generate_perf_kwr_report(start_snapshot_id, end_snapshot_id, report_file_run_phase);
 
     // restore streams (best-effort; program may exit via signal handler earlier)
     std::cout.rdbuf(old_cout);

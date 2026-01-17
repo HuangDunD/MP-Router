@@ -28,3 +28,26 @@ int64_t decode_hex_key(const std::string &hex_str) {
 
     return value;
 }
+
+// Helper for Oracle Base64 decoding
+int oracle_base64_val(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return 0;
+}
+
+// Helper to parse Page ID (Block Number) from Yashan/Oracle Extended ROWID
+// Format: OOOOOOFFFBBBBBRRR (18 chars). Block Number is 6 chars at offset 9.
+page_id_t parse_yashan_rowid(const std::string& rowid_str) {
+    if (rowid_str.length() < 15) return 0; // Too short to be valid extended ROWID
+    
+    const char* p = rowid_str.c_str() + 9; // Skip Object(6) + File(3) -> Block(6) starts at index 9
+    unsigned long long block_id = 0;
+    for (int i = 0; i < 6; ++i) {
+        block_id = (block_id << 6) + oracle_base64_val(p[i]);
+    }
+    return (page_id_t)block_id;
+}

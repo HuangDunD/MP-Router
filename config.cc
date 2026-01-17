@@ -1,7 +1,10 @@
 #include "config.h"
 
 int SYSTEM_MODE = 0;
+// ! pay attention: need modify this when use different database
+int DB_TYPE = 0; // 0: PostgreSQL, 1: YashanDB
 std::vector<std::string> DBConnection;
+std::vector<YashanConnInfo> YashanDBConnections;
 int worker_threads = 16; 
 int ComputeNodeCount = 2;
 uint64_t ATTEMPTED_NUM = 10000000;
@@ -22,6 +25,7 @@ int PreExtendIndexPageSize = 50000; // 预分配索引页面大小
 bool LOAD_DATA_ONLY = false;
 bool SKIP_LOAD_DATA = false;
 std::vector<uint64_t> hottest_keys; // for debug
+int NumBucket = 2;
 
 // global variables
 int try_count = 10000;
