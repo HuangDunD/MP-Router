@@ -594,6 +594,21 @@ public:
     //     queue_cv_.notify_one();
     // }
 
+    void push_txn_back_batch(std::list<TxnQueueEntry*>& entries) {
+        if(entries.empty()) return;
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        queue_cv_.wait(lock, [this, &entries]() {
+            return current_queue_size_ + entries.size() < max_queue_size_;
+        });
+        
+        assert(entries.size() <= BatchExecutorPOPTxnSize);
+        current_queue_size_ += static_cast<int>(entries.size());
+        regular_txn_cnt += static_cast<int>(entries.size());
+        regular_txn_vec_cnt += 1;
+        txn_queue_.emplace_back(std::move(entries)); // 构造包含单元素的批
+        queue_cv_.notify_one();
+    }
+
     void push_txn_back_batch(std::vector<TxnQueueEntry*> entries) {
         if(entries.empty()) return;
         std::unique_lock<std::mutex> lock(queue_mutex_);

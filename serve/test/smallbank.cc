@@ -526,21 +526,43 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
 
     // 全局一共进行 MetisWarmupRound * PARTITION_INTERVAL的冷启动事务生成，每个工作节点具有worker_threads个线程，每个线程生成try_count个事务
     int total_txn_to_generate = MetisWarmupRound * PARTITION_INTERVAL + try_count * worker_threads * ComputeNodeCount;
+    
+    // Experiment Control: Transaction Length
+    bool enable_multi_update_experiment = Enable_Long_Txn; // 从配置中读取是否启用长事务实验
+    int multi_update_length = Long_Txn_Length; // 从配置中读取长事务的长度
+    
     while(generated_txn_count < total_txn_to_generate) {
         std::vector<TxnQueueEntry*> txn_batch;
         for (int i = 0; i < 0.1 * BatchRouterProcessSize; i++){
             generated_txn_count++;
             tx_id_t tx_id = tx_id_generator++; // global atomic transaction ID
-            // Simulate some work
-            // Randomly select a transaction type and accounts
-            int txn_type = generate_txn_type();
-            if(txn_type == 0 || txn_type == 1) { // TxAmagamate or TxSendPayment
-                generate_two_account_ids(accounts_vec[0], accounts_vec[1], zipfian_gen);
+            
+            TxnQueueEntry* txn_entry = nullptr;
+
+            if (enable_multi_update_experiment) {
+                // Generate MultiUpdate Transaction (Type 6)
+                int txn_type = 6; 
+                std::vector<itemkey_t> multi_accounts;
+                multi_accounts.reserve(multi_update_length);
+                for(int k = 0; k < multi_update_length; k++) {
+                    itemkey_t acc;
+                    generate_account_id(acc, zipfian_gen);
+                    multi_accounts.push_back(acc);
+                }
+                // Create with variable number of accounts
+                txn_entry = new TxnQueueEntry(tx_id, txn_type, multi_accounts);
             } else {
-                generate_account_id(accounts_vec[0], zipfian_gen);
+                // Simulate some work
+                // Randomly select a transaction type and accounts
+                int txn_type = generate_txn_type();
+                if(txn_type == 0 || txn_type == 1) { // TxAmagamate or TxSendPayment
+                    generate_two_account_ids(accounts_vec[0], accounts_vec[1], zipfian_gen);
+                } else {
+                    generate_account_id(accounts_vec[0], zipfian_gen);
+                }
+                // Create a new transaction object
+                txn_entry = new TxnQueueEntry(tx_id, txn_type, accounts_vec);
             }
-            // Create a new transaction object
-            TxnQueueEntry* txn_entry = new TxnQueueEntry(tx_id, txn_type, accounts_vec);
             txn_batch.push_back(txn_entry);
         }
         // Enqueue the transaction into the global transaction pool
@@ -1076,6 +1098,29 @@ void SmallBank::create_smallbank_stored_procedures(pqxx::connection* conn) {
                 RETURNING s.ctid, s.balance INTO s_ctid, s_bal;
 
                 RETURN QUERY SELECT 'savings'::text, a1, s_ctid, s_bal, txid_current();
+            END; $$;
+            )SQL");
+
+            // MultiUpdate: extended transaction that updates multiple accounts
+            // Used for variable transaction length experiments
+            txn.exec(R"SQL(
+            CREATE OR REPLACE FUNCTION sp_multi_update(ids INT[], val INT)
+            RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
+            LANGUAGE plpgsql AS $$
+            DECLARE
+                target_id INT;
+                c_ctid TID;
+                c_bal INT;
+            BEGIN
+                FOREACH target_id IN ARRAY ids
+                LOOP
+                    UPDATE checking c
+                    SET balance = c.balance + val
+                    WHERE c.id = target_id
+                    RETURNING c.ctid, c.balance INTO c_ctid, c_bal;
+                    
+                    RETURN QUERY SELECT 'checking'::text, target_id, c_ctid, c_bal, txid_current();
+                END LOOP;
             END; $$;
             )SQL");
 

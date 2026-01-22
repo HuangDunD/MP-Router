@@ -66,6 +66,8 @@ extern bool LOAD_DATA_ONLY; // 仅加载数据模式
 extern bool SKIP_LOAD_DATA; // 跳过加载数据模式
 extern std::vector<uint64_t> hottest_keys; // for debug
 extern int NumBucket;
+extern bool Enable_Long_Txn; // 是否启用长事务
+extern int Long_Txn_Length; // 长事务的长度
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;

@@ -45,6 +45,8 @@ struct RouterStatSnapshot {
     uint64_t entire_affinity_decisions = 0;
     uint64_t partial_affinity_decisions = 0;
     uint64_t total_cross_partition_decisions = 0;
+    uint64_t metis_query_successes = 0;
+    uint64_t metis_query_missing = 0;
     
     // Metis and ownership combined statistics, for SYSTEM_MODE 8
     // for metis no decision
@@ -78,8 +80,11 @@ struct RouterStatSnapshot {
     double schedule_total_ms = 0.0;
     double push_txn_to_queue_ms = 0.0;
     double preprocess_txn_ms, wait_pending_txn_push_ms, wait_last_batch_finish_ms = 0.0;
+    double preprocess_lookup_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
+    double get_page_ownership_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
+    double compute_union_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double ownership_retrieval_and_devide_unconflicted_txn_ms = 0.0; 
     double process_conflicted_txn_ms = 0.0;
     double merge_and_construct_ipq_ms = 0.0;
@@ -89,6 +94,7 @@ struct RouterStatSnapshot {
     double decide_txn_schedule_ms = 0.0;
     double add_txn_dependency_ms = 0.0;
     double push_prioritized_txns_ms = 0.0;
+    double fill_pipeline_bubble_ms = 0.0;
     double push_end_txns_ms = 0.0;
     double final_push_to_queues_ms = 0.0;
 
@@ -119,6 +125,8 @@ struct RouterStatSnapshot {
         std::cout << "Metis partial affinity decisions: " << partial_affinity_decisions << std::endl;
         std::cout << "Metis full affinity decisions: " << entire_affinity_decisions << std::endl;
         std::cout << "Metis missing decisions: " << missing_node_decisions << std::endl; 
+        std::cout << "Metis query successes: " << metis_query_successes << std::endl;
+        std::cout << "Metis query missing: " << metis_query_missing << std::endl;
 
         
         if(SYSTEM_MODE == 3 || SYSTEM_MODE == 9 || SYSTEM_MODE == 10) {
@@ -162,10 +170,13 @@ struct RouterStatSnapshot {
         std::cout << "  Fetch Txn From Pool Time: " <<fetch_txn_from_pool_ms << " ms" << std::endl;
         std::cout << "  Schedule Batch Total Time: " << schedule_total_ms << " ms" << std::endl;
         std::cout << "    Preprocess Txn Time: " << preprocess_txn_ms << " ms" << std::endl;
+        std::cout << "      Preprocess Lookup Time: " << preprocess_lookup_ms << " ms" << std::endl;
         std::cout << "      Merge Global Txid To Txn Map Time: " << merge_global_txid_to_txn_map_ms << " ms" << std::endl;
         std::cout << "      Compute Conflict Time: " << compute_conflict_ms << " ms" << std::endl;
+        std::cout << "      Compute Union Time: " << compute_union_ms << " ms" << std::endl;
         std::cout << "    Wait Pending Txn Push Time: " << wait_pending_txn_push_ms << " ms" << std::endl;
         std::cout << "    Wait Last Batch Finish Time: " << wait_last_batch_finish_ms << " ms" << std::endl;
+        std::cout << "    Get Page Ownership Time: " << get_page_ownership_ms << " ms" << std::endl;
         std::cout << "    Ownership Retrieval And Devide Unconflicted Txn Time: " 
                   << ownership_retrieval_and_devide_unconflicted_txn_ms << " ms" << std::endl;
         std::cout << "    Process Conflicted Txn Time: " << process_conflicted_txn_ms << " ms" << std::endl;
@@ -176,6 +187,7 @@ struct RouterStatSnapshot {
         std::cout << "      Decide Txn Schedule Time: " << decide_txn_schedule_ms << " ms" << std::endl;
         std::cout << "      Add Txn Dependency Time: " << add_txn_dependency_ms << " ms" << std::endl;
         std::cout << "      Push Prioritized Txns Time: " << push_prioritized_txns_ms << " ms" << std::endl;
+        std::cout << "      Fill Pipeline Bubble Time: " << fill_pipeline_bubble_ms << " ms" << std::endl;
         std::cout << "      Push End Txns Time: " << push_end_txns_ms << " ms" << std::endl;
         std::cout << "      Final Push To Queues Time: " << final_push_to_queues_ms << " ms" << std::endl;
         std::cout << "  Push Txn To Queue Time: " << push_txn_to_queue_ms << " ms" << std::endl;
@@ -229,6 +241,8 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.entire_affinity_decisions = ms.entire_affinity_decisions.load(std::memory_order_relaxed);
     snap.partial_affinity_decisions = ms.partial_affinity_decisions.load(std::memory_order_relaxed);
     snap.total_cross_partition_decisions = ms.total_cross_partition_decisions.load(std::memory_order_relaxed);
+    snap.metis_query_successes = ms.metis_query_successes.load(std::memory_order_relaxed);
+    snap.metis_query_missing = ms.metis_query_missing.load(std::memory_order_relaxed);
 
     // Metis and ownership combined stats
     snap.metis_no_decision = s.metis_no_decision.load(std::memory_order_relaxed);
@@ -266,7 +280,10 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.schedule_total_ms = tdb.schedule_total_ms;
     snap.preprocess_txn_ms = tdb.preprocess_txn_ms;
     snap.merge_global_txid_to_txn_map_ms = tdb.merge_global_txid_to_txn_map_ms;
+    snap.get_page_ownership_ms = tdb.get_page_ownership_ms;
+    snap.preprocess_lookup_ms = tdb.preprocess_lookup_ms;
     snap.compute_conflict_ms = tdb.compute_conflict_ms;
+    snap.compute_union_ms = tdb.compute_union_ms;
     snap.wait_pending_txn_push_ms = tdb.wait_pending_txn_push_ms;
     snap.wait_last_batch_finish_ms = tdb.wait_last_batch_finish_ms;
     snap.ownership_retrieval_and_devide_unconflicted_txn_ms = tdb.ownership_retrieval_and_devide_unconflicted_txn_ms;
@@ -278,6 +295,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.decide_txn_schedule_ms = tdb.decide_txn_schedule_ms;
     snap.add_txn_dependency_ms = tdb.add_txn_dependency_ms;
     snap.push_prioritized_txns_ms = tdb.push_prioritized_txns_ms;
+    snap.fill_pipeline_bubble_ms = tdb.fill_pipeline_bubble_ms;
     snap.push_end_txns_ms = tdb.push_end_txns_ms;
     snap.final_push_to_queues_ms = tdb.final_push_to_queues_ms;
     snap.pop_txn_total_ms_per_node = tdb.pop_txn_total_ms_per_node;
@@ -327,6 +345,8 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.entire_affinity_decisions = (b.entire_affinity_decisions >= a.entire_affinity_decisions) ? (b.entire_affinity_decisions - a.entire_affinity_decisions) : 0;
     d.partial_affinity_decisions = (b.partial_affinity_decisions >= a.partial_affinity_decisions) ? (b.partial_affinity_decisions - a.partial_affinity_decisions) : 0;
     d.total_cross_partition_decisions = (b.total_cross_partition_decisions >= a.total_cross_partition_decisions) ? (b.total_cross_partition_decisions - a.total_cross_partition_decisions) : 0;
+    d.metis_query_successes = (b.metis_query_successes >= a.metis_query_successes) ? (b.metis_query_successes - a.metis_query_successes) : 0;
+    d.metis_query_missing = (b.metis_query_missing >= a.metis_query_missing) ? (b.metis_query_missing - a.metis_query_missing) : 0;
 
     // Metis and ownership combined stats
     d.metis_no_decision = (b.metis_no_decision >= a.metis_no_decision) ? (b.metis_no_decision - a.metis_no_decision) : 0;
@@ -373,7 +393,10 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.schedule_total_ms = b.schedule_total_ms - a.schedule_total_ms;
     d.preprocess_txn_ms = b.preprocess_txn_ms - a.preprocess_txn_ms;
     d.merge_global_txid_to_txn_map_ms = b.merge_global_txid_to_txn_map_ms - a.merge_global_txid_to_txn_map_ms;
+    d.get_page_ownership_ms = b.get_page_ownership_ms - a.get_page_ownership_ms;
+    d.preprocess_lookup_ms = b.preprocess_lookup_ms - a.preprocess_lookup_ms;
     d.compute_conflict_ms = b.compute_conflict_ms - a.compute_conflict_ms;
+    d.compute_union_ms = b.compute_union_ms - a.compute_union_ms;
     d.wait_pending_txn_push_ms = b.wait_pending_txn_push_ms - a.wait_pending_txn_push_ms;
     d.wait_last_batch_finish_ms = b.wait_last_batch_finish_ms - a.wait_last_batch_finish_ms;
     d.ownership_retrieval_and_devide_unconflicted_txn_ms = b.ownership_retrieval_and_devide_unconflicted_txn_ms - a.ownership_retrieval_and_devide_unconflicted_txn_ms;
@@ -385,6 +408,7 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.decide_txn_schedule_ms = b.decide_txn_schedule_ms - a.decide_txn_schedule_ms;
     d.add_txn_dependency_ms = b.add_txn_dependency_ms - a.add_txn_dependency_ms;
     d.push_prioritized_txns_ms = b.push_prioritized_txns_ms - a.push_prioritized_txns_ms;
+    d.fill_pipeline_bubble_ms = b.fill_pipeline_bubble_ms - a.fill_pipeline_bubble_ms;
     d.push_end_txns_ms = b.push_end_txns_ms - a.push_end_txns_ms;
     d.final_push_to_queues_ms = b.final_push_to_queues_ms - a.final_push_to_queues_ms;
     for(int i=0; i< ComputeNodeCount; i++) {

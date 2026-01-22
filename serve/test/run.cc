@@ -643,7 +643,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             exe_count++;
-            if(!WarmupEnd && (SYSTEM_MODE == 0 || SYSTEM_MODE == 2) && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
+            if(!WarmupEnd && (SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 11) && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
                 WarmupEnd = true;
                 std::cout << "Warmup Ended for Mode 0, exe_count: " << exe_count << std::endl;
             }
@@ -660,12 +660,25 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                 con = new pqxx::connection(con_str);
             }
 
-            std::vector<table_id_t>& tables = smallbank->get_table_ids_by_txn_type(txn_type);
-            assert(tables.size() > 0);
+            std::vector<table_id_t> tables_store;
+            std::vector<table_id_t>* tables_ptr;
             std::vector<itemkey_t> keys;
-            smallbank->get_keys_by_txn_type(txn_type, account1, account2, keys);
+
+            if (txn_type == 6) {
+                keys = txn_entry->accounts;
+                tables_store.assign(keys.size(), (table_id_t)SmallBankTableType::kCheckingTable);
+                tables_ptr = &tables_store;
+            } else {
+                tables_ptr = &smallbank->get_table_ids_by_txn_type(txn_type);
+                smallbank->get_keys_by_txn_type(txn_type, account1, account2, keys);
+            }
+            std::vector<table_id_t>& tables = *tables_ptr;
+
+            assert(tables.size() > 0);
             assert(tables.size() == keys.size());
             std::vector<bool> rw = smallbank->get_rw_by_txn_type(txn_type);
+            if(txn_type == 6) rw.assign(keys.size(), true); // Update RW flags for dynamic length
+
             std::vector<page_id_t> ctid_ret_page_ids;
 
             // !不需要外层事务
@@ -707,6 +720,20 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                     case 5: { // TransactSavings
                         std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_transact_savings(" +
                                           std::to_string(account1) + ")";
+                        res = txn.exec(sql);
+                        break;
+                    }
+                    case 6: { // MultiUpdate
+                        // 构造 SQL 数组字符串 array[1,2,3]
+                        std::string ids_str = "array[";
+                        for(size_t i = 0; i < keys.size(); ++i) {
+                            ids_str += std::to_string(keys[i]);
+                            if (i < keys.size() - 1) ids_str += ",";
+                        }
+                        ids_str += "]";
+
+                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_multi_update(" +
+                                          ids_str + ", 1)";
                         res = txn.exec(sql);
                         break;
                     }
@@ -1927,6 +1954,24 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--enable-long-txn") {
+            Enable_Long_Txn = true;
+            std::cout << "Enable long transaction mode." << std::endl;
+        }
+        else if (arg == "--long-txn-length") {
+            if (i + 1 < argc) {
+                Long_Txn_Length = std::stoi(argv[++i]);
+                if (Long_Txn_Length <= 0) {
+                    std::cerr << "Error: long-txn-length must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Long transaction length set to: " << Long_Txn_Length << std::endl;
+            } else {
+                std::cerr << "Error: --long-txn-length requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else {
             std::cerr << "Error: Unknown argument " << arg << std::endl;
             print_usage(argv[0]);
@@ -2057,10 +2102,10 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
 
         // kes 四机, 新版本
-        DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
-        DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
-        DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
-        DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
 
         // kes 单机
         // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
@@ -2073,8 +2118,8 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
         // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
 
-        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
-        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+        DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+        DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
 
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");

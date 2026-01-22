@@ -239,14 +239,17 @@ void NewMetis::get_metis_partitioning_result(std::unordered_map<uint64_t, idx_t>
             auto map_it = current_map_sp->find(r.first);
             if (map_it != current_map_sp->end()) {
                 r.second = map_it->second; // Update to PartitionIndex
+                stats_.metis_query_successes++;
             } else {
                 r.second = -1; // Indicate not found
+                stats_.metis_query_missing++;
             }
         }
     } else {
         // Map not initialized yet, mark all as not found
         for(auto& r: request_partition_node_map) {
             r.second = -1;
+            stats_.metis_query_missing++;
         }
     }
 }
@@ -260,9 +263,11 @@ node_id_t NewMetis::get_metis_partitioning_result(uint64_t request_partition_nod
     if (current_map_sp != nullptr) {
         auto map_it = current_map_sp->find(request_partition_node);
         if (map_it != current_map_sp->end()) {
+            stats_.metis_query_successes++;
             return map_it->second; // Return PartitionIndex
         }
     }
+    stats_.metis_query_missing++;
     return -1; // Indicate not found or map not initialized
 }
 

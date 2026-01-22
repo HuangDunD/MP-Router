@@ -34,14 +34,15 @@
 #define TX_HOT 80 /* Percentage of txns that use accounts from hotspot */
 
 // Helpers for generating workload
-#define SmallBank_TX_TYPES 6
+#define SmallBank_TX_TYPES 7
 enum class SmallBankTxType : int {
   kAmalgamate,
   kSendPayment,
   kDepositChecking,
   kWriteCheck,
   kBalance,
-  kTransactSavings
+  kTransactSavings,
+  kMultiUpdate
 };
 
 const std::string SmallBank_TX_NAME[SmallBank_TX_TYPES] = {
@@ -50,7 +51,8 @@ const std::string SmallBank_TX_NAME[SmallBank_TX_TYPES] = {
     "DepositChecking",
     "WriteCheck",
     "Balance",
-    "TransactSavings"
+    "TransactSavings",
+    "MultiUpdate"
 };
 
 // Table id
@@ -79,37 +81,29 @@ enum class SmallBankCityType : uint64_t {
 class SmallBank {
 public: 
     SmallBank(int account_count, int access_pattern_type) 
-        : smallbank_account(account_count), access_pattern(access_pattern_type) {} 
+        : smallbank_account(account_count), access_pattern(access_pattern_type) {
+            TABLE_IDS_ARR.resize(SmallBank_TX_TYPES);
+            TABLE_IDS_ARR[0] = {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable, (table_id_t)SmallBankTableType::kCheckingTable};
+            TABLE_IDS_ARR[1] = {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kCheckingTable};
+            TABLE_IDS_ARR[2] = {(table_id_t)SmallBankTableType::kCheckingTable};
+            TABLE_IDS_ARR[3] = {(table_id_t)SmallBankTableType::kSavingsTable, (table_id_t)SmallBankTableType::kCheckingTable};
+            TABLE_IDS_ARR[4] = {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable};
+            TABLE_IDS_ARR[5] = {(table_id_t)SmallBankTableType::kSavingsTable};
+            TABLE_IDS_ARR[6] = std::vector<table_id_t>(Long_Txn_Length, (table_id_t)SmallBankTableType::kCheckingTable);
 
-    inline static const std::vector<table_id_t> TABLE_IDS_ARR[SmallBank_TX_TYPES] = {
-        // txn_type == 0
-        {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable, (table_id_t)SmallBankTableType::kCheckingTable},
-        // txn_type == 1
-        {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kCheckingTable},
-        // txn_type == 2
-        {(table_id_t)SmallBankTableType::kCheckingTable},
-        // txn_type == 3
-        {(table_id_t)SmallBankTableType::kSavingsTable, (table_id_t)SmallBankTableType::kCheckingTable},
-        // txn_type == 4
-        {(table_id_t)SmallBankTableType::kCheckingTable, (table_id_t)SmallBankTableType::kSavingsTable},
-        // txn_type == 5
-        {(table_id_t)SmallBankTableType::kSavingsTable}
-    };
+            RW_FLAGS_ARR.resize(SmallBank_TX_TYPES);
+            RW_FLAGS_ARR[0] = {true, true, true};
+            RW_FLAGS_ARR[1] = {true, true};
+            RW_FLAGS_ARR[2] = {true};
+            RW_FLAGS_ARR[3] = {false, true};
+            RW_FLAGS_ARR[4] = {false, false};
+            RW_FLAGS_ARR[5] = {true};
+            RW_FLAGS_ARR[6] = std::vector<bool>(Long_Txn_Length, true);
+        }
 
-    inline static const std::vector<bool> RW_FLAGS_ARR[SmallBank_TX_TYPES] = {
-        // txn_type == 0 -> W W W
-        {true, true, true},
-        // txn_type == 1 -> W W
-        {true, true},
-        // txn_type == 2 -> W
-        {true},
-        // txn_type == 3 -> R W
-        {false, true},
-        // txn_type == 4 -> R R
-        {false, false},
-        // txn_type == 5 -> W
-        {true}
-    };
+    std::vector<std::vector<table_id_t>> TABLE_IDS_ARR;
+
+    std::vector<std::vector<bool>> RW_FLAGS_ARR;
     
     int get_account_count() const {
         return smallbank_account;
@@ -217,13 +211,13 @@ public:
 
     std::vector<table_id_t>& get_table_ids_by_txn_type(int txn_type) {
         assert(txn_type >= 0 && txn_type < SmallBank_TX_TYPES);
-        return const_cast<std::vector<table_id_t>&>(TABLE_IDS_ARR[txn_type]);
+        return TABLE_IDS_ARR[txn_type];
     }
 
     // 获取读写标志, 1表示写，0表示读
     std::vector<bool>& get_rw_by_txn_type(int txn_type) {
         assert(txn_type >= 0 && txn_type < SmallBank_TX_TYPES);
-        return const_cast<std::vector<bool>&>(RW_FLAGS_ARR[txn_type]);
+        return RW_FLAGS_ARR[txn_type];
     }
 
     void get_keys_by_txn_type(int txn_type, itemkey_t account1, itemkey_t account2, std::vector<itemkey_t> &keys) {

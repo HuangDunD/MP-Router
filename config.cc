@@ -26,6 +26,8 @@ bool LOAD_DATA_ONLY = false;
 bool SKIP_LOAD_DATA = false;
 std::vector<uint64_t> hottest_keys; // for debug
 int NumBucket = 2;
+bool Enable_Long_Txn = false; // 是否启用长事务
+int Long_Txn_Length = 2; // 长事务的长度
 
 // global variables
 int try_count = 10000;

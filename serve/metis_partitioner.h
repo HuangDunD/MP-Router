@@ -88,6 +88,8 @@ public:
         std::atomic<uint64_t> entire_affinity_decisions = 0;
         std::atomic<uint64_t> partial_affinity_decisions = 0;
         std::atomic<uint64_t> total_cross_partition_decisions = 0;
+        std::atomic<uint64_t> metis_query_successes = 0;
+        std::atomic<uint64_t> metis_query_missing = 0;
     };
 
     const Stats& get_stats() const {
@@ -99,6 +101,8 @@ public:
         stats_.entire_affinity_decisions.store(0, std::memory_order_relaxed);
         stats_.partial_affinity_decisions.store(0, std::memory_order_relaxed);
         stats_.total_cross_partition_decisions.store(0, std::memory_order_relaxed);
+        stats_.metis_query_successes.store(0, std::memory_order_relaxed);
+        stats_.metis_query_missing.store(0, std::memory_order_relaxed);
     }
 
 private:
