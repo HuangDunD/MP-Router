@@ -40,6 +40,7 @@ extern int DB_TYPE;
 #define SYS_8_DECISION_TYPE_COUNT 19 // for SYSTEM_MODE 8, 17 types of ownership changes
 #define MLP_PREDICTION 0 // 0: no mlp prediction, just use key-value, 1: use mlp prediction
 #define LOG_BATCH_ROUTER 0 // 0: no log 1: log
+#define LOG_DEPENDENCY 0 // 0: no log 1: log
 #define LOG_QUEUE_STATUS 0 // 0: no log 1: log
 #define LOG_TXN_EXEC 0 // 0: no log 1: log
 // for log

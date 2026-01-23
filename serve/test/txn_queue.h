@@ -77,8 +77,14 @@ public:
         int priority = 0;
         for (auto* e : entries) {
             if (!e) continue;
-            priority += static_cast<int>(e->after_txns.size());
+            // 优先使用 Group 中的后续事务数量作为优先级
+            if (!e->notification_groups.empty()) {
+                for(const auto& group : e->notification_groups) {
+                    priority += static_cast<int>(group->after_txns.size());
+                }
+            } 
         }
+        
         priority += entries.size(); // 再加上批次大小, 越大越应该优先处理
         // 组装批次（保留 combine 语义以便下游保持一致）
         std::list<TxnQueueEntry*> batch_list(entries.begin(), entries.end());
@@ -234,6 +240,16 @@ public:
         return total;
     }
 
+    std::vector<int> get_pending_txns_ids() {
+        std::unique_lock<std::mutex> lock(pending_mutex_);
+        std::vector<int> ids;
+        ids.reserve(pending_target_node_.size());
+        for (const auto& pair : pending_target_node_) {
+            ids.push_back(pair.first->tx_id);
+        }
+        return ids;
+    }
+
     int get_pending_txn_cnt_on_node(int node_id){
         std::unique_lock<std::mutex> lock(pending_mutex_);
         return pending_txn_cnt_per_node_[node_id];
@@ -298,7 +314,7 @@ public:
         if (notify) {
             pending_cv_.notify_all();
         }
-        #if LOG_QUEUE_STATUS
+        #if LOG_DEPENDENCY
         logger_->info("[PendingTxnSet] Pop DAG-ready pending txns cnt: " + 
             [&]() {
                 std::string s;

@@ -549,6 +549,8 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
                     generate_account_id(acc, zipfian_gen);
                     multi_accounts.push_back(acc);
                 }
+                // sort accounts to avoid deadlock
+                std::sort(multi_accounts.begin(), multi_accounts.end());
                 // Create with variable number of accounts
                 txn_entry = new TxnQueueEntry(tx_id, txn_type, multi_accounts);
             } else {

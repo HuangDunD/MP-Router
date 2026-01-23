@@ -82,15 +82,28 @@ public:
 
         // 这里应该没有并发问题，因为同一个事务不可能被多个线程同时 mark_done
         std::vector<TxnQueueEntry*> ready_txns;
-        for (auto after_txn : entry->after_txns) { 
-            // 通知后续事务引用计数减一
-            if(after_txn->ref.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                // fetch_sub 返回的是减一前的值，说明现在变为0了，后续事务可以执行了
-                // logger_->info("txn: " + std::to_string(entry->tx_id) + 
-                //             " mark done, notify after_txn: " + std::to_string(after_txn->tx_id) + " ready to execute.");
-                ready_txns.push_back(after_txn);
+        
+        // Notify dependency groups
+        if (!entry->notification_groups.empty()) {
+            for (const auto& group : entry->notification_groups) {
+                // Decrement group ref count
+                int prev_count = group->unfinish_txn_count.fetch_sub(1);
+                if (prev_count == 1) { // reached 0
+                    std::lock_guard<std::mutex> lock(group->notify_mutex);
+                    for (auto* next_txn : group->after_txns) {
+                        if (next_txn->ref.fetch_sub(1) == 1) { // reached 0
+                            ready_txns.push_back(next_txn);
+                        }
+                    }
+                    #if LOG_DEPENDENCY
+                        logger_->info("[DependencyGroup] Group " + std::to_string(group->group_id) + 
+                                    " completed. Notified " + std::to_string(group->after_txns.size()) + 
+                                    " dependent transactions.");
+                    #endif
+                }
             }
         }
+
         if(!ready_txns.empty()){
             auto cb = on_ready_;
             if (cb) cb(ready_txns, finish_call_id);

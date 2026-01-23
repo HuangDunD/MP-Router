@@ -4,6 +4,8 @@
 #pragma once
 #include <atomic>
 #include <vector>
+#include <mutex>
+#include <memory>
 #include "common.h"
 
 enum class TxnScheduleType {
@@ -12,6 +14,18 @@ enum class TxnScheduleType {
     SCHEDULE_PRIOR = 1,
     OWNERSHIP_OK = 2
 };
+
+struct TxnQueueEntry;
+
+struct DependencyGroup {
+    std::mutex notify_mutex;
+    int group_id;
+    std::vector<TxnQueueEntry*> after_txns;
+    std::atomic<int> unfinish_txn_count{0}; // 表示还有多少前序事务组未完成
+    
+    DependencyGroup() : unfinish_txn_count(0) {}
+};
+
 struct TxnQueueEntry {
     tx_id_t tx_id;
     int txn_type;
@@ -32,10 +46,12 @@ struct TxnQueueEntry {
     double fetch_time = 0.0; // 事务被从池中取出的时间
 
     // 拓扑图相关
-    std::vector<TxnQueueEntry*> after_txns; // 依赖当前事务的后续事务列表
-    std::atomic<int> ref = 0; // 引用计数, 表示前序依赖事务数量
+    // std::vector<TxnQueueEntry*> after_txns; // 移除：依赖关系现由 DependencyGroup 维护
+    // Dependency Group Logic
+    std::vector<std::shared_ptr<DependencyGroup>> notification_groups; // 这是自己属于的优先执行的group, 当这个事务执行完，需要去通知的那些 Group自己已经完成, DependencyGroup存储了后面的事务
+    std::atomic<int> ref = 0; // 引用计数, 表示前序依赖的 Group 数量 (Incoming Group Dependencies)
     TxnScheduleType schedule_type = TxnScheduleType::NONE; // 0: unconflict, 1: schedule_prior, 2: ownership_ok_back 
-    int group_id;
+    int group_id; // 事务所属的依赖组ID
     int batch_id;
     std::vector<int> dependency_group_id;
 };

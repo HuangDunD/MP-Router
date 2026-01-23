@@ -105,8 +105,11 @@ public:
         double push_txn_to_queue_ms = 0.0;
             // for batch scheduling
             double preprocess_txn_ms, wait_pending_txn_push_ms, wait_last_batch_finish_ms = 0.0;
+            double preprocess_lookup_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
+            double get_page_ownership_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
+            double compute_union_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double ownership_retrieval_and_devide_unconflicted_txn_ms = 0.0; 
             double process_conflicted_txn_ms = 0.0;
                 double merge_and_construct_ipq_ms = 0.0;
@@ -116,6 +119,7 @@ public:
                 double decide_txn_schedule_ms = 0.0;
                 double add_txn_dependency_ms = 0.0;
                 double push_prioritized_txns_ms = 0.0;
+                double fill_pipeline_bubble_ms = 0.0;
                 double push_end_txns_ms = 0.0;
                 double final_push_to_queues_ms = 0.0;
 
@@ -188,7 +192,7 @@ public:
     // hot hash 层的热键条目
     class HotEntry {
     public:
-        page_id_t page = 0; // 初始化page字段
+        page_id_t page = -1; // 初始化page字段
         std::uint64_t freq = 0;
         node_id_t key_access_last_node = -1; // 最近访问的节点ID，-1表示未设置
         uint64_t last_access_time = 0; // 最近访问时间（毫秒级）
@@ -303,7 +307,7 @@ public:
             while(true){
                 this->compute_load_balance_penalty_weights();
                 this->compute_remain_queue_balance_penalty_weights();
-                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 每100ms计算一次负载均衡惩罚权重
+                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // 每10ms计算一次负载均衡惩罚权重
             }
         });
         compute_workload_balance_thread.detach();
@@ -458,12 +462,13 @@ public:
             }
             else {
                 // 数据所在位置发生了变化, 需要更新key-page映射
-                // 这个地方应该是访问了原来的页面和新的页面, 都变成了这个节点的所有                    
+                // 这个地方应该是访问了原来的页面和新的页面, 都变成了这个节点的所有     
+                ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], ctid_ret_pages[i], routed_node_id);
+                ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], original_page, routed_node_id); 
+                if(enable_hot_update == false) continue; // 如果不允许更新hot entry, 直接跳过
                 std::unique_lock<std::shared_mutex> lock(hot_mutex_);
                 auto it = hot_key_map.find({table_ids[i], keys[i]});
                 if (it != hot_key_map.end()) {
-                    ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], ctid_ret_pages[i], routed_node_id);
-                    ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], original_page, routed_node_id); 
                     // 更新page
                     if(enable_hot_update) it->second.page = ctid_ret_pages[i];
                     // 毫秒级时间戳
@@ -574,10 +579,14 @@ public:
             std::vector<table_id_t> table_ids; 
             
             if(Workload_Type == 0) {
-                itemkey_t account1 = txn->accounts[0];
-                itemkey_t account2 = txn->accounts[1];
-                table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
-                smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
+                table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);                
+                if (txn_type == 6) {
+                    accounts_keys = txn->accounts;
+                } else {
+                    itemkey_t account1 = txn->accounts[0];
+                    itemkey_t account2 = txn->accounts[1];
+                    smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
+                }
             } else if (Workload_Type == 1) { 
                 table_ids = ycsb_->get_table_ids_by_txn_type();
                 accounts_keys = txn->ycsb_keys;
@@ -643,17 +652,18 @@ public:
         TxnQueueEntry* txn;
         std::vector<uint64_t> involved_pages;
         std::vector<bool> rw_flags; 
+        std::vector<int> ownership_node_count; // 记录每个节点作为ownership节点的页面数量
         // 在这里面存储对应页面的metis node和ownership node, 这样可以避免全局维护一个page_to_node_map，对map修改需要mutex锁
         std::vector<node_id_t> page_to_metis_node_vec;
-        std::vector<std::pair<std::vector<node_id_t>, bool> > page_to_ownership_node_vec; // pages 可能对应多个ownership节点, bool表示锁的模式
-        std::unordered_map<node_id_t, double> node_benefit_map;
+        // std::vector<std::pair<std::vector<node_id_t>, bool> > page_to_ownership_node_vec; // pages 可能对应多个ownership节点, bool表示锁的模式
+        std::vector<double> node_benefit_map;
         node_id_t will_route_node; // 最终决定路由到的节点
         bool is_scheduled = false; // 是否已经被调度, 避免重复调度
         int hot_level = 0; // 热点级别
         int dense_id = -1; // 线程本地稠密ID, 用于优化IPQ
     };
 
-    void compute_benefit_for_node(SchedulingCandidateTxn* sc, std::unordered_map<node_id_t, int>& ownership_node_count, std::vector<double>& compute_node_workload_benefit,
+    void compute_benefit_for_node(SchedulingCandidateTxn* sc, std::vector<int>& ownership_node_count, std::vector<double>& compute_node_workload_benefit,
         double metis_benefit_weight, double ownership_benefit_weight, double load_balance_benefit_weight); 
      
     std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> get_route_primary_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch,
@@ -665,184 +675,200 @@ public:
 
     // 这个是路由层的主循环, 他不断从txn_pool中取出事务进行路由
     // 进行的路由决策会放入txn_queue中，供执行层消费
-    void run_router_worker(int thread_id) {
-        assert((SYSTEM_MODE >=0 && SYSTEM_MODE <=8) || SYSTEM_MODE == 13 || (SYSTEM_MODE >=23 && SYSTEM_MODE <=25)); 
-        // for routing needed db connections, each routing thread has its own connections
-        std::vector<pqxx::connection*> thread_conns_vec;
-        for(int i=0; i<ComputeNodeCount; i++) {
-            pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
-            thread_conns_vec.push_back(conn);
-        }
+    // void run_router_worker(int thread_id) {
+    //     assert((SYSTEM_MODE >=0 && SYSTEM_MODE <=8) || SYSTEM_MODE == 13 || (SYSTEM_MODE >=23 && SYSTEM_MODE <=25)); 
+    //     // for routing needed db connections, each routing thread has its own connections
+    //     std::vector<pqxx::connection*> thread_conns_vec;
+    //     for(int i=0; i<ComputeNodeCount; i++) {
+    //         pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
+    //         thread_conns_vec.push_back(conn);
+    //     }
 
-        // wait for router start work
-        std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
-        start_router_cv.wait(start_router_lock, [this]() { 
-            return start_router_; 
-        });
-        start_router_lock.unlock();
+    //     // wait for router start work
+    //     std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
+    //     start_router_cv.wait(start_router_lock, [this]() { 
+    //         return start_router_; 
+    //     });
+    //     start_router_lock.unlock();
 
-        while (true) {
-            // 计时
-            struct timespec fetch_begin_time, fetch_end_time;
-            clock_gettime(CLOCK_MONOTONIC, &fetch_begin_time);
+    //     while (true) {
+    //         // 计时
+    //         struct timespec fetch_begin_time, fetch_end_time;
+    //         clock_gettime(CLOCK_MONOTONIC, &fetch_begin_time);
 
-            // 从事务池中获取一批事务
-            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, thread_id);
-            if (txn_batch == nullptr || txn_batch->empty()) {
-                // 说明事务池已经运行完成
-                for(auto txn_queue : txn_queues_) {
-                    txn_queue->set_finished();
-                }
-                break;
-            }
+    //         // 从事务池中获取一批事务
+    //         auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, thread_id);
+    //         if (txn_batch == nullptr || txn_batch->empty()) {
+    //             // 说明事务池已经运行完成
+    //             for(auto txn_queue : txn_queues_) {
+    //                 txn_queue->set_finished();
+    //             }
+    //             break;
+    //         }
 
-            clock_gettime(CLOCK_MONOTONIC, &fetch_end_time);
-            time_stats_.fetch_txn_from_pool_ms_per_thread[thread_id] += 
-                (fetch_end_time.tv_sec - fetch_begin_time.tv_sec) * 1000.0 + 
-                (fetch_end_time.tv_nsec - fetch_begin_time.tv_nsec) / 1000000.0;
+    //         clock_gettime(CLOCK_MONOTONIC, &fetch_end_time);
+    //         time_stats_.fetch_txn_from_pool_ms_per_thread[thread_id] += 
+    //             (fetch_end_time.tv_sec - fetch_begin_time.tv_sec) * 1000.0 + 
+    //             (fetch_end_time.tv_nsec - fetch_begin_time.tv_nsec) / 1000000.0;
 
-            std::vector<std::vector<TxnQueueEntry*>> node_routed_txns(ComputeNodeCount);
-            for(auto& txn_entry : *txn_batch) {
-                // 计时
-                struct timespec decision_begin_time, decision_end_time;
-                clock_gettime(CLOCK_MONOTONIC, &decision_begin_time);
+    //         std::vector<std::vector<TxnQueueEntry*>> node_routed_txns(ComputeNodeCount);
+    //         for(auto& txn_entry : *txn_batch) {
+    //             // 计时
+    //             struct timespec decision_begin_time, decision_end_time;
+    //             clock_gettime(CLOCK_MONOTONIC, &decision_begin_time);
 
-                tx_id_t tx_id = txn_entry->tx_id;
-                int txn_type = txn_entry->txn_type;
+    //             tx_id_t tx_id = txn_entry->tx_id;
+    //             int txn_type = txn_entry->txn_type;
 
-                // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
-                std::vector<itemkey_t> keys;
-                std::vector<table_id_t> table_ids; 
-                std::vector<bool> rw;
+    //             // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
+    //             std::vector<itemkey_t> keys;
+    //             std::vector<table_id_t> table_ids; 
+    //             std::vector<bool> rw;
 
-                if(Workload_Type == 0) {
-                    itemkey_t account1 = txn_entry->accounts[0];
-                    itemkey_t account2 = txn_entry->accounts[1];
-                    table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
-                    smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
-                    rw = smallbank_->get_rw_by_txn_type(txn_type);
-                } else if (Workload_Type == 1) { 
-                    table_ids = ycsb_->get_table_ids_by_txn_type();
-                    keys = txn_entry->ycsb_keys;
-                    rw = ycsb_->get_rw_flags();
-                } else if (Workload_Type == 2) {
-                    keys = txn_entry->tpcc_keys;
-                    table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, keys.size());
-                    rw = tpcc_->get_rw_flags_by_txn_type(txn_type, keys.size());
-                }
-                else assert(false); // 不可能出现的情况
-                assert(table_ids.size() == keys.size());
+    //             if(Workload_Type == 0) {
+    //                 itemkey_t account1 = txn_entry->accounts[0];
+    //                 itemkey_t account2 = txn_entry->accounts[1];
+    //                 table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
+    //                 smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
+    //                 rw = smallbank_->get_rw_by_txn_type(txn_type);
+    //             } else if (Workload_Type == 1) { 
+    //                 table_ids = ycsb_->get_table_ids_by_txn_type();
+    //                 keys = txn_entry->ycsb_keys;
+    //                 rw = ycsb_->get_rw_flags();
+    //             } else if (Workload_Type == 2) {
+    //                 keys = txn_entry->tpcc_keys;
+    //                 table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, keys.size());
+    //                 rw = tpcc_->get_rw_flags_by_txn_type(txn_type, keys.size());
+    //             }
+    //             else assert(false); // 不可能出现的情况
+    //             assert(table_ids.size() == keys.size());
 
-                // Init the routed node id
-                int routed_node_id = 0; // Default node ID
+    //             // Init the routed node id
+    //             int routed_node_id = 0; // Default node ID
                 
-                // ! decide the routed_node_id based on SYSTEM_MODE
-                #if LOG_ACCESS_KEY
-                    // 写日志记录一下
-                    std::unique_lock<std::mutex> lock(log_mutex);
-                    if(access_key_log_file.is_open()) {
-                        int i=0;
-                        for(i=0; i<table_ids.size()-1; i++) access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "},";
-                        access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "}" << std::endl;
-                        access_key_log_file.flush();
-                    }
-                    for (auto key: keys) key_freq[key]++;
-                    lock.unlock();
-                #endif
+    //             // ! decide the routed_node_id based on SYSTEM_MODE
+    //             #if LOG_ACCESS_KEY
+    //                 // 写日志记录一下
+    //                 std::unique_lock<std::mutex> lock(log_mutex);
+    //                 if(access_key_log_file.is_open()) {
+    //                     int i=0;
+    //                     for(i=0; i<table_ids.size()-1; i++) access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "},";
+    //                     access_key_log_file << "{" << table_ids[i] << ":" << keys[i] << "}" << std::endl;
+    //                     access_key_log_file.flush();
+    //                 }
+    //                 for (auto key: keys) key_freq[key]++;
+    //                 lock.unlock();
+    //             #endif
 
-                if(SYSTEM_MODE == 0) {
-                    routed_node_id = rand() % ComputeNodeCount; // Randomly select node ID for system mode 0
-                }
-                else if(SYSTEM_MODE == 1){
-                    std::vector<int> key_range_count(ComputeNodeCount, 0);
-                    for(size_t i=0; i<keys.size(); i++) {
-                        itemkey_t key = keys[i];
-                        node_id_t choose_node;
-                        if(Workload_Type == 0) {
-                            choose_node = key / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
-                        } else if (Workload_Type == 1) {
-                            choose_node = key / (ycsb_->get_record_count() / ComputeNodeCount); // Range partitioning
-                        } else if (Workload_Type == 2) {
-                            table_id_t tid = table_ids[i];
-                            int total = tpcc_->get_total_keys(static_cast<TPCCTableType>(tid));
-                            if (total == 0) total = 1; 
-                            int range = total / ComputeNodeCount;
-                            if (range == 0) range = 1;
-                            choose_node = (key - 1) / range;
-                        }
-                        if (choose_node >= ComputeNodeCount) choose_node = ComputeNodeCount - 1;
-                        key_range_count[choose_node]++;
-                    }
-                    routed_node_id = std::distance(key_range_count.begin(), 
-                                            std::max_element(key_range_count.begin(), key_range_count.end()));
-                }
-                else if(SYSTEM_MODE == 2) {
-                    // get page_id from checking_page_map
-                    std::vector<int> key_hash_cnt(ComputeNodeCount, 0);
-                    for(auto key: keys) {
-                        // 使用乘法Hash打散，避免直接取模导致的热点集中
-                        size_t hash_val = key * 9973; 
-                        key_hash_cnt[hash_val % ComputeNodeCount]++;
-                    }
-                    routed_node_id = std::distance(key_hash_cnt.begin(), std::max_element(key_hash_cnt.begin(), key_hash_cnt.end()));
-                }
-                else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
-                    SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, rw, thread_conns_vec);
-                    if(result.success) {
-                        routed_node_id = result.smart_router_id;
-                        if(SYSTEM_MODE == 3) txn_entry->txn_decision_type = result.sys_3_decision_type; 
-                        else if(SYSTEM_MODE == 8) txn_entry->txn_decision_type = result.sys_8_decision_type; 
-                    }
-                    else {
-                        // fallback to random
-                        routed_node_id = rand() % ComputeNodeCount;
-                        std::cerr << "Warning: SmartRouter get_route_primary failed: " << result.error_message << std::endl;
-                    }
-                }
-                else if(SYSTEM_MODE == 4) {
-                    routed_node_id = 0; // All to node 0 for single
-                }
-                else assert(false); // unknown mode
+    //             if(SYSTEM_MODE == 0) {
+    //                 routed_node_id = rand() % ComputeNodeCount; // Randomly select node ID for system mode 0
+    //             }
+    //             else if(SYSTEM_MODE == 1){
+    //                 std::vector<int> key_range_count(ComputeNodeCount, 0);
+    //                 for(size_t i=0; i<keys.size(); i++) {
+    //                     itemkey_t key = keys[i];
+    //                     node_id_t choose_node;
+    //                     if(Workload_Type == 0) {
+    //                         choose_node = key / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
+    //                     } else if (Workload_Type == 1) {
+    //                         choose_node = key / (ycsb_->get_record_count() / ComputeNodeCount); // Range partitioning
+    //                     } else if (Workload_Type == 2) {
+    //                         table_id_t tid = table_ids[i];
+    //                         int total = tpcc_->get_total_keys(static_cast<TPCCTableType>(tid));
+    //                         if (total == 0) total = 1; 
+    //                         int range = total / ComputeNodeCount;
+    //                         if (range == 0) range = 1;
+    //                         choose_node = (key - 1) / range;
+    //                     }
+    //                     if (choose_node >= ComputeNodeCount) choose_node = ComputeNodeCount - 1;
+    //                     key_range_count[choose_node]++;
+    //                 }
+    //                 routed_node_id = std::distance(key_range_count.begin(), 
+    //                                         std::max_element(key_range_count.begin(), key_range_count.end()));
+    //             }
+    //             else if(SYSTEM_MODE == 2) {
+    //                 // get page_id from checking_page_map
+    //                 std::vector<int> key_hash_cnt(ComputeNodeCount, 0);
+    //                 for(auto key: keys) {
+    //                     // 使用乘法Hash打散，避免直接取模导致的热点集中
+    //                     size_t hash_val = key * 9973; 
+    //                     key_hash_cnt[hash_val % ComputeNodeCount]++;
+    //                 }
+    //                 // 找出最大值
+    //                 int max_val = *std::max_element(key_hash_cnt.begin(), key_hash_cnt.end());
+                    
+    //                 // 收集所有拥有最大值的节点
+    //                 std::vector<int> candidates;
+    //                 for(int i=0; i<ComputeNodeCount; i++) {
+    //                     if(key_hash_cnt[i] == max_val) {
+    //                         candidates.push_back(i);
+    //                     }
+    //                 }
+                    
+    //                 // 从候选中随机选择一个
+    //                 if(candidates.size() == 1) {
+    //                     routed_node_id = candidates[0];
+    //                 } else {
+    //                     routed_node_id = candidates[rand() % candidates.size()];
+    //                 }
+    //             }
+    //             else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
+    //                 SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, rw, thread_conns_vec);
+    //                 if(result.success) {
+    //                     routed_node_id = result.smart_router_id;
+    //                     if(SYSTEM_MODE == 3) txn_entry->txn_decision_type = result.sys_3_decision_type; 
+    //                     else if(SYSTEM_MODE == 8) txn_entry->txn_decision_type = result.sys_8_decision_type; 
+    //                 }
+    //                 else {
+    //                     // fallback to random
+    //                     routed_node_id = rand() % ComputeNodeCount;
+    //                     std::cerr << "Warning: SmartRouter get_route_primary failed: " << result.error_message << std::endl;
+    //                 }
+    //             }
+    //             else if(SYSTEM_MODE == 4) {
+    //                 routed_node_id = 0; // All to node 0 for single
+    //             }
+    //             else assert(false); // unknown mode
 
-                clock_gettime(CLOCK_MONOTONIC, &decision_end_time);
-                time_stats_.schedule_decision_ms_per_thread[thread_id] += 
-                    (decision_end_time.tv_sec - decision_begin_time.tv_sec) * 1000.0 + 
-                    (decision_end_time.tv_nsec - decision_begin_time.tv_nsec) / 1000000.0;
+    //             clock_gettime(CLOCK_MONOTONIC, &decision_end_time);
+    //             time_stats_.schedule_decision_ms_per_thread[thread_id] += 
+    //                 (decision_end_time.tv_sec - decision_begin_time.tv_sec) * 1000.0 + 
+    //                 (decision_end_time.tv_nsec - decision_begin_time.tv_nsec) / 1000000.0;
 
-                // 计时
-                struct timespec push_begin_time, push_end_time;
-                clock_gettime(CLOCK_MONOTONIC, &push_begin_time);
-                // 将事务放入对应的TxnQueue中
-                node_routed_txns[routed_node_id].push_back(txn_entry);
-                load_tracker_.record(routed_node_id);
-                // 如果达到批量大小，则批量推送
-                if(node_routed_txns[routed_node_id].size() >= BatchExecutorPOPTxnSize){
-                    txn_queues_[routed_node_id]->push_txn_back_batch(node_routed_txns[routed_node_id]);
-                    routed_txn_cnt_per_node[routed_node_id] += node_routed_txns[routed_node_id].size();
-                    node_routed_txns[routed_node_id].clear();
-                }
-                clock_gettime(CLOCK_MONOTONIC, &push_end_time);
-                time_stats_.push_txn_to_queue_ms_per_thread[thread_id] += 
-                    (push_end_time.tv_sec - push_begin_time.tv_sec) * 1000.0 + 
-                    (push_end_time.tv_nsec - push_begin_time.tv_nsec) / 1000000.0;
-            }
-            // push剩余的事务
-            struct timespec push_begin_time, push_end_time;
-            clock_gettime(CLOCK_MONOTONIC, &push_begin_time);
-            for(int node_id = 0; node_id < ComputeNodeCount; node_id++){
-                if(!node_routed_txns[node_id].empty()){
-                    txn_queues_[node_id]->push_txn_back_batch(node_routed_txns[node_id]);
-                    routed_txn_cnt_per_node[node_id] += node_routed_txns[node_id].size();
-                    node_routed_txns[node_id].clear();
-                }
-            }
-            clock_gettime(CLOCK_MONOTONIC, &push_end_time);
-            time_stats_.push_txn_to_queue_ms_per_thread[thread_id] += 
-                (push_end_time.tv_sec - push_begin_time.tv_sec) * 1000.0 + 
-                (push_end_time.tv_nsec - push_begin_time.tv_nsec) / 1000000.0;
-        }
-        std::cout << "Router worker thread finished." << std::endl;
-    }
+    //             // 计时
+    //             struct timespec push_begin_time, push_end_time;
+    //             clock_gettime(CLOCK_MONOTONIC, &push_begin_time);
+    //             // 将事务放入对应的TxnQueue中
+    //             node_routed_txns[routed_node_id].push_back(txn_entry);
+    //             load_tracker_.record(routed_node_id);
+    //             // 如果达到批量大小，则批量推送
+    //             if(node_routed_txns[routed_node_id].size() >= BatchExecutorPOPTxnSize){
+    //                 txn_queues_[routed_node_id]->push_txn_back_batch(node_routed_txns[routed_node_id]);
+    //                 routed_txn_cnt_per_node[routed_node_id] += node_routed_txns[routed_node_id].size();
+    //                 node_routed_txns[routed_node_id].clear();
+    //             }
+    //             clock_gettime(CLOCK_MONOTONIC, &push_end_time);
+    //             time_stats_.push_txn_to_queue_ms_per_thread[thread_id] += 
+    //                 (push_end_time.tv_sec - push_begin_time.tv_sec) * 1000.0 + 
+    //                 (push_end_time.tv_nsec - push_begin_time.tv_nsec) / 1000000.0;
+    //         }
+    //         // push剩余的事务
+    //         struct timespec push_begin_time, push_end_time;
+    //         clock_gettime(CLOCK_MONOTONIC, &push_begin_time);
+    //         for(int node_id = 0; node_id < ComputeNodeCount; node_id++){
+    //             if(!node_routed_txns[node_id].empty()){
+    //                 txn_queues_[node_id]->push_txn_back_batch(node_routed_txns[node_id]);
+    //                 routed_txn_cnt_per_node[node_id] += node_routed_txns[node_id].size();
+    //                 node_routed_txns[node_id].clear();
+    //             }
+    //         }
+    //         clock_gettime(CLOCK_MONOTONIC, &push_end_time);
+    //         time_stats_.push_txn_to_queue_ms_per_thread[thread_id] += 
+    //             (push_end_time.tv_sec - push_begin_time.tv_sec) * 1000.0 + 
+    //             (push_end_time.tv_nsec - push_begin_time.tv_nsec) / 1000000.0;
+    //     }
+    //     std::cout << "Router worker thread finished." << std::endl;
+    // }
 
     // !层次与run_router_worker并列，用于批量路由事务
     void run_router_batch_worker() {
@@ -949,29 +975,6 @@ public:
         batch_id = -1; // 对于流水线模式，初始batch_id为-1，因为同步点get_route_primary_batch_schedule_v2中会先+1
         while (true) {
             // 计时
-            struct timespec start_time, end_time;
-            clock_gettime(CLOCK_MONOTONIC, &start_time);
-
-            // pipeline 模式下，batch_id在get_route_primary_batch_schedule_v2中自增, 这里相当于是拿的下一个batch的事务
-            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, 0);
-
-            // 计时
-            clock_gettime(CLOCK_MONOTONIC, &end_time);
-            time_stats_.fetch_txn_from_pool_ms +=
-                (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
-
-            logger->info("Router Worker: Fetching batch " + std::to_string(batch_id + 1) + " from txn pool.");
-            if (txn_batch == nullptr || txn_batch->empty()) {
-                // 说明事务池已经运行完成
-                for(auto txn_queue : txn_queues_) {
-                    txn_queue->set_finished();
-                }
-                batch_cv.notify_all(); // 通知所有等待的计算节点线程结束
-                break;
-            }
-            // assert(txn_batch->size() == BatchRouterProcessSize);
-            
-            // 计时
             struct timespec wait_start_time, wait_end_time;
             clock_gettime(CLOCK_MONOTONIC, &wait_start_time);
             // !0.0 等待上一个batch所有db connector线程完成该批次的路由
@@ -997,12 +1000,43 @@ public:
                 batch_cv.notify_all();
             }
 
+            logger->info("Batch Router Worker: one of the compute nodes finished processing batch " + std::to_string(batch_id - 1) + 
+                "now queue status: " + [&]() {
+                    std::string status = "";
+                    for(int i=0; i<ComputeNodeCount; i++) {
+                        status += "Node " + std::to_string(i) + " queue size: " + std::to_string(txn_queues_[i]->size()) + "; ";
+                    }
+                    return status;
+                }());
+
             // 计时结束
             clock_gettime(CLOCK_MONOTONIC, &wait_end_time);
             time_stats_.wait_last_batch_finish_ms += 
                 (wait_end_time.tv_sec - wait_start_time.tv_sec) * 1000.0 + (wait_end_time.tv_nsec - wait_start_time.tv_nsec) / 1000000.0;
             logger->info("Waiting last batch finish time: " + std::to_string(
                 (wait_end_time.tv_sec - wait_start_time.tv_sec) * 1000.0 + (wait_end_time.tv_nsec - wait_start_time.tv_nsec) / 1000000.0) + " ms");
+
+            // 计时
+            struct timespec start_time, end_time;
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+            // pipeline 模式下，batch_id在get_route_primary_batch_schedule_v2中自增, 这里相当于是拿的下一个batch的事务
+            auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(BatchRouterProcessSize, 0);
+
+            // 计时
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            time_stats_.fetch_txn_from_pool_ms +=
+                (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+
+            logger->info("Router Worker: Fetching batch " + std::to_string(batch_id + 1) + " from txn pool.");
+            if (txn_batch == nullptr || txn_batch->empty()) {
+                // 说明事务池已经运行完成
+                for(auto txn_queue : txn_queues_) {
+                    txn_queue->set_finished();
+                }
+                batch_cv.notify_all(); // 通知所有等待的计算节点线程结束
+                break;
+            }
 
             // 开始调度
             // 计时
@@ -1031,10 +1065,14 @@ public:
                         std::vector<bool> rw;
 
                         if(Workload_Type == 0) {
-                            itemkey_t account1 = txn_entry->accounts[0];
-                            itemkey_t account2 = txn_entry->accounts[1];
-                            table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
-                            smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
+                            table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);                
+                            if (txn_type == 6) {
+                                keys = txn_entry->accounts;
+                            } else {
+                                itemkey_t account1 = txn_entry->accounts[0];
+                                itemkey_t account2 = txn_entry->accounts[1];
+                                smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
+                            }
                             rw = smallbank_->get_rw_by_txn_type(txn_type);
                         } else if (Workload_Type == 1) { 
                             table_ids = ycsb_->get_table_ids_by_txn_type();
@@ -1090,17 +1128,33 @@ public:
                             routed_node_id = std::distance(key_range_count.begin(), 
                                                     std::max_element(key_range_count.begin(), key_range_count.end()));
                         }
-                        else if(SYSTEM_MODE == 2) {
-                            // get page_id from checking_page_map
-                            std::vector<int> key_hash_cnt(ComputeNodeCount, 0);
-                            for(auto key: keys) {
-                                // 使用乘法Hash打散，避免直接取模导致的热点集中
-                                size_t hash_val = key * 9973; 
-                                key_hash_cnt[hash_val % ComputeNodeCount]++;
-                            }
-                            routed_node_id = std::distance(key_hash_cnt.begin(), std::max_element(key_hash_cnt.begin(), key_hash_cnt.end()));
-                        }
-                        else if(SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
+                        // else if(SYSTEM_MODE == 2) {
+                        //     // get page_id from checking_page_map
+                        //     std::vector<int> key_hash_cnt(ComputeNodeCount, 0);
+                        //     for(auto key: keys) {
+                        //         // 使用乘法Hash打散，避免直接取模导致的热点集中
+                        //         size_t hash_val = key * 9973; 
+                        //         key_hash_cnt[hash_val % ComputeNodeCount]++;
+                        //     }
+                        //     // 找出最大值
+                        //     int max_val = *std::max_element(key_hash_cnt.begin(), key_hash_cnt.end());
+                            
+                        //     // 收集所有拥有最大值的节点
+                        //     std::vector<int> candidates;
+                        //     for(int i=0; i<ComputeNodeCount; i++) {
+                        //         if(key_hash_cnt[i] == max_val) {
+                        //             candidates.push_back(i);
+                        //         }
+                        //     }
+                            
+                        //     // 从候选中随机选择一个
+                        //     if(candidates.size() == 1) {
+                        //         routed_node_id = candidates[0];
+                        //     } else {
+                        //         routed_node_id = candidates[rand() % candidates.size()];
+                        //     }
+                        // }
+                        else if(SYSTEM_MODE == 2 ||  SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
                             SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, rw, thread_conns_vec);
                             if(result.success) {
                                 routed_node_id = result.smart_router_id;
@@ -1403,7 +1457,8 @@ public:
     }
 
 private:
-    std::vector<node_id_t> checkif_txn_ownership_ok(SchedulingCandidateTxn* sc, std::unordered_map<node_id_t, int>& ownership_node_count);
+    std::vector<node_id_t> checkif_txn_ownership_ok(SchedulingCandidateTxn* sc);
+    void update_sc_ownership_count(SchedulingCandidateTxn* sc, int page_idx, const std::pair<std::vector<node_id_t>, bool>& old_ownership, const std::pair<std::vector<node_id_t>, bool>& new_ownership);
 
     std::vector<double> compute_load_balance_penalty_weights();
     std::vector<double> compute_remain_queue_balance_penalty_weights();
@@ -1440,26 +1495,28 @@ private:
             // hot hash 命中
             stats_.hot_hit++;
             it->second.freq++;
-            // 更新 LRU 列表, 把当前的key移动到前端
-            if (it->second.lru_it != hot_lru_.begin()) {
-                hot_lru_.splice(hot_lru_.begin(), hot_lru_, it->second.lru_it);
-            }
+            // !更新 LRU 列表, 把当前的key移动到前端, 先不更新了
+            // if (it->second.lru_it != hot_lru_.begin()) {
+            //     hot_lru_.splice(hot_lru_.begin(), hot_lru_, it->second.lru_it);
+            // }
             txn->accessed_page_ids.push_back(it->second.page); // 记录访问过的page id
             return it->second;
-        } else {
+        } else { 
+            HotEntry empty_entry;
+            return empty_entry;
             // hot hash 未命中
-            stats_.hot_miss++;
-            // 在B+树中查找所在的页面
-            BtreeNode *return_node = nullptr;
-            page_id_t btree_page = btree_service_->get_page_id_by_key(table_id, key, thread_conns[0], &return_node);
-            HotEntry entry;
-            if (btree_page != kInvalidPageId) {
-                // 更新 hot_key_map
-                entry = insert_or_victim_hot(table_id, key, btree_page);
-            }
-            insert_batch_bnode(table_id, return_node);
-            txn->accessed_page_ids.push_back(entry.page); // 记录访问过的page id
-            return entry;
+            // stats_.hot_miss++;
+            // // 在B+树中查找所在的页面
+            // BtreeNode *return_node = nullptr;
+            // page_id_t btree_page = btree_service_->get_page_id_by_key(table_id, key, thread_conns[0], &return_node);
+            // HotEntry entry;
+            // if (btree_page != kInvalidPageId) {
+            //     // 更新 hot_key_map
+            //     entry = insert_or_victim_hot(table_id, key, btree_page);
+            // }
+            // insert_batch_bnode(table_id, return_node);
+            // txn->accessed_page_ids.push_back(entry.page); // 记录访问过的page id
+            // return entry;
         }
     #else 
         auto pred = mlp_predict(table_id, key);
@@ -1858,6 +1915,10 @@ public:
         return pending_txn_queue_->get_pending_txn_count();
     }
 
+    std::vector<int> get_pending_txns_ids(){
+        return pending_txn_queue_->get_pending_txns_ids();
+    }
+
     int get_pending_txn_count_on_node(int node_id) {
         return pending_txn_queue_->get_pending_txn_cnt_on_node(node_id);
     }
@@ -1866,4 +1927,6 @@ public:
     void schedule_ready_txn(std::vector<TxnQueueEntry*> entries, int finish_call_id);
 
     PendingTxnSet* pending_txn_queue_;
+    // Page Fences for dependency management
+    std::unordered_map<uint64_t, std::shared_ptr<DependencyGroup>> page_fences;
 };

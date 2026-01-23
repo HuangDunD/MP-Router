@@ -757,6 +757,9 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                 logger_->info("Transaction (SP) failed: " + std::string(e.what()));
             }
 
+            // // 模拟执行时间, 再sleep 1 ms
+            // std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            
             // 计时结束
             clock_gettime(CLOCK_MONOTONIC, &end_time);
             double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
