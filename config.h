@@ -69,6 +69,7 @@ extern std::vector<uint64_t> hottest_keys; // for debug
 extern int NumBucket;
 extern bool Enable_Long_Txn; // 是否启用长事务
 extern int Long_Txn_Length; // 长事务的长度
+extern double Key_Page_Map_Cache_Ratio; // 能缓存key-page映射的比例, 0.0-1.0
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;

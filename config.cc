@@ -28,6 +28,8 @@ std::vector<uint64_t> hottest_keys; // for debug
 int NumBucket = 2;
 bool Enable_Long_Txn = false; // 是否启用长事务
 int Long_Txn_Length = 2; // 长事务的长度
+double Key_Page_Map_Cache_Ratio = 1.1; // 默认情况可以存的下
+
 
 // global variables
 int try_count = 10000;

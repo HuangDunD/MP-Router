@@ -20,7 +20,8 @@ std::vector<node_id_t> SmartRouter::checkif_txn_ownership_ok(SchedulingCandidate
             candidate_ownership_nodes.push_back(node_id);
         }
     }
-    if(max_ownership_count == sc->involved_pages.size()) {
+
+    if(max_ownership_count == sc->valid_page_count) {
         // ownership entirely
         for(const auto& node_id : candidate_ownership_nodes) {
             ownership_ok_nodes.push_back(node_id);
@@ -2033,10 +2034,16 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     // for debug, i want see the key 1 is on which page
     std::unordered_map<uint64_t, std::string> debug_pages;
     for(size_t i=0; i < hottest_keys.size(); i++) {
-        uint64_t page_id0 = (static_cast<uint64_t>(0) << 32) | hot_key_map.find({0, hottest_keys[i]})->second.page; 
-        debug_pages[page_id0] = "table: 0, key: " + std::to_string(hottest_keys[i]);
-        uint64_t page_id1 = (static_cast<uint64_t>(1) << 32) | hot_key_map.find({1, hottest_keys[i]})->second.page; 
-        debug_pages[page_id1] = "table: 1, key: " + std::to_string(hottest_keys[i]);
+        auto it = hot_key_map.find({0, hottest_keys[i]});
+        if(it != hot_key_map.end()) {
+            uint64_t page_id0 = (static_cast<uint64_t>(0) << 32) | it->second.page;
+            debug_pages[page_id0] = "table: 0, key: " + std::to_string(hottest_keys[i]);
+        }
+        auto it1 = hot_key_map.find({1, hottest_keys[i]});
+        if(it1 != hot_key_map.end()) {
+            uint64_t page_id1 = (static_cast<uint64_t>(1) << 32) | it1->second.page;
+            debug_pages[page_id1] = "table: 1, key: " + std::to_string(hottest_keys[i]);
+        }
     }
     
     // Shared variables for parallel execution context
@@ -2112,11 +2119,17 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 // lookup（内部会加 hot_mutex_），构造 involved_pages，并收集 page->tx 映射对
                 for (size_t i = 0; i < accounts_keys.size(); ++i) {
                     auto entry = lookup(txn, table_ids[i], accounts_keys[i], const_cast<std::vector<pqxx::connection*>&>(thread_conns));
-                    if (entry.page == kInvalidPageId) {
-                        assert(false); // 这里不应该失败
+                    uint64_t table_page_id;
+                    if (entry.page == static_cast<page_id_t>(-1)) {
+                        // invalid page, but keep in involved_pages to maintain index alignment
+                        table_page_id = (static_cast<uint64_t>(table_ids[i]) << 32) | static_cast<uint32_t>(-1);
+                        sc->involved_pages.push_back(table_page_id);
+                        continue; // skip conflict detection for invalid page
+                    } else {
+                        table_page_id = (static_cast<uint64_t>(table_ids[i]) << 32) | entry.page;
+                        sc->involved_pages.push_back(table_page_id);
+                        sc->valid_page_count++;
                     }
-                    uint64_t table_page_id = (static_cast<uint64_t>(table_ids[i]) << 32) | entry.page;
-                    sc->involved_pages.push_back(table_page_id);
                     
                     // Week conflict detection
                     if (local_page_tracker.count(table_page_id)) {
@@ -2166,13 +2179,19 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
             global_conflicted_txids.push_back(tx_id);
             // sc is guaranteed to be valid and pointers are stable
             SchedulingCandidateTxn* sc = local_txid_maps[t].at(tx_id);
-            unique_conflict_pages.insert(unique_conflict_pages.end(), sc->involved_pages.begin(), sc->involved_pages.end());
+            // unique_conflict_pages.insert(unique_conflict_pages.end(), sc->involved_pages.begin(), sc->involved_pages.end());
+            for (auto page : sc->involved_pages) {
+                if ((page & 0xFFFFFFFF) != 0xFFFFFFFF) {
+                    unique_conflict_pages.push_back(page);
+                }
+            }
         }
     }
     // !构建page-txn映射的CSR存储结构，倒排索引, global page pairs 现在只需要存储冲突事务涉及的页面
     for(auto tx_id : conflicted_txns) {
         SchedulingCandidateTxn* sc = txid_to_txn_map[tx_id];
         for(auto page : sc->involved_pages) {
+            if((page & 0xFFFFFFFF) == 0xFFFFFFFF) continue;
             global_page_pairs.emplace_back(page, tx_id);
         }
     }
@@ -2435,6 +2454,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 // Non-conflict txn: fetch ownership directly (lazy fetch)
                 for (int i = 0; i < sc->involved_pages.size(); ++i) {
                     auto page = sc->involved_pages[i];
+                    if((page & 0xFFFFFFFF) == 0xFFFFFFFF) continue;
                     auto owner_stats = ownership_table_->get_owner(page);
                     update_sc_ownership_count(sc, i, {{}, false}, {owner_stats.first, owner_stats.second});
                     // 热度级别累加
@@ -2962,6 +2982,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                     transfer_pages.reserve(page_count); 
                     for(int i=0; i<page_count; i++){
                         auto page = selected_candidate_txn->involved_pages[i];
+                        if((page & 0xFFFFFFFF) == 0xFFFFFFFF) continue;
                         // Optimization: Use reference to avoid expensive copy of vector
                         const auto& owner_stats = page_ownership_to_node_map.at(page);
                         bool rw = selected_candidate_txn->rw_flags[i];
@@ -3289,6 +3310,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                     txn_sc->txn->dependency_group_id.push_back(group_id);
                 }
 
+                // ! IMPORTANT !!!
                 // ! 生成group作为障碍, 并且关联后续事务与对应的屏障（注入依赖）
                 // 1.5.1. Create Group for Prior Txns (Victims) and Update Fences
                 assert(next_time_schedule_txn.size() > 0);

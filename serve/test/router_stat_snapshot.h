@@ -12,7 +12,7 @@
 
 struct RouterStatSnapshot {
     // cache sizes
-    uint64_t hot_hash_bytes = 0;
+    uint64_t hot_hash_entries = 0;
     uint64_t btree_bytes = 0;
 
     // lookup counts
@@ -101,6 +101,7 @@ struct RouterStatSnapshot {
     std::vector<double> pop_txn_total_ms_per_node;
     std::vector<double> wait_next_batch_total_ms_per_node;
     std::vector<double> sum_worker_thread_exec_time_ms_per_node;
+    std::vector<double> sum_worker_thread_update_key_page_time_ms_per_node;
     std::vector<double> mark_done_total_ms_per_node;
     std::vector<double> log_debug_info_total_ms_per_node;
 
@@ -198,6 +199,7 @@ struct RouterStatSnapshot {
             std::cout << "  Average Pop Txn From Queue Time: " << pop_txn_total_ms_per_node[i] / worker_threads << " ms" << std::endl; 
             std::cout << "  Average Wait Next Batch Time: " << wait_next_batch_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
             std::cout << "  Average Worker Thread Exec Time: " << sum_worker_thread_exec_time_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            std::cout << "    Average Worker Thread Update Key Page Time: " << sum_worker_thread_update_key_page_time_ms_per_node[i] / worker_threads << " ms" << std::endl;
             std::cout << "  Average Mark Done Time: " << mark_done_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
             std::cout << "  Average Log Debug Info Time: " << log_debug_info_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
         }
@@ -214,7 +216,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     // SmartRouter exposes get_stats() which returns a reference. We'll copy values.
     SmartRouter::Stats &s = router->get_stats();
     // Non-atomic fields (copy directly)
-    snap.hot_hash_bytes = s.hot_hash_bytes;
+    snap.hot_hash_entries = s.hot_hash_entries;
     snap.btree_bytes = s.btree_bytes;
     snap.hot_hit = s.hot_hit;
     snap.hot_miss = s.hot_miss;
@@ -301,6 +303,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.pop_txn_total_ms_per_node = tdb.pop_txn_total_ms_per_node;
     snap.wait_next_batch_total_ms_per_node = tdb.wait_next_batch_total_ms_per_node;
     snap.sum_worker_thread_exec_time_ms_per_node = tdb.sum_worker_thread_exec_time_ms_per_node;
+    snap.sum_worker_thread_update_key_page_time_ms_per_node = tdb.sum_worker_thread_update_key_page_time_ms_per_node;
     snap.push_txn_to_queue_ms = tdb.push_txn_to_queue_ms;
     snap.mark_done_total_ms_per_node = tdb.mark_done_total_ms_per_node;
     snap.log_debug_info_total_ms_per_node = tdb.log_debug_info_total_ms_per_node;
@@ -311,7 +314,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
 inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const RouterStatSnapshot &b) {
     RouterStatSnapshot d;
     // const, 这些属性不需要计算差值
-    d.hot_hash_bytes = b.hot_hash_bytes;
+    d.hot_hash_entries = b.hot_hash_entries;
     d.btree_bytes = b.btree_bytes;
     d.hot_hit = b.hot_hit;
     d.hot_miss = b.hot_miss;
@@ -415,6 +418,7 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
         d.pop_txn_total_ms_per_node.push_back( b.pop_txn_total_ms_per_node[i] - a.pop_txn_total_ms_per_node[i] );
         d.wait_next_batch_total_ms_per_node.push_back( b.wait_next_batch_total_ms_per_node[i] - a.wait_next_batch_total_ms_per_node[i] );
         d.sum_worker_thread_exec_time_ms_per_node.push_back( b.sum_worker_thread_exec_time_ms_per_node[i] - a.sum_worker_thread_exec_time_ms_per_node[i] );
+        d.sum_worker_thread_update_key_page_time_ms_per_node.push_back( b.sum_worker_thread_update_key_page_time_ms_per_node[i] - a.sum_worker_thread_update_key_page_time_ms_per_node[i] );
         d.mark_done_total_ms_per_node.push_back( b.mark_done_total_ms_per_node[i] - a.mark_done_total_ms_per_node[i] );
         d.log_debug_info_total_ms_per_node.push_back( b.log_debug_info_total_ms_per_node[i] - a.log_debug_info_total_ms_per_node[i] );
     }
