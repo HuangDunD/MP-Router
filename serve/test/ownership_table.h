@@ -9,6 +9,9 @@
 #include <atomic>
 #include "common.h"
 #include "txn_queue.h"
+#include <thread>
+#include <random>
+
 class OwnershipEntry {
 public:
     OwnershipEntry() {}
@@ -24,16 +27,46 @@ public:
         // 初始化
         table_.clear();
         table_.resize(MAX_DB_TABLE_NUM);
+        
+        // Multi-threaded initialization
+        unsigned int num_threads = std::thread::hardware_concurrency();
+        if (num_threads == 0) num_threads = 4;
+        std::vector<std::thread> threads;
+
         for(table_id_t i = 0; i < MAX_DB_TABLE_NUM; i++) {
             table_[i].resize(MAX_DB_PAGE_NUM);
-            for(page_id_t j = 0; j < MAX_DB_PAGE_NUM; j++) {
-                table_[i][j] = new OwnershipEntry();
-                table_[i][j]->mode = 1; // default exclusive ownership
-                // randomly assign owner
-                node_id_t owner = rand() % ComputeNodeCount;
-                table_[i][j]->owners.push_back(owner);
+            
+            // Bulk allocate entries for better performance (one allocation vs MAX_DB_PAGE_NUM allocations)
+            OwnershipEntry* entries_block = new OwnershipEntry[MAX_DB_PAGE_NUM];
+
+            // Split work among threads
+            page_id_t chunk_size = MAX_DB_PAGE_NUM / num_threads;
+            
+            for(unsigned int t = 0; t < num_threads; t++) {
+                page_id_t start = t * chunk_size;
+                page_id_t end = (t == num_threads - 1) ? MAX_DB_PAGE_NUM : (t + 1) * chunk_size;
+                
+                threads.emplace_back([this, i, entries_block, start, end, t]() {
+                    // Use thread-local random engine
+                    std::mt19937 rng(t + i * 997 + 12345);
+                    std::uniform_int_distribution<node_id_t> dist(0, ComputeNodeCount - 1);
+
+                    for(page_id_t j = start; j < end; j++) {
+                        OwnershipEntry* entry = &entries_block[j];
+                        entry->mode = 1; // default exclusive ownership
+                        // randomly assign owner
+                        node_id_t owner = dist(rng);
+                        entry->owners.push_back(owner);
+                        table_[i][j] = entry;
+                    }
+                });
             }
         }
+        
+        for(auto& t : threads) {
+            if(t.joinable()) t.join();
+        }
+
         // ownership_changes_per_txn_type 已在初始化列表中构造
         // 0: metis no decision, 1: metis missing and ownership missing, 2: metis missing and ownership entirely, 3: metis missing and ownership cross
                                       // 4: metis entirely and ownership missing, 5: metis entirely and ownership cross equal, 6: metis entirely and ownership cross unequal

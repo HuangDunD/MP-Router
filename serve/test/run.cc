@@ -1381,82 +1381,73 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
     }
 }
 
-// Define helper macros if not already defined (copied from smallbank.cc or customized)
-#ifndef YAC_CALL_VOID
-#define YAC_CALL_VOID(proc)                      \
-    do {                                         \
-        if ((YacResult)(proc) != YAC_SUCCESS) {  \
-            std::cerr << "YashanDB Error in " << #proc << std::endl; \
-            return;                              \
-        }                                        \
-    } while (0)
-#endif
-
 void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
     // 设置线程名
     pthread_setname_np(pthread_self(), ("dbconya_n" + std::to_string(params->compute_node_id_connecter)
                                                 + "_t_" + std::to_string(params->thread_id)).c_str());
 
-    std::cout << "Running smallbank transactions via YashanDB (Client-side Logic/SP)..." << std::endl;
+    std::cout << "Running smallbank transactions via YashanDB..." << std::endl;
 
     node_id_t compute_node_id = params->compute_node_id_connecter;
     TxnQueue* txn_queue = txn_queues[compute_node_id];
     SmartRouter* smart_router = params->smart_router;
+    SlidingTransactionInforTable *tit = params->tit;
     SmallBank* smallbank = params->smallbank;
+    assert(txn_queue != nullptr && smart_router != nullptr && tit != nullptr && smallbank != nullptr);
     
     // Connect to YashanDB
     YashanConnInfo info = YashanDBConnections[compute_node_id];
 
     YacHandle env = NULL;
     YacHandle conn = NULL;
-    YacHandle stmt = NULL;
-
-    YAC_CALL_VOID(yacAllocHandle(YAC_HANDLE_ENV, NULL, &env));
-    YAC_CALL_VOID(yacAllocHandle(YAC_HANDLE_DBC, env, &conn));
     
-    // Set auto commit (enable)
-    YAC_CALL_VOID(yacSetConnAttr(conn, YAC_ATTR_AUTOCOMMIT, (YacPointer)1, 0));
-
-    if (yacConnect(conn, (YacChar*)info.ip_port.c_str(), YAC_NULL_TERM_STR, 
-                   (YacChar*)info.user.c_str(), YAC_NULL_TERM_STR, 
-                   (YacChar*)info.password.c_str(), YAC_NULL_TERM_STR) != YAC_SUCCESS) {
-        std::cerr << "Failed to connect to YashanDB: " << info.ip_port << std::endl;
-        YacInt32 errCode;
-        char msg[1024];
-        YacTextPos pos;
-        yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
-        std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
-        return;
-    }
+    // For Direct Execute
+    YacHandle stmt_direct = NULL;
     
-    // Prepare Stored Procedures
-    YacHandle sp_stmts[6];
-    const char* sp_sqls[] = {
-        "BEGIN sp_amalgamate(:1, :2, :3); END;",       // 0: Amalgamate(a1, a2, cur)
-        "BEGIN sp_send_payment(:1, :2, :3); END;",     // 1: SendPayment(a1, a2, cur)
-        "BEGIN sp_deposit_checking(:1, :2, :3); END;", // 2: DepositChecking(a1, amount, cur)
-        "BEGIN sp_write_check(:1, :2, :3); END;",      // 3: WriteCheck(a1, amount, cur)
-        "BEGIN sp_balance(:1, :2); END;",              // 4: Balance(a1, cur)
-        "BEGIN sp_transact_savings(:1, :2, :3); END;"  // 5: TransactSavings(a1, amount, cur)
+    // For Scalar Binding
+    const bool USE_SCALAR_PARAM = true; 
+    YacHandle stmts_scalar[6] = {NULL};
+    const char* sp_sqls_scalar[] = {
+        "BEGIN sp_amalgamate_scalar(?, ?, ?, ?, ?); END;",     // 0: Amalgamate(a1, a2, out b1, out b2, out b3)
+        "BEGIN sp_send_payment_scalar(?, ?, ?, ?); END;",      // 1: SendPayment(a1, a2, out b1, out b2)
+        "BEGIN sp_deposit_checking_scalar(?, ?, ?); END;",     // 2: DepositChecking(a1, amt, out b1)
+        "BEGIN sp_write_check_scalar(?, ?, ?, ?); END;",          // 3: WriteCheck(a1, amt, out b1)
+        "BEGIN sp_balance_scalar(?, ?, ?); END;",              // 4: Balance(a1, out b1, out b2)
+        "BEGIN sp_transact_savings_scalar(?, ?, ?); END;"      // 5: TransactSavings(a1, amt, out b1)
     };
-    
-    for(int i=0; i<6; i++) {
-        YAC_CALL_VOID(yacAllocHandle(YAC_HANDLE_STMT, conn, &sp_stmts[i]));
-        if (yacPrepare(sp_stmts[i], (YacChar*)sp_sqls[i], YAC_NULL_TERM_STR) != YAC_SUCCESS) {
-            std::cerr << "Failed to prepare SP: " << sp_sqls[i] << std::endl;
-            YacInt32 errCode;
-            char msg[1024];
-            YacTextPos pos;
-            yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
-            std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
-        }
-    }
 
-    // Cursor Handle (Output)
-    YacHandle cursor_ptr = NULL;        // The handle value (pointer) we get back is effectively a stmt handle
-    YacHandle cursor_handle_container = NULL; // We need a handle to bind? No, usually bind expects &StmtHandle.
-    // In ODBC/OCI, for Ref Cursor, you allocate a Statement Handle and pass it.
-    YAC_CALL_VOID(yacAllocHandle(YAC_HANDLE_STMT, conn, &cursor_handle_container));
+    yacAllocHandle(YAC_HANDLE_ENV, NULL, &env);
+    yacAllocHandle(YAC_HANDLE_DBC, env, &conn);
+    if((YacResult)yacConnect(conn, (YacChar*)info.ip_port.c_str(), YAC_NULL_TERM_STR, 
+                (YacChar*)info.user.c_str(), YAC_NULL_TERM_STR, 
+                (YacChar*)info.password.c_str(), YAC_NULL_TERM_STR) != YAC_SUCCESS) {
+        std::cerr << "Initial connection to YashanDB failed." << std::endl;
+    }
+    else {
+        std::cout << "Connected to YashanDB at " << info.ip_port << std::endl;
+    }
+    
+    if (USE_SCALAR_PARAM) {
+        for(int i = 0; i < 6; i++) {
+            yacAllocHandle(YAC_HANDLE_STMT, conn, &stmts_scalar[i]);
+            if((YacResult)yacPrepare(stmts_scalar[i], (YacChar*)sp_sqls_scalar[i], YAC_NULL_TERM_STR) != YAC_SUCCESS) {
+                std::cerr << "Pre-Prepare failed for txn type " << i << " at YashanDB." << std::endl;
+                YacInt32 errCode; 
+                char msg[1024];
+                YacTextPos pos;
+                yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
+                std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        std::cout << "Prepared Scalar Statements." << std::endl;
+    } else {
+        // Allocate one statement handle for Direct Execution of V2
+        if (yacAllocHandle(YAC_HANDLE_STMT, conn, &stmt_direct) != YAC_SUCCESS) {
+             std::cerr << "Failed to allocate statement handle." << std::endl;
+        }
+        std::cout << "Allocated Direct Execution Handle." << std::endl;
+    }
 
     int con_batch_id = 0;
     while (true) {
@@ -1495,14 +1486,35 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
 
         // 3. Execute Txns
         for (auto& txn_entry : txn_entries) {
+            // Check connection health
+            // YacInt32 dummy_attr;
+            // if (yacGetConnAttr(conn, YAC_ATTR_AUTOCOMMIT, &dummy_attr, 0, NULL) != YAC_SUCCESS) {
+            //     YacInt32 errCode;
+            //     char msg[1024];
+            //     YacTextPos pos;
+            //     yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
+            //     std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+            //     std::cerr << "Connection appears lost. Reconnecting..." << std::endl; 
+            //     while(!try_connect()) {
+            //         std::this_thread::sleep_for(std::chrono::seconds(1));
+            //         std::cerr << "Retrying connection..." << std::endl;
+            //     }
+            // }
+
             timespec start_time, end_time;
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             // Update stats
             exec_txn_cnt_per_node[compute_node_id]++;
+            exe_count++;
+            if(!WarmupEnd && (SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 11) && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
+                WarmupEnd = true;
+                std::cout << "Warmup Ended for Mode 0, exe_count: " << exe_count << std::endl;
+            }
 
             tx_id_t tx_id = txn_entry->tx_id;
             int txn_type = txn_entry->txn_type;
+            
             itemkey_t account1 = txn_entry->accounts[0];
             itemkey_t account2 = txn_entry->accounts[1];
 
@@ -1510,106 +1522,225 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             std::vector<itemkey_t> keys;
             smallbank->get_keys_by_txn_type(txn_type, account1, account2, keys);
             std::vector<bool> rw = smallbank->get_rw_by_txn_type(txn_type);
+            std::vector<page_id_t> ctid_ret_page_ids(keys.size(), 0);
             
-            // Prepare inputs/outputs
+            // Prepare inputs
             YacInt32 acc1_val = (YacInt32)account1;
             YacInt32 acc2_val = (YacInt32)account2;
             YacInt32 amount_val = 0;
-            
-            YacHandle& stmt = sp_stmts[txn_type];
-            YacResult res = YAC_SUCCESS;
+            if (txn_type == 2) amount_val = 1; // 1.3 -> 1
+            if (txn_type == 3) amount_val = 5;
+            if (txn_type == 5) amount_val = 20;
 
-            // Bind Common Parameters
-            res = yacBindParameter(stmt, 1, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, &acc1_val, sizeof(acc1_val), sizeof(acc1_val), NULL);
-            
-            if (txn_type == 0 || txn_type == 1) { // Amalgamate, SendPayment: (a1, a2, cur)
-                res = yacBindParameter(stmt, 2, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, &acc2_val, sizeof(acc2_val), sizeof(acc2_val), NULL);
-                res = yacBindParameter(stmt, 3, YAC_PARAM_OUTPUT, YAC_SQLT_CURSOR, &cursor_handle_container, 0, 0, NULL);
-            } else if (txn_type == 2 || txn_type == 3 || txn_type == 5) { // Deposit(a1, v), WriteCheck(a1, v), TransactSav(a1, v)
-                 if (txn_type == 2) amount_val = 1; // 1.3 -> 1
-                 if (txn_type == 3) amount_val = 5;
-                 if (txn_type == 5) amount_val = 20;
-                 res = yacBindParameter(stmt, 2, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, &amount_val, sizeof(amount_val), sizeof(amount_val), NULL);
-                 res = yacBindParameter(stmt, 3, YAC_PARAM_OUTPUT, YAC_SQLT_CURSOR, &cursor_handle_container, 0, 0, NULL);
-            } else if (txn_type == 4) { // Balance(a1, cur)
-                 res = yacBindParameter(stmt, 2, YAC_PARAM_OUTPUT, YAC_SQLT_CURSOR, &cursor_handle_container, 0, 0, NULL);
-            }
-
-            if (res != YAC_SUCCESS) {
-                std::cerr << "Bind failed txn=" << txn_type << std::endl;
-                YacInt32 errCode;
-                char msg[1024];
-                YacTextPos pos;
-                yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
-                std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
-            }
-            
-            // Execute
-            if (yacExecute(stmt) != YAC_SUCCESS) {
-                std::cerr << "Exec failed txn=" << txn_type << std::endl;
-                YacInt32 errCode;
-                char msg[1024];
-                YacTextPos pos;
-                yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
-                std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
-            } else {
-                // Success, now fetch from cursor
-                // Result columns: 1: rel(CHAR), 2: id(INT), 3: ctid(CHAR), 4: balance(INT)
-                YacChar rel_buf[32];
-                YacInt32 id_ret = 0;
-                YacChar ctid_buf[128];
-                YacInt32 bal_ret = 0;
+            // Construct SQL for Direct Execution
+            if (USE_SCALAR_PARAM) {
+                // Scalar Binding Logic
+                YacHandle stmt = stmts_scalar[txn_type];
+                YacInt32 b1 = 0, b2 = 0, b3 = 0; // Output blocks
                 YacInt32 ind = 0;
+
+                // Bind Inputs
+                yacBindParameter(stmt, 1, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, &acc1_val, sizeof(acc1_val), sizeof(acc1_val), NULL);
                 
-                // Define/Bind Output Columns on the Cursor Handle
-                yacBindColumn(cursor_handle_container, 1, YAC_SQLT_CHAR, rel_buf, sizeof(rel_buf), &ind);
-                yacBindColumn(cursor_handle_container, 2, YAC_SQLT_INTEGER, &id_ret, sizeof(id_ret), &ind);
-                yacBindColumn(cursor_handle_container, 3, YAC_SQLT_CHAR, ctid_buf, sizeof(ctid_buf), &ind);
-                yacBindColumn(cursor_handle_container, 4, YAC_SQLT_INTEGER, &bal_ret, sizeof(bal_ret), &ind);
-                
-                std::vector<page_id_t> ctid_ret_page_ids(keys.size(), 0);
-                
-                YacUint32 rows = 0;
-                while (yacFetch(cursor_handle_container, &rows) == YAC_SUCCESS || rows > 0) {
-                     std::string rel_str = (char*)rel_buf;
-                     page_id_t pid = parse_yashan_rowid(std::string((char*)ctid_buf));
-                     
-                     // Match to keys
-                     // keys[k] == id_ret AND table type matches rel_str
-                     SmallBankTableType needed_type;
-                     if (rel_str == "checking") needed_type = SmallBankTableType::kCheckingTable;
-                     else needed_type = SmallBankTableType::kSavingsTable;
-                     
-                     for(size_t k=0; k<keys.size(); k++) {
-                         if (keys[k] == (itemkey_t)id_ret && tables[k] == (table_id_t)needed_type) {
-                             ctid_ret_page_ids[k] = pid;
-                         }
-                     }
-                     
-                     // If ctid is empty (Balance txn), pid is 0, correctly mimics PG logic? 
-                     // Balance txn writes R R. No updates. ctid empty.
+                if (txn_type == 0) { // Amalgamate(a1, a2, out b1, out b2, out b3)
+                    yacBindParameter(stmt, 2, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, &acc2_val, sizeof(acc2_val), sizeof(acc2_val), NULL);
+                    yacBindParameter(stmt, 3, YAC_PARAM_OUTPUT, YAC_SQLT_INTEGER, &b1, sizeof(b1), sizeof(b1), &ind);
+                    yacBindParameter(stmt, 4, YAC_PARAM_OUTPUT, YAC_SQLT_INTEGER, &b2, sizeof(b2), sizeof(b2), &ind);
+                    yacBindParameter(stmt, 5, YAC_PARAM_OUTPUT, YAC_SQLT_INTEGER, &b3, sizeof(b3), sizeof(b3), &ind);
+                } else if (txn_type == 1 || txn_type == 3) { // SendPayment(a1, a2, out b1, out b2), WriteCheck(a1, amt, out b1, out b2)
+                    yacBindParameter(stmt, 2, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, &acc2_val, sizeof(acc2_val), sizeof(acc2_val), NULL);
+                    yacBindParameter(stmt, 3, YAC_PARAM_OUTPUT, YAC_SQLT_INTEGER, &b1, sizeof(b1), sizeof(b1), &ind);
+                    yacBindParameter(stmt, 4, YAC_PARAM_OUTPUT, YAC_SQLT_INTEGER, &b2, sizeof(b2), sizeof(b2), &ind);
+                } else if (txn_type == 2 || txn_type == 5) { 
+                    // Deposit(a1, amt, out b1), TransactSav(a1, amt, out b1)
+                    yacBindParameter(stmt, 2, YAC_PARAM_INPUT, YAC_SQLT_INTEGER, &amount_val, sizeof(amount_val), sizeof(amount_val), NULL);
+                    yacBindParameter(stmt, 3, YAC_PARAM_OUTPUT, YAC_SQLT_INTEGER, &b1, sizeof(b1), sizeof(b1), &ind);
+                } else if (txn_type == 4) { // Balance(a1, out b1, out b2)
+                    yacBindParameter(stmt, 2, YAC_PARAM_OUTPUT, YAC_SQLT_INTEGER, &b1, sizeof(b1), sizeof(b1), &ind);
+                    yacBindParameter(stmt, 3, YAC_PARAM_OUTPUT, YAC_SQLT_INTEGER, &b2, sizeof(b2), sizeof(b2), &ind);
                 }
-                
-                // Update Router Stats
-                smart_router->update_key_page(txn_entry, tables, keys, rw, ctid_ret_page_ids, compute_node_id);
+
+                try {
+                    if (yacExecute(stmt) != YAC_SUCCESS) {
+                        std::cerr << "Exec Scalar failed txn=" << txn_type << std::endl;
+                        YacInt32 errCode;
+                        char msg[1024];
+                        YacTextPos pos;
+                        yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
+                        std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+                    } else {
+                        // yacCommit(conn);
+                        // Collect outputs into ctid_ret_page_ids
+                        
+                        ctid_ret_page_ids.clear();
+                        if (txn_type == 0) {
+                            ctid_ret_page_ids.push_back(page_id_t(b1));
+                            ctid_ret_page_ids.push_back(page_id_t(b2));
+                            ctid_ret_page_ids.push_back(page_id_t(b3));
+                        } else if (txn_type == 1 || txn_type == 3) {
+                            ctid_ret_page_ids.push_back(page_id_t(b1));
+                            ctid_ret_page_ids.push_back(page_id_t(b2));
+                        } else if (txn_type == 2 || txn_type == 5) {
+                            ctid_ret_page_ids.push_back(page_id_t(b1));
+                        } else if (txn_type == 4) {
+                            ctid_ret_page_ids.push_back(page_id_t(b1)); 
+                            ctid_ret_page_ids.push_back(page_id_t(b2));
+                        }
+                        
+                        smart_router->update_key_page(txn_entry, tables, keys, rw, ctid_ret_page_ids, compute_node_id);
+                    }
+                } catch (const std::exception &e) {
+                    std::cerr << "Transaction (YashanDB Scalar) failed: " << e.what() << std::endl;
+                    logger_->info("Transaction (YashanDB Scalar) failed: " + std::string(e.what()));
+                }
+
+            } else {
+                std::string sql_str;
+                if(txn_type == 0) { // Amalgamate
+                    sql_str = "BEGIN sp_amalgamate_v2(" + std::to_string(acc1_val) + ", " + std::to_string(acc2_val) + "); END;";
+                } else if(txn_type == 1) { // SendPayment
+                    sql_str = "BEGIN sp_send_payment_v2(" + std::to_string(acc1_val) + ", " + std::to_string(acc2_val) + "); END;";
+                } else if(txn_type == 2) { // DepositChecking
+                    sql_str = "BEGIN sp_deposit_checking_v2(" + std::to_string(acc1_val) + ", " + std::to_string(amount_val) + "); END;";
+                } else if(txn_type == 3) { // WriteCheck
+                    sql_str = "BEGIN sp_write_check_v2(" + std::to_string(acc1_val) + ", " + std::to_string(amount_val) + "); END;";
+                } else if(txn_type == 4) { // Balance
+                    sql_str = "BEGIN sp_balance_v2(" + std::to_string(acc1_val) + "); END;";
+                } else if(txn_type == 5) { // TransactSavings
+                    sql_str = "BEGIN sp_transact_savings_v2(" + std::to_string(acc1_val) + ", " + std::to_string(amount_val) + "); END;";
+                }
+
+                // Execute
+                try {
+                if (yacDirectExecute(stmt_direct, (YacChar*)sql_str.c_str(), YAC_NULL_TERM_STR) != YAC_SUCCESS) {
+                    std::cerr << "DirectExec failed txn=" << txn_type << " SQL: " << sql_str << " at ip " << info.ip_port << std::endl;
+                    YacInt32 errCode;
+                    char msg[1024];
+                    YacTextPos pos;
+                    yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
+                    std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+                    } else {
+                        // Success
+                        // In V2, no cursor output is returned.
+                        
+                        // commit
+                        yacCommit(conn);
+                        
+                        // Update Router Stats (ctid_ret_page_ids will be empty)
+                        // smart_router->update_key_page(txn_entry, tables, keys, rw, ctid_ret_page_ids, compute_node_id); // no need to update pages   
+                    }
+                } catch (const std::exception &e) {
+                    std::cerr << "Transaction (YashanDB) failed: " << e.what() << std::endl;
+                    logger_->info("Transaction (YashanDB) failed: " + std::string(e.what()));
+                }
             }
-            // Auto-commit enabled, no yacCommit needed.
-            
+
+            // 计时
             clock_gettime(CLOCK_MONOTONIC, &end_time);
             double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 + 
                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
-        }
-        
-        delete txn_entries.front(); 
-    }
 
-    for(int i=0; i<6; i++) yacFreeHandle(YAC_HANDLE_STMT, sp_stmts[i]);
-    yacFreeHandle(YAC_HANDLE_STMT, cursor_handle_container);
+            double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
+            if (WarmupEnd) {
+                if(params->latency_record) params->latency_record->push_back(exec_time);
+                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                }
+            }
+
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+            tit->mark_done(txn_entry, call_id); // 一体化：标记完成，删除由 TIT 统一管理
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            double mark_done_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                               (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_mark_done_time(params->compute_node_id_connecter, params->thread_id, mark_done_time);
+            
+        #if LOG_TXN_EXEC
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+            for (auto account : txn_entry->accounts) {
+                for(auto key : hottest_keys) {
+                    if (account == key) {
+                        // log the hotspot exection
+                        logger_->info("Batch " + std::to_string(txn_entry->batch_id) + 
+                            " Node: " + std::to_string(compute_node_id) + 
+                            " txn id: " + std::to_string(txn_entry->tx_id) + 
+                            " txn type (smallbank): " + std::to_string(txn_entry->txn_type) + 
+                            " connector id: " + std::to_string(params->compute_node_id_connecter) + 
+                            " txn type (schedule): " + std::to_string((int)txn_entry->schedule_type) + 
+                            " access account " + std::to_string(account) + 
+                            " exec time: " + std::to_string(exec_time) + 
+                            " group id: " + std::to_string(txn_entry->group_id) + 
+                            " dependency group ids: " + [&]() {
+                                std::string os;
+                                for(auto dep_id : txn_entry->dependency_group_id) {
+                                    os += std::to_string(dep_id) + " ";
+                                }
+                                return os;
+                            }() +
+                            " batch id: " + std::to_string(txn_entry->batch_id)
+                        );
+                    }
+                }
+            }
+        #endif
+        // #if LOG_TXN_EXEC
+            if (exec_time > 1000) 
+                logger_->warning("Node: " + std::to_string(compute_node_id) + "Transaction execution time exceeded 10 ms: " + std::to_string(exec_time) + 
+                " ms, call id: " + std::to_string(call_id) + " Txn op: " + [&]() {
+                    std::string os;
+                    os += "txn_type: " + std::to_string(txn_entry->txn_type) + " ";
+                    os += "table: ";
+                    for(int i= 0; i < tables.size(); i++) {
+                        os += std::to_string(tables[i]) + " ";
+                    }
+                    os += "key: ";
+                    for(int i= 0; i < keys.size(); i++) {
+                        os += std::to_string(keys[i]) + " ";
+                    }
+                    os += "original pages: ";
+                    for(int i= 0; i < txn_entry->accessed_page_ids.size(); i++) {
+                        os += std::to_string(txn_entry->accessed_page_ids[i]) + " ";
+                    }
+                    os += " return pages: ";
+                    for(int i= 0; i < ctid_ret_page_ids.size(); i++) {
+                        os += std::to_string(ctid_ret_page_ids[i]) + " ";
+                    }
+                    os += " group id: " + std::to_string(txn_entry->group_id) + " ";
+                    os += " dependency group ids: ";
+                    for(auto dep_id : txn_entry->dependency_group_id) {
+                        os += std::to_string(dep_id) + " ";
+                    }
+                    os += " batch id: " + std::to_string(txn_entry->batch_id) + " ";
+                    return os;
+                }());
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            double log_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                               (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_log_debug_info_time(params->compute_node_id_connecter, params->thread_id, log_time);
+        }
+    #if LOG_TXN_EXEC
+        struct timespec start_time, end_time;
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
+        logger_->info("Finished processing batch with call_id: " + std::to_string(call_id));
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        double log_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                        (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+        smart_router->add_worker_thread_log_debug_info_time(params->compute_node_id_connecter, params->thread_id, log_time);
+    #endif 
+    }
+    // Cleanup YashanDB handles
+    if (USE_SCALAR_PARAM) {
+        for(int i = 0; i < 6; i++) {
+             if(stmts_scalar[i]) yacFreeHandle(YAC_HANDLE_STMT, stmts_scalar[i]);
+        }
+    } else {
+        if(stmt_direct) yacFreeHandle(YAC_HANDLE_STMT, stmt_direct);
+    }
     yacDisconnect(conn);
     yacFreeHandle(YAC_HANDLE_DBC, conn);
     yacFreeHandle(YAC_HANDLE_ENV, env);
-
+    std::cout << "Finished running Yashan smallbank transactions via stored procedures." << std::endl;
 }
 
 int main(int argc, char *argv[]) {
@@ -2135,10 +2266,10 @@ int main(int argc, char *argv[]) {
         std::cout << "Database Type: YashanDB" << std::endl;
         // 崖山RAC
         YashanDBConnections.clear();
-        YashanDBConnections.push_back({"10.10.2.35:1688", "sys", "Rdic12#025"});
-        YashanDBConnections.push_back({"10.10.2.37:1688", "sys", "Rdic12#025"});
-        YashanDBConnections.push_back({"10.10.2.39:1688", "sys", "Rdic12#025"});
-        YashanDBConnections.push_back({"10.10.2.40:1688", "sys", "Rdic12#025"});
+        YashanDBConnections.push_back({"10.10.2.35:1688", "sys", "Rdjc#2025"});
+        YashanDBConnections.push_back({"10.10.2.36:1688", "sys", "Rdjc#2025"});
+        // YashanDBConnections.push_back({"10.10.2.39:1688", "sys", "Rdjc#2025"});
+        // YashanDBConnections.push_back({"10.10.2.40:1688", "sys", "Rdjc#2025"});
         ComputeNodeCount = YashanDBConnections.size();
         std::cout << "YashanDB connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
     }
@@ -2262,8 +2393,10 @@ int main(int argc, char *argv[]) {
             std::cout << "Starting YashanDB initialization..." << std::endl;
             assert(YashanDBConnections.size() > 0);
             assert(Workload_Type == 0); // 目前仅支持 SmallBank
-            // smallbank->create_table_yashan();
-            // smallbank->create_smallbank_stored_procedures_yashan();
+            smallbank->create_table_yashan();
+            // smallbank->create_smallbank_stored_procedures_yashan(); // !不要在这里jian建 SP，手动建, 否则会影响后续 load data 步骤
+            // smallbank->create_smallbank_stored_procedures_yashan_new(); // Create V2 procedures
+            smallbank->create_smallbank_stored_procedures_yashan_scalar(); // Create Scalar procedures
             
             // generate friend graph in a separate thread
             std::cout << "Generating friend graph in a separate thread..." << std::endl;
@@ -2276,7 +2409,8 @@ int main(int argc, char *argv[]) {
             // 若为 SmallBank，记录键→页映射以便后续初始化 Router 时跳过 DB 扫描
             std::cout << "Loading data into YashanDB..." << std::endl;
             if (Workload_Type == 0) {
-                g_smallbank_key_page_map = smallbank->load_data_yashan();
+                smallbank->load_data_yashan(); // load data
+                g_smallbank_key_page_map = smallbank->fetch_row_id_yashan(); // fetch row id mapping
             }
             std::cout << "Data loaded into YashanDB successfully." << std::endl;
             // Wait for friend thread to complete
@@ -2285,7 +2419,25 @@ int main(int argc, char *argv[]) {
             double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
             std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
         } else {
-            assert(false && "Skipping data load for YashanDB is not supported yet.");
+            std::cout << "Skipping data loading. "<< std::endl;
+            // generate friend graph in a separate thread
+            std::cout << "Generating friend graph in a separate thread..." << std::endl;
+            auto start_friend_gen = std::chrono::high_resolution_clock::now();
+            std::thread friend_thread([&]() {
+                if(Workload_Type == 0) smallbank->generate_friend_graph();
+            });
+
+            // load data into the database
+            std::cout << "Fetching row ID mapping from YashanDB..." << std::endl;
+            if (Workload_Type == 0) {
+                g_smallbank_key_page_map = smallbank->fetch_row_id_yashan(); // fetch row id mapping
+            }
+            std::cout << "Row ID mapping fetched successfully." << std::endl;
+            // Wait for friend thread to complete
+            friend_thread.join();
+            auto end_friend_gen = std::chrono::high_resolution_clock::now();
+            double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
+            std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
         }
         if(LOAD_DATA_ONLY) {
             std::cout << "Load data only mode enabled. Exiting after data load." << std::endl;
@@ -2349,10 +2501,32 @@ int main(int argc, char *argv[]) {
         smart_router->mlp_train_after_init();
 #endif
         std::cout << "Data page mapping initialization from load_data completed." << std::endl;
-    } else {
+    } 
+    else if (SKIP_LOAD_DATA && Workload_Type == 0 && DB_TYPE == 1) {
+        // 若跳过数据加载，且为 SmallBank + YashanDB，则从 g_smallbank_key_page_map 初始化
+        int N = smallbank->get_account_count();
+        for (int id = 1; id <= N; ++id) {
+            if (id < (int)g_smallbank_key_page_map.checking_page.size()) {
+                int cpg = g_smallbank_key_page_map.checking_page[id];
+                if (cpg >= 0) {
+                    smart_router->initial_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, cpg);
+                }
+                else std::cout << "Warning: Invalid checking page for account " << id << std::endl;
+            }
+            if (id < (int)g_smallbank_key_page_map.savings_page.size()) {
+                int spg = g_smallbank_key_page_map.savings_page[id];
+                if (spg >= 0) {
+                    smart_router->initial_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, spg);
+                }
+                else std::cout << "Warning: Invalid savings page for account " << id << std::endl;
+            }
+        }
+    }
+    else if (DB_TYPE == 0){
         // 走原有从数据库扫描初始化的路径
         init_key_page_map(smart_router, smallbank, ycsb, tpcc);
     }
+    else assert(false);
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
