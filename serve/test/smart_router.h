@@ -128,11 +128,17 @@ public:
         std::vector<std::vector<double>> worker_thread_exec_time_ms;
         std::vector<std::vector<double>> worker_thread_update_key_page_time_ms;
         std::vector<std::vector<double>> pop_txn_from_queue_ms_per_thread;
+            std::vector<std::vector<double>> pop_txn_empty_ms_per_thread;
+            std::vector<std::vector<double>> pop_txn_dag_ms_per_thread;
+            std::vector<std::vector<double>> pop_txn_regular_ms_per_thread;
         std::vector<std::vector<double>> wait_next_batch_ms_per_thread;
         std::vector<std::vector<double>> mark_done_ms_per_thread;
         std::vector<std::vector<double>> log_debug_info_ms_per_thread;
 
         std::vector<double> pop_txn_total_ms_per_node;
+            std::vector<double> pop_txn_empty_total_ms_per_node;
+            std::vector<double> pop_txn_dag_total_ms_per_node;
+            std::vector<double> pop_txn_regular_total_ms_per_node;
         std::vector<double> wait_next_batch_total_ms_per_node;
         std::vector<double> sum_worker_thread_exec_time_ms_per_node;
         std::vector<double> sum_worker_thread_update_key_page_time_ms_per_node;
@@ -258,6 +264,9 @@ public:
         time_stats_.push_txn_to_queue_ms_per_thread.resize(worker_threads_, 0.0);
 
         time_stats_.pop_txn_from_queue_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.pop_txn_empty_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.pop_txn_dag_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.pop_txn_regular_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
         time_stats_.wait_next_batch_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
         time_stats_.worker_thread_exec_time_ms.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
         time_stats_.worker_thread_update_key_page_time_ms.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
@@ -265,6 +274,9 @@ public:
         time_stats_.log_debug_info_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
 
         time_stats_.pop_txn_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_empty_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_dag_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_regular_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.wait_next_batch_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.sum_worker_thread_exec_time_ms_per_node.resize(ComputeNodeCount, 0.0); 
         time_stats_.sum_worker_thread_update_key_page_time_ms_per_node.resize(ComputeNodeCount, 0.0);
@@ -1375,6 +1387,18 @@ public:
         time_stats_.pop_txn_from_queue_ms_per_thread[node_id][thread_id] += pop_time_ms;
     }
 
+    void add_worker_thread_pop_empty_time(node_id_t node_id, int thread_id, double pop_empty_wait_time_ms) {
+        time_stats_.pop_txn_empty_ms_per_thread[node_id][thread_id] += pop_empty_wait_time_ms;
+    }
+
+    void add_worker_thread_pop_dag_time(node_id_t node_id, int thread_id, double pop_dag_time_ms) {
+        time_stats_.pop_txn_dag_ms_per_thread[node_id][thread_id] += pop_dag_time_ms;
+    }
+
+    void add_worker_thread_pop_regular_time(node_id_t node_id, int thread_id, double pop_regular_time_ms) {
+        time_stats_.pop_txn_regular_ms_per_thread[node_id][thread_id] += pop_regular_time_ms;
+    }
+
     void add_worker_thread_wait_next_batch_time(node_id_t node_id, int thread_id, double wait_time_ms) {
         time_stats_.wait_next_batch_ms_per_thread[node_id][thread_id] += wait_time_ms;
     }
@@ -1429,6 +1453,21 @@ public:
             time_stats_.pop_txn_total_ms_per_node[i] = 0.0;
             for (const auto& t : time_stats_.pop_txn_from_queue_ms_per_thread[i]) {
                 time_stats_.pop_txn_total_ms_per_node[i] += t; 
+            }
+
+            time_stats_.pop_txn_empty_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_empty_ms_per_thread[i]) {
+                time_stats_.pop_txn_empty_total_ms_per_node[i] += t;
+            }
+
+            time_stats_.pop_txn_dag_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_dag_ms_per_thread[i]) {
+                time_stats_.pop_txn_dag_total_ms_per_node[i] += t;
+            }
+
+            time_stats_.pop_txn_regular_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_regular_ms_per_thread[i]) {
+                time_stats_.pop_txn_regular_total_ms_per_node[i] += t;
             }
 
             time_stats_.wait_next_batch_total_ms_per_node[i] = 0.0;

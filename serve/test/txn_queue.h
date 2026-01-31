@@ -365,7 +365,7 @@ public:
         }
     ~TxnQueue() = default;
     
-    std::list<TxnQueueEntry*> pop_txn(int* ret_call_id = nullptr) {
+    std::list<TxnQueueEntry*> pop_txn(int* ret_call_id = nullptr, int* ret_type = nullptr) {
         int call_id = rand();
         if(ret_call_id != nullptr) *ret_call_id = call_id;
         std::list<TxnQueueEntry*> batch_entries; // ret
@@ -385,6 +385,7 @@ public:
         }
         
         if(txn_queue_.empty() && dag_txn_queue_->empty() && (finished_ || batch_finished_)) {
+            if(ret_type != nullptr) *ret_type = 0; // finished type
             // indicate finished or batch finished, pop one from shared_queue, if shared_queue is empty, will returen {}
             batch_entries = std::move(shared_txn_queue_->pop_txn()); 
         #if LOG_QUEUE_STATUS
@@ -396,6 +397,7 @@ public:
         }
 
         if(!dag_txn_queue_->empty()){
+            if(ret_type != nullptr) *ret_type = 1; // dag type
             // 优先取 DAG-ready，若过大则分块，并与 regular 批次做混合以降低冲突
             bool inflight_active = dag_txn_queue_->is_inflight_active();
             // if(inflight_active || dag_txn_queue_->top_batch_size() > worker_threads * 3) {
@@ -515,6 +517,7 @@ public:
                 return std::move(batch_entries);
             }
         } else {
+            if(ret_type != nullptr) *ret_type = 2; // regular type
             // !get the regular ready txn
             assert(!txn_queue_.empty());
             batch_entries = std::move(txn_queue_.front());

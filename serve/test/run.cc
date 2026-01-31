@@ -606,8 +606,8 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         timespec pop_start_time, pop_end_time;
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
-        int call_id;
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
+        int call_id, ret;
+        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id, &ret);
         // if(WarmupEnd)
         //     logger_->info("Compute Node " + std::to_string(compute_node_id) + 
         //                 " Thread " + std::to_string(params->thread_id) + 
@@ -623,6 +623,9 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         //                   " Thread " + std::to_string(params->thread_id) + 
         //                   " in batch " + std::to_string(con_batch_id));
         // }
+        if(ret == 0) smart_router->add_worker_thread_pop_empty_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 1) smart_router->add_worker_thread_pop_dag_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 2) smart_router->add_worker_thread_pop_regular_time(params->compute_node_id_connecter, params->thread_id, pop_time);
         smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
 
         if (txn_entries.empty()) {
@@ -2485,7 +2488,6 @@ int main(int argc, char *argv[]) {
     // BtreeIndexService *index_service = new BtreeIndexService(DBConnection, index_names, read_btree_mode, read_frequency); // !not used
 
     // initialize the transaction pool
-    TxnQueueMaxSize = BatchRouterProcessSize;
     SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, 2*ComputeNodeCount*worker_threads*BatchRouterProcessSize);
     TxnPool* txn_pool = new TxnPool(4, TxnPoolMaxSize, tit);
     auto shared_txn_queue = new SharedTxnQueue(tit, logger_, TxnQueueMaxSize);

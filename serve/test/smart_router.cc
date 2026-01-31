@@ -2940,6 +2940,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 double max_benefit_score = best_benefit;
 
                 clock_gettime(CLOCK_MONOTONIC, &select_end_time);
+                if(t==0)
                 time_stats_.select_condidate_txns_ms +=
                     (select_end_time.tv_sec - select_start_time.tv_sec) * 1000.0 + (select_end_time.tv_nsec - select_start_time.tv_nsec) / 1000000.0;
 
@@ -3050,6 +3051,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 }
             #endif
                 clock_gettime(CLOCK_MONOTONIC, &compute_transfer_end_time);
+                if(t==0)
                 time_stats_.compute_transfer_page_ms += (compute_transfer_end_time.tv_sec - compute_transfer_start_time.tv_sec) * 1000.0 + 
                     (compute_transfer_end_time.tv_nsec - compute_transfer_start_time.tv_nsec) / 1000000.0;
                 
@@ -3070,6 +3072,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                     }
                 }
                 clock_gettime(CLOCK_MONOTONIC, &find_affected_end_time);
+                if(t==0)
                 time_stats_.find_affected_txns_ms += (find_affected_end_time.tv_sec - find_affected_start_time.tv_sec) * 1000.0 + 
                     (find_affected_end_time.tv_nsec - find_affected_start_time.tv_nsec) / 1000000.0;
 
@@ -3266,6 +3269,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 }
                 
                 clock_gettime(CLOCK_MONOTONIC, &decide_schedule_end_time);
+                if(t==0)
                 time_stats_.decide_txn_schedule_ms += (decide_schedule_end_time.tv_sec - decide_schedule_start_time.tv_sec) * 1000.0 + 
                     (decide_schedule_end_time.tv_nsec - decide_schedule_start_time.tv_nsec) / 1000000.0;
 
@@ -3391,6 +3395,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 }
 
                 clock_gettime(CLOCK_MONOTONIC, &record_dependency_end_time);
+                if(t==0)
                 time_stats_.add_txn_dependency_ms += (record_dependency_end_time.tv_sec - record_dependency_start_time.tv_sec) * 1000.0 + 
                     (record_dependency_end_time.tv_nsec - record_dependency_start_time.tv_nsec) / 1000000.0;
                 
@@ -3438,6 +3443,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 assert(!local_candidates_active[selected_candidate_txn->dense_id]); // 由于选择了该事务，一定不在candidate_txn_ids中了
 
                 clock_gettime(CLOCK_MONOTONIC, &push_txn_end_time);
+                if(t==0)
                 time_stats_.push_prioritized_txns_ms += (push_txn_end_time.tv_sec - push_txn_start_time.tv_sec) * 1000.0 + 
                     (push_txn_end_time.tv_nsec - push_txn_start_time.tv_nsec) / 1000000.0;
 
@@ -3486,6 +3492,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                     }
                 }
                 clock_gettime(CLOCK_MONOTONIC, &fill_bubble_end_time);
+                if(t==0)
                 time_stats_.fill_pipeline_bubble_ms += (fill_bubble_end_time.tv_sec - fill_bubble_start_time.tv_sec) * 1000.0 + 
                     (fill_bubble_end_time.tv_nsec - fill_bubble_start_time.tv_nsec) / 1000000.0;
                     
@@ -3581,6 +3588,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                     #endif
                 }
                 clock_gettime(CLOCK_MONOTONIC, &check_ownership_ok_end_time);
+                if(t==0)
                 time_stats_.push_end_txns_ms += (check_ownership_ok_end_time.tv_sec - check_ownership_ok_start_time.tv_sec) * 1000.0 + 
                     (check_ownership_ok_end_time.tv_nsec - check_ownership_ok_start_time.tv_nsec) / 1000000.0;
             }
@@ -3646,6 +3654,12 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                             } else {
                                 // 之前check ref 不是0，但注册时发现已经是0了, 那么就放到dag_ready 中执行
                                 to_schedule_txns.push_back(sc->txn);    
+                                // 如果达到批量大小，则批量推送
+                                if(to_schedule_txns.size() >= BatchExecutorPOPTxnSize) {
+                                    // 批量加入txn_queues_
+                                    this->txn_queues_[node_id]->push_txn_back_batch(to_schedule_txns);
+                                    to_schedule_txns.clear();
+                                }  
                             }
                         }
                     }
@@ -3698,6 +3712,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 fut.get();
             }
             clock_gettime(CLOCK_MONOTONIC, &push_remaining_end_time);
+            if(t==0)
             time_stats_.final_push_to_queues_ms += (push_remaining_end_time.tv_sec - push_remaining_start_time.tv_sec) * 1000.0 + 
                 (push_remaining_end_time.tv_nsec - push_remaining_start_time.tv_nsec) / 1000000.0;
         }));

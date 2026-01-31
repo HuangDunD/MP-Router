@@ -99,6 +99,9 @@ struct RouterStatSnapshot {
     double final_push_to_queues_ms = 0.0;
 
     std::vector<double> pop_txn_total_ms_per_node;
+        std::vector<double> pop_txn_empty_total_ms_per_node;
+        std::vector<double> pop_txn_dag_total_ms_per_node;
+        std::vector<double> pop_txn_regular_total_ms_per_node;
     std::vector<double> wait_next_batch_total_ms_per_node;
     std::vector<double> sum_worker_thread_exec_time_ms_per_node;
     std::vector<double> sum_worker_thread_update_key_page_time_ms_per_node;
@@ -197,6 +200,9 @@ struct RouterStatSnapshot {
         for(int i=0; i< ComputeNodeCount; i++) {
             std::cout << "Node " << i << ":" << std::endl;
             std::cout << "  Average Pop Txn From Queue Time: " << pop_txn_total_ms_per_node[i] / worker_threads << " ms" << std::endl; 
+            std::cout << "    Average Pop Empty Time: " << pop_txn_empty_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            std::cout << "    Average Pop DAG Time: " << pop_txn_dag_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            std::cout << "    Average Pop Regular Time: " << pop_txn_regular_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
             std::cout << "  Average Wait Next Batch Time: " << wait_next_batch_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
             std::cout << "  Average Worker Thread Exec Time: " << sum_worker_thread_exec_time_ms_per_node[i] / worker_threads << " ms" << std::endl;
             std::cout << "    Average Worker Thread Update Key Page Time: " << sum_worker_thread_update_key_page_time_ms_per_node[i] / worker_threads << " ms" << std::endl;
@@ -301,6 +307,9 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.push_end_txns_ms = tdb.push_end_txns_ms;
     snap.final_push_to_queues_ms = tdb.final_push_to_queues_ms;
     snap.pop_txn_total_ms_per_node = tdb.pop_txn_total_ms_per_node;
+    snap.pop_txn_empty_total_ms_per_node = tdb.pop_txn_empty_total_ms_per_node;
+    snap.pop_txn_dag_total_ms_per_node = tdb.pop_txn_dag_total_ms_per_node;
+    snap.pop_txn_regular_total_ms_per_node = tdb.pop_txn_regular_total_ms_per_node;
     snap.wait_next_batch_total_ms_per_node = tdb.wait_next_batch_total_ms_per_node;
     snap.sum_worker_thread_exec_time_ms_per_node = tdb.sum_worker_thread_exec_time_ms_per_node;
     snap.sum_worker_thread_update_key_page_time_ms_per_node = tdb.sum_worker_thread_update_key_page_time_ms_per_node;
@@ -416,6 +425,9 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.final_push_to_queues_ms = b.final_push_to_queues_ms - a.final_push_to_queues_ms;
     for(int i=0; i< ComputeNodeCount; i++) {
         d.pop_txn_total_ms_per_node.push_back( b.pop_txn_total_ms_per_node[i] - a.pop_txn_total_ms_per_node[i] );
+        d.pop_txn_empty_total_ms_per_node.push_back( b.pop_txn_empty_total_ms_per_node[i] - a.pop_txn_empty_total_ms_per_node[i] );
+        d.pop_txn_dag_total_ms_per_node.push_back( b.pop_txn_dag_total_ms_per_node[i] - a.pop_txn_dag_total_ms_per_node[i] );
+        d.pop_txn_regular_total_ms_per_node.push_back( b.pop_txn_regular_total_ms_per_node[i] - a.pop_txn_regular_total_ms_per_node[i] );
         d.wait_next_batch_total_ms_per_node.push_back( b.wait_next_batch_total_ms_per_node[i] - a.wait_next_batch_total_ms_per_node[i] );
         d.sum_worker_thread_exec_time_ms_per_node.push_back( b.sum_worker_thread_exec_time_ms_per_node[i] - a.sum_worker_thread_exec_time_ms_per_node[i] );
         d.sum_worker_thread_update_key_page_time_ms_per_node.push_back( b.sum_worker_thread_update_key_page_time_ms_per_node[i] - a.sum_worker_thread_update_key_page_time_ms_per_node[i] );
