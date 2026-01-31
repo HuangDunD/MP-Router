@@ -617,6 +617,12 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
         double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
                           (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
+        // if(pop_time > 10) {
+        //     logger_->info("High pop_time: " + std::to_string(pop_time) + " ms at Compute Node " + 
+        //                   std::to_string(compute_node_id) + 
+        //                   " Thread " + std::to_string(params->thread_id) + 
+        //                   " in batch " + std::to_string(con_batch_id));
+        // }
         smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
 
         if (txn_entries.empty()) {
@@ -2126,10 +2132,10 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
 
         // kes 四机, 新版本
-        // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
-        // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
-        // DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
-        // DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
 
         // kes 单机
         // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
@@ -2142,8 +2148,8 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
         // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
 
-        DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
-        DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
 
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
@@ -2327,6 +2333,7 @@ int main(int argc, char *argv[]) {
     // BtreeIndexService *index_service = new BtreeIndexService(DBConnection, index_names, read_btree_mode, read_frequency); // !not used
 
     // initialize the transaction pool
+    TxnQueueMaxSize = BatchRouterProcessSize;
     SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, 2*ComputeNodeCount*worker_threads*BatchRouterProcessSize);
     TxnPool* txn_pool = new TxnPool(4, TxnPoolMaxSize, tit);
     auto shared_txn_queue = new SharedTxnQueue(tit, logger_, TxnQueueMaxSize);

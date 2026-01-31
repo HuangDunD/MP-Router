@@ -225,10 +225,15 @@ public:
     PendingTxnSet(const PendingTxnSet&) = delete;
     PendingTxnSet& operator=(const PendingTxnSet&) = delete;
 
-    void add_pendingtxn_on_node(TxnQueueEntry* tx_entry, int node_id) {
+    bool add_pendingtxn_on_node(TxnQueueEntry* tx_entry, int node_id) {
         std::unique_lock<std::mutex> lock(pending_mutex_);
+        // double check if ref = 0 already
+        if(tx_entry->ref.load(std::memory_order_acquire) == 0) {
+            return false;
+        }
         pending_target_node_[tx_entry] = node_id;
         pending_txn_cnt_per_node_[node_id]++;
+        return true;
     }
 
     int get_pending_txn_count() {
@@ -566,7 +571,7 @@ public:
     }
 
     // push 绑定到单线程的事务到队列前端
-    void push_txn_dag_ready(std::vector<TxnQueueEntry*> entries) {
+    void push_txn_dag_ready(std::vector<TxnQueueEntry*> entries, int type = 0) {
         std::unique_lock<std::mutex> lock(queue_mutex_);
         assert(!entries.empty());
         int size = static_cast<int>(entries.size());
@@ -576,7 +581,8 @@ public:
         dag_txn_queue_->push_ready_batch(std::move(entries));
     #if LOG_QUEUE_STATUS
         logger_->info("[TxnQueue Push Front] Pushed combined txn batch of size " + 
-                        std::to_string(size) + " to front of txn queue of compute node " + std::to_string(node_id_) +
+                        std::to_string(size) + " to front of txn queue of compute node " + std::to_string(node_id_) + 
+                        ", push type: " + std::to_string(type) +
                         ", current queue size: " + std::to_string(current_queue_size_) + 
                         ", schedule_txn_cnt: " + std::to_string(schedule_txn_cnt) +
                         ", schedule_txn_vec_cnt: " + std::to_string(schedule_txn_vec_cnt) +
@@ -711,11 +717,6 @@ public:
     //     current_queue_size_ += static_cast<int>(entries.size());
     //     queue_cv_.notify_one();
     // }
-
-    // pending txn operations
-    void push_pending_txn_on_node(TxnQueueEntry* entry, int node_id) {
-        pending_txn_queue_->add_pendingtxn_on_node(entry, node_id);
-    }
 
     int get_pending_txn_cnt_on_node(int node_id) {
         return pending_txn_queue_->get_pending_txn_cnt_on_node(node_id);

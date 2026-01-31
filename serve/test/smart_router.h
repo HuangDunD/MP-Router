@@ -1625,7 +1625,7 @@ private:
                     hot_key_map.erase(victim_it);
                     hot_lru_.pop_back();
                     // std::cout << "Evicted hot key: (table_id=" << candidate_key.table_id << ", key=" << candidate_key.key << ")" << std::endl;
-                    logger->info("Evicted hot key: (table_id=" + std::to_string(candidate_key.table_id) + ", key=" + std::to_string(candidate_key.key) + ")");
+                    // logger->info("Evicted hot key: (table_id=" + std::to_string(candidate_key.table_id) + ", key=" + std::to_string(candidate_key.key) + ")");
                 }
             }
         }
@@ -1980,9 +1980,9 @@ private:
     // --------- DAG Ready Scheduling ---------
 public:
     // 注册一个尚未就绪的事务，用于后续ready时快速调度
-    void register_pending_txn(TxnQueueEntry* entry, int node_id) {
-        if (!entry) return; 
-        pending_txn_queue_->add_pendingtxn_on_node(entry, node_id);
+    bool register_pending_txn(TxnQueueEntry* entry, int node_id) {
+        assert(entry != nullptr);
+        return pending_txn_queue_->add_pendingtxn_on_node(entry, node_id);
     }
 
     int get_pending_txn_count() {
