@@ -94,14 +94,14 @@ void SmallBank::create_table_yashan() {
                                   "id INTEGER PRIMARY KEY, "
                                   "balance INTEGER, "
                                   "city INTEGER, "
-                                  "name CHAR(200))"
+                                  "name CHAR(500))"
                                   " PCTFREE 50";
     
     const char* create_savings = "CREATE TABLE savings ("
                                  "id INTEGER PRIMARY KEY, "
                                  "balance INTEGER, "
                                  "city INTEGER, "
-                                 "name CHAR(200))"
+                                 "name CHAR(500))"
                                  " PCTFREE 50";
 
     execSQL(create_checking);

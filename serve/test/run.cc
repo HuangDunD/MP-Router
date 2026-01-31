@@ -2268,8 +2268,8 @@ int main(int argc, char *argv[]) {
         YashanDBConnections.clear();
         YashanDBConnections.push_back({"10.10.2.35:1688", "sys", "Rdjc#2025"});
         YashanDBConnections.push_back({"10.10.2.36:1688", "sys", "Rdjc#2025"});
-        // YashanDBConnections.push_back({"10.10.2.39:1688", "sys", "Rdjc#2025"});
-        // YashanDBConnections.push_back({"10.10.2.40:1688", "sys", "Rdjc#2025"});
+        YashanDBConnections.push_back({"10.10.2.39:1688", "sys", "Rdjc#2025"});
+        YashanDBConnections.push_back({"10.10.2.40:1688", "sys", "Rdjc#2025"});
         ComputeNodeCount = YashanDBConnections.size();
         std::cout << "YashanDB connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
     }

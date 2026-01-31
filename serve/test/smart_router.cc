@@ -2038,6 +2038,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     // Shared variables for parallel execution context
     size_t thread_count = std::min<size_t>(worker_threads_, n);
     if (thread_count == 0) thread_count = 1;
+    thread_count = 1;
     size_t chunk = (n + thread_count - 1) / thread_count;
     std::vector<std::future<void>> futs;
     // Optimization: avoid new/delete overhead
