@@ -343,8 +343,11 @@ public:
     
     // ------ YashanDB compatible methods ------
     void create_table_yashan();
-    TableKeyPageMap load_data_yashan();
+    void load_data_yashan();
     void create_smallbank_stored_procedures_yashan();
+    void create_smallbank_stored_procedures_yashan_new();
+    void create_smallbank_stored_procedures_yashan_scalar();
+    TableKeyPageMap fetch_row_id_yashan();
     // ------ End of YashanDB compatible methods ------
 
     void generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool);

@@ -510,7 +510,7 @@ public:
                     );
                     stats_.change_page_cnt++;
                 #if LOG_PAGE_UPDATE
-                    logger->info("Key (table_id=" + std::to_string(table_ids[i]) + ", key=" + std::to_string(keys[i]) + 
+                    logger->info("txn_type: " + std::to_string(txn->txn_type) + " Key (table_id=" + std::to_string(table_ids[i]) + ", key=" + std::to_string(keys[i]) + 
                                     ") page changed from " + std::to_string(original_page) + " to " + std::to_string(ctid_ret_pages[i]) + 
                                     " at node " + std::to_string(routed_node_id));
                 #endif 
@@ -578,12 +578,11 @@ public:
 
     // 根据table_ids和keys进行路由，返回目标节点ID
     SmartRouterResult get_route_primary(TxnQueueEntry* txn, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, 
-            std::vector<bool> &rw, std::vector<pqxx::connection *> &thread_conns);
+            std::vector<bool> &rw);
             
     // ! core code, propose the transaction scheduling
     // 批量对事务进行路由
-    std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> get_route_primary_batch_2phase(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch,
-            std::vector<pqxx::connection *> &thread_conns) {
+    std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> get_route_primary_batch_2phase(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch) {
         
         assert(SYSTEM_MODE == 9); // 仅支持模式9
         std::vector<SmartRouterResult> results;
@@ -632,7 +631,7 @@ public:
             // 获取涉及的页面列表
             std::unordered_map<uint64_t, node_id_t> table_page_ids; // 高32位存table_id，低32位存page_id
             for (size_t i = 0; i < accounts_keys.size(); ++i) {
-                auto entry = lookup(txn, table_ids[i], accounts_keys[i], thread_conns);
+                auto entry = lookup(txn, table_ids[i], accounts_keys[i]);
                 // 计算page id
                 if (entry.page == kInvalidPageId) {
                     assert(false); // 这里不应该失败
@@ -699,12 +698,11 @@ public:
     void compute_benefit_for_node(SchedulingCandidateTxn* sc, std::vector<int>& ownership_node_count, std::vector<double>& compute_node_workload_benefit,
         double metis_benefit_weight, double ownership_benefit_weight, double load_balance_benefit_weight); 
      
-    std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> get_route_primary_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch,
-            std::vector<pqxx::connection *> &thread_conns);
+    std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> get_route_primary_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch);
 
-    void get_route_primary_batch_schedule_v2(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch, std::vector<pqxx::connection *> &thread_conns);
+    void get_route_primary_batch_schedule_v2(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch);
 
-    void get_route_primary_batch_schedule_v3(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch, std::vector<pqxx::connection *> &thread_conns);
+    void get_route_primary_batch_schedule_v3(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch);
 
     // 这个是路由层的主循环, 他不断从txn_pool中取出事务进行路由
     // 进行的路由决策会放入txn_queue中，供执行层消费
@@ -906,13 +904,6 @@ public:
     // !层次与run_router_worker并列，用于批量路由事务
     void run_router_batch_worker() {
         assert(SYSTEM_MODE == 9 || SYSTEM_MODE == 10); 
-        // for routing needed db connections, each routing thread has its own connections
-        std::vector<pqxx::connection*> thread_conns_vec;
-        for(int i=0; i<ComputeNodeCount; i++) {
-            pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
-            thread_conns_vec.push_back(conn);
-        }
-
         // wait for router start work
         std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
         start_router_cv.wait(start_router_lock, [this]() { 
@@ -934,11 +925,11 @@ public:
             
             std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> reorder_route_queues;
             if(SYSTEM_MODE == 9) {
-                reorder_route_queues = this->get_route_primary_batch_2phase(txn_batch, thread_conns_vec);
+                reorder_route_queues = this->get_route_primary_batch_2phase(txn_batch);
                 assert(reorder_route_queues && reorder_route_queues->size() == ComputeNodeCount);
             }
             else if(SYSTEM_MODE == 10) {
-                reorder_route_queues = this->get_route_primary_batch_schedule(txn_batch, thread_conns_vec);
+                reorder_route_queues = this->get_route_primary_batch_schedule(txn_batch);
                 assert(reorder_route_queues && reorder_route_queues->size() == ComputeNodeCount);
             }
             else assert(false); 
@@ -989,14 +980,6 @@ public:
     // ! 这个函数是run_router_worker 的对应, 相比之下, 我们把他和run_router_batch_worker_pipeline 的模式对应, 都是一次拿一个batch的事务, 然后在这里交给多线程来处理
     void run_router_worker_new() {
         assert((SYSTEM_MODE >=0 && SYSTEM_MODE <=8) || SYSTEM_MODE == 13 || (SYSTEM_MODE >=23 && SYSTEM_MODE <=25)); 
-        // for routing needed db connections, each routing thread has its own connections
-        std::vector<std::vector<pqxx::connection*>> all_thread_conns(worker_threads_);
-        for(int t=0; t<worker_threads_; t++) {
-            for(int i=0; i<ComputeNodeCount; i++) {
-                pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
-                all_thread_conns[t].push_back(conn);
-            }
-        }
 
         // wait for router start work
         std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
@@ -1078,8 +1061,7 @@ public:
             size_t batch_size = txn_batch->size();
 
             for(int t=0; t<worker_threads_; t++) {
-                futures.emplace_back(threadpool.enqueue([this, &txn_batch, t, batch_size, &all_thread_conns]() {
-                    auto& thread_conns_vec = all_thread_conns[t];
+                futures.emplace_back(threadpool.enqueue([this, &txn_batch, t, batch_size]() {
                     std::vector<std::vector<TxnQueueEntry*>> local_node_txns(ComputeNodeCount);
                     
                     for(size_t i = t; i < batch_size; i += worker_threads_) {
@@ -1188,7 +1170,7 @@ public:
                         //     }
                         // }
                         else if(SYSTEM_MODE == 2 ||  SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
-                            SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, rw, thread_conns_vec);
+                            SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, rw);
                             if(result.success) {
                                 routed_node_id = result.smart_router_id;
                                 if(SYSTEM_MODE == 3) txn_entry->txn_decision_type = result.sys_3_decision_type; 
@@ -1267,12 +1249,6 @@ public:
 
     void run_router_batch_worker_pipeline() {
         assert(SYSTEM_MODE == 11);         
-        // for routing needed db connections, each routing thread has its own connections
-        std::vector<pqxx::connection*> thread_conns_vec;
-        for(int i=0; i<ComputeNodeCount; i++) {
-            pqxx::connection* conn = new pqxx::connection(DBConnection[i]);
-            thread_conns_vec.push_back(conn);
-        }
 
         // wait for router start work
         std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
@@ -1310,8 +1286,8 @@ public:
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             if(SYSTEM_MODE == 11) {
-                // this->get_route_primary_batch_schedule_v2(txn_batch, thread_conns_vec);
-                this->get_route_primary_batch_schedule_v3(txn_batch, thread_conns_vec);
+                // this->get_route_primary_batch_schedule_v2(txn_batch);
+                this->get_route_primary_batch_schedule_v3(txn_batch);
             }
             else assert(false);
 
@@ -1529,7 +1505,7 @@ private:
 
     // 查找 key。若在 hot hash 中找到，立即返回 page。
     // 否则可能查 B+tree 提示（在 .cc 实现），未命中返回 std::nullopt。
-    inline HotEntry lookup(TxnQueueEntry* txn, table_id_t table_id, itemkey_t key, std::vector<pqxx::connection *> &thread_conns) {
+    inline HotEntry lookup(TxnQueueEntry* txn, table_id_t table_id, itemkey_t key) {
     #if !MLP_PREDICTION
         std::shared_lock<std::shared_mutex> lock(hot_mutex_);
         auto it = hot_key_map.find({table_id, key});

@@ -92,8 +92,7 @@ void SmartRouter::compute_benefit_for_node( SchedulingCandidateTxn* sc, std::vec
     }
 }
 
-SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, 
-        std::vector<bool> &rw, std::vector<pqxx::connection *> &thread_conns) {
+SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, std::vector<bool> &rw) {
     SmartRouterResult result;
     if (table_ids.size() != keys.size() || table_ids.empty()) {
         result.error_message = "Mismatched or empty table_ids and keys";
@@ -112,7 +111,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
     page_to_node_map.reserve(keys.size());
     for (size_t i = 0; i < keys.size(); ++i) {
         if(SYSTEM_MODE == 2) {
-            auto entry = lookup(txn, table_ids[i], keys[i], thread_conns);
+            auto entry = lookup(txn, table_ids[i], keys[i]);
             // 计算page id
             if (entry.page == kInvalidPageId) {
                 result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
@@ -123,7 +122,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
             page_to_node_map[table_page] = -1;
         }
         else if(SYSTEM_MODE == 3) {
-            auto entry = lookup(txn, table_ids[i], keys[i], thread_conns);
+            auto entry = lookup(txn, table_ids[i], keys[i]);
             // 计算page id
             if (entry.page == kInvalidPageId) {
                 result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
@@ -141,7 +140,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
             // table_page_id.push_back((static_cast<uint64_t>(table_ids[i]) << 32) | region_id);
         }
         else if(SYSTEM_MODE == 5) {
-            auto entry = lookup(txn, table_ids[i], keys[i], thread_conns);
+            auto entry = lookup(txn, table_ids[i], keys[i]);
             // 如果是模式5，则统计key_access_last_node出现的次数, 按照上次key访问节点进行路由
             if (entry.key_access_last_node != -1) {
                 node_count_basedon_key_access_last[entry.key_access_last_node]++;
@@ -153,7 +152,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
             table_key_id[table_key] = -1; // 初始化
         }
         else if(SYSTEM_MODE == 7) {
-            auto entry = lookup(txn, table_ids[i], keys[i], thread_conns);
+            auto entry = lookup(txn, table_ids[i], keys[i]);
             // 计算page id
             if (entry.page == kInvalidPageId) {
                 result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
@@ -176,7 +175,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
         }
         else if(SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
             // 计算page id
-            auto entry = lookup(txn, table_ids[i], keys[i], thread_conns);
+            auto entry = lookup(txn, table_ids[i], keys[i]);
             if (entry.page == kInvalidPageId) {
                 result.error_message = "[warning] Lookup failed for (table_id=" + std::to_string(table_ids[i]) +
                                     ", key=" + std::to_string(keys[i]) + ")";
@@ -630,8 +629,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
 }
 
 
-std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_primary_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch,
-        std::vector<pqxx::connection *> &thread_conns) {
+std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_primary_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch) {
     
     assert(SYSTEM_MODE == 10); // 仅支持模式10
     std::vector<SmartRouterResult> results;
@@ -684,7 +682,7 @@ std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_
         // 获取涉及的页面列表
         std::unordered_map<uint64_t, node_id_t> table_page_ids; // 高32位存table_id，低32位存page_id
         for (size_t i = 0; i < accounts_keys.size(); ++i) {
-            auto entry = lookup(txn, table_ids[i], accounts_keys[i], thread_conns);
+            auto entry = lookup(txn, table_ids[i], accounts_keys[i]);
             // 计算page id
             if (entry.page == kInvalidPageId) {
                 assert(false); // 这里不应该失败
@@ -932,8 +930,7 @@ std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_
 // 这里不再将 std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> 作为返回值，而是直接将txn_queues_作为输入，
 // 这样做的好处是可以不等待这个函数处理完成整个batch后再返回结果，而是可以在函数内部直接将调度好的事务放入对应的txn_queues_中，
 // 从而可以降低worker端等待事务调度完成的结果，pipeline效率更高。
-void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch, 
-        std::vector<pqxx::connection *> &thread_conns) {
+void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch) {
     
     assert(SYSTEM_MODE == 11); // 仅支持模式11
     
@@ -976,7 +973,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
     for (size_t t = 0; t < thread_count; ++t) {
         size_t start = t * chunk;
         size_t end = std::min(n, start + chunk);
-        futs.push_back(threadpool.enqueue([this, &txn_batch, start, end, t, &local_txid_maps, &local_page_pairs, &thread_conns]() {
+        futs.push_back(threadpool.enqueue([this, &txn_batch, start, end, t, &local_txid_maps, &local_page_pairs]() {
             auto &local_map = local_txid_maps[t];
             auto &local_pairs = local_page_pairs[t];
 
@@ -1024,7 +1021,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                 std::unordered_map<uint64_t, node_id_t> table_page_ids; // 高32位存table_id，低32位存page_id
                 // lookup（内部会加 hot_mutex_），构造 involved_pages，并收集 page->tx 映射对
                 for (size_t i = 0; i < accounts_keys.size(); ++i) {
-                    auto entry = lookup(txn, table_ids[i], accounts_keys[i], const_cast<std::vector<pqxx::connection*>&>(thread_conns));
+                    auto entry = lookup(txn, table_ids[i], accounts_keys[i]);
                     if (entry.page == kInvalidPageId) {
                         assert(false); // 这里不应该失败
                     }
@@ -2006,8 +2003,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
 // 这里不再将 std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> 作为返回值，而是直接将txn_queues_作为输入，
 // 这样做的好处是可以不等待这个函数处理完成整个batch后再返回结果，而是可以在函数内部直接将调度好的事务放入对应的txn_queues_中，
 // 从而可以降低worker端等待事务调度完成的结果，pipeline效率更高。
-void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch, 
-        std::vector<pqxx::connection *> &thread_conns) {
+void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch) {
     
     assert(SYSTEM_MODE == 11); // 仅支持模式11
     
@@ -2050,6 +2046,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     size_t thread_count = std::min<size_t>(worker_threads_, n);
     thread_count = 1;
     if (thread_count == 0) thread_count = 1;
+    thread_count = 1;
     size_t chunk = (n + thread_count - 1) / thread_count;
     std::vector<std::future<void>> futs;
     // Optimization: avoid new/delete overhead
@@ -2069,7 +2066,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     for (size_t t = 0; t < thread_count; ++t) {
         size_t start = t * chunk;
         size_t end = std::min(n, start + chunk);
-        futs.push_back(threadpool.enqueue([this, &txn_batch, start, end, t, &local_txid_maps, &local_conflicted_txns, &thread_conns, &candidates]() {
+        futs.push_back(threadpool.enqueue([this, &txn_batch, start, end, t, &local_txid_maps, &local_conflicted_txns, &candidates]() {
             auto &local_map = local_txid_maps[t];
             auto &local_conflicts = local_conflicted_txns[t];
             
@@ -2119,7 +2116,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 // 获取涉及的页面列表
                 // lookup（内部会加 hot_mutex_），构造 involved_pages，并收集 page->tx 映射对
                 for (size_t i = 0; i < accounts_keys.size(); ++i) {
-                    auto entry = lookup(txn, table_ids[i], accounts_keys[i], const_cast<std::vector<pqxx::connection*>&>(thread_conns));
+                    auto entry = lookup(txn, table_ids[i], accounts_keys[i]);
                     uint64_t table_page_id;
                     if (entry.page == static_cast<page_id_t>(-1)) {
                         // invalid page, but keep in involved_pages to maintain index alignment
