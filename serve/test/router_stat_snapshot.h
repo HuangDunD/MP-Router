@@ -27,6 +27,7 @@ struct RouterStatSnapshot {
     // page changes
     int64_t change_page_cnt = 0;
     int64_t page_update_cnt = 0;
+    int64_t page_update_missing_cnt = 0;
 
     // ownership changes
     int64_t ownership_changes = 0;
@@ -115,6 +116,7 @@ struct RouterStatSnapshot {
                   << ", hit ratio: " << (hot_hit + hot_miss > 0 ? (double)hot_hit / (hot_hit + hot_miss) * 100.0 : 0.0) << "%" << std::endl;
         std::cout << "Page ID changes: " << change_page_cnt << std::endl;
         std::cout << "Ownership changes: " << ownership_changes << std::endl;
+        std::cout << "Page Updates missing ownership info count: " << page_update_missing_cnt << std::endl;
         std::cout << "Page Operations count: " << page_update_cnt << std::endl; 
         std::cout << "Simulated page ownership changes ratio (cache fusion ratio): " 
                     << (page_update_cnt > 0 ? (double)ownership_changes / page_update_cnt * 100.0 : 0.0) << "%" << std::endl;
@@ -231,6 +233,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.evict_hot_entries = s.evict_hot_entries;
     // Atomic fields -- read using load
     snap.change_page_cnt = s.change_page_cnt.load(std::memory_order_relaxed);
+    snap.page_update_missing_cnt = s.page_update_missing_cnt.load(std::memory_order_relaxed);
     snap.page_update_cnt = s.page_update_cnt.load(std::memory_order_relaxed);
 
     snap.ownership_changes = router->get_ownership_changes();
@@ -340,6 +343,7 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     // smart router, and ownership simulation
     d.change_page_cnt = b.change_page_cnt - a.change_page_cnt;
     d.page_update_cnt = b.page_update_cnt - a.page_update_cnt;
+    d.page_update_missing_cnt = b.page_update_missing_cnt - a.page_update_missing_cnt;
 
     // ownership changes
     d.ownership_changes = b.ownership_changes - a.ownership_changes;

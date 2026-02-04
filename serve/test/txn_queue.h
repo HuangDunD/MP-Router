@@ -270,6 +270,23 @@ public:
         }
     }
 
+    void wait_for_pending_txn_on_any_node(int node_id){
+        std::unique_lock<std::mutex> lock(pending_mutex_);
+        pending_cv_.wait(lock, [this, node_id]() { 
+            return pending_txn_cnt_per_node_[node_id] == 0;
+        });
+    }
+
+    bool empty_node(int node_id){
+        std::unique_lock<std::mutex> lock(pending_mutex_);
+        return pending_txn_cnt_per_node_[node_id] == 0;
+    }
+
+    bool empty(){
+        std::unique_lock<std::mutex> lock(pending_mutex_);
+        return pending_target_node_.empty();
+    }
+
     std::vector<std::vector<TxnQueueEntry*>> self_check_ref_is_zero(){
         std::vector<std::vector<TxnQueueEntry*>> ready_to_push;
         ready_to_push.resize(ComputeNodeCount);
@@ -372,28 +389,54 @@ public:
         std::unique_lock<std::mutex> lock(queue_mutex_);
         
         // 计时
-        struct timespec start_time, end_time;
-        clock_gettime(CLOCK_MONOTONIC, &start_time);
-        queue_cv_.wait(lock, [this]() {
-            return !txn_queue_.empty() || !dag_txn_queue_->empty() || finished_ || batch_finished_;
-        });
-        clock_gettime(CLOCK_MONOTONIC, &end_time);
-        double wait_time = (end_time.tv_sec - start_time.tv_sec) * 1000 + (end_time.tv_nsec - start_time.tv_nsec) / 1e6;
-        if(wait_time > 100) {
-            logger_->info("[TxnQueue Pop] Node id: " + std::to_string(node_id_) 
-                + " call_id: " + std::to_string(call_id) + " Waited for " + std::to_string(wait_time) + " ms");
-        }
-        
-        if(txn_queue_.empty() && dag_txn_queue_->empty() && (finished_ || batch_finished_)) {
-            if(ret_type != nullptr) *ret_type = 0; // finished type
-            // indicate finished or batch finished, pop one from shared_queue, if shared_queue is empty, will returen {}
-            batch_entries = std::move(shared_txn_queue_->pop_txn()); 
-        #if LOG_QUEUE_STATUS
-            logger_->info("[TxnQueue Pop] call_id: " + std::to_string(call_id) + 
-                            " Popping from shared txn queue of compute node " + std::to_string(node_id_) +
-                            ", popped size: " + std::to_string(batch_entries.size()));
-        #endif
-            return batch_entries;
+        // struct timespec start_time, end_time;
+        // clock_gettime(CLOCK_MONOTONIC, &start_time);
+        // queue_cv_.wait(lock, [this]() {
+        //     return !txn_queue_.empty() || !dag_txn_queue_->empty() || finished_ || batch_finished_;
+        // });
+        // clock_gettime(CLOCK_MONOTONIC, &end_time);
+        // double wait_time = (end_time.tv_sec - start_time.tv_sec) * 1000 + (end_time.tv_nsec - start_time.tv_nsec) / 1e6;
+        // if(wait_time > 100) {
+        //     logger_->info("[TxnQueue Pop] Node id: " + std::to_string(node_id_) 
+        //         + " call_id: " + std::to_string(call_id) + " Waited for " + std::to_string(wait_time) + " ms");
+        // }
+        // if(txn_queue_.empty() && dag_txn_queue_->empty() && (finished_ || batch_finished_)) {
+        //     if(ret_type != nullptr) *ret_type = 0; // finished type
+        //     // indicate finished or batch finished, pop one from shared_queue, if shared_queue is empty, will returen {}
+        //     batch_entries = std::move(shared_txn_queue_->pop_txn()); 
+        // #if LOG_QUEUE_STATUS
+        //     logger_->info("[TxnQueue Pop] call_id: " + std::to_string(call_id) + 
+        //                     " Popping from shared txn queue of compute node " + std::to_string(node_id_) +
+        //                     ", popped size: " + std::to_string(batch_entries.size()));
+        // #endif
+        //     return batch_entries;
+        // }
+
+        // check if the input of txn of this batch for this node is finished
+        while(true){
+            if(!txn_queue_.empty() || !dag_txn_queue_->empty()) {
+                break; // 有事务可弹出
+            }
+            if(txn_queue_.empty() && dag_txn_queue_->empty() && pending_txn_queue_->empty_node(node_id_) && (finished_ || batch_finished_)) {
+            // batch end
+                if(ret_type != nullptr) *ret_type = 0; // finished type
+                // indicate finished or batch finished, pop one from shared_queue, if shared_queue is empty, will returen {}
+                batch_entries = std::move(shared_txn_queue_->pop_txn()); 
+            #if LOG_QUEUE_STATUS
+                logger_->info("[TxnQueue Pop] call_id: " + std::to_string(call_id) + 
+                                " Popping from shared txn queue of compute node " + std::to_string(node_id_) +
+                                ", popped size: " + std::to_string(batch_entries.size()));
+            #endif
+                return batch_entries;
+            }
+            else { 
+                // 目前无事务, 等待
+                queue_cv_.wait(lock, [this]() { 
+                    bool has_txn = !txn_queue_.empty() || !dag_txn_queue_->empty();
+                    bool can_exit = (finished_ || batch_finished_) && pending_txn_queue_->empty_node(node_id_);
+                    return has_txn || can_exit;
+                });
+            }
         }
 
         if(!dag_txn_queue_->empty()){
@@ -570,7 +613,8 @@ public:
             else txn_queue_.emplace_back(1, entry); // 构造包含单元素的批
         }
         ++current_queue_size_;
-        queue_cv_.notify_one();
+        if(finished_) queue_cv_.notify_all();
+        else queue_cv_.notify_one();
     }
 
     // push 绑定到单线程的事务到队列前端
@@ -592,7 +636,8 @@ public:
                         ", regular_txn_cnt: " + std::to_string(regular_txn_cnt) +
                         ", regular_txn_vec_cnt: " + std::to_string(regular_txn_vec_cnt));
     #endif
-        queue_cv_.notify_one();
+        if(finished_) queue_cv_.notify_all();
+        else queue_cv_.notify_one();
     }
 
     // // push 绑定到指定位置的事务到队列指定位置
@@ -631,7 +676,8 @@ public:
         regular_txn_cnt += static_cast<int>(entries.size());
         regular_txn_vec_cnt += 1;
         txn_queue_.emplace_back(std::move(entries)); // 构造包含单元素的批
-        queue_cv_.notify_one();
+        if(finished_) queue_cv_.notify_all();
+        else queue_cv_.notify_one();
     }
 
     void push_txn_back_batch(std::vector<TxnQueueEntry*> entries) {
@@ -665,7 +711,8 @@ public:
             regular_txn_vec_cnt += 1;
             txn_queue_.emplace_back(std::move(batch)); // 构造包含单元素的批
         }
-        queue_cv_.notify_one();
+        if(finished_) queue_cv_.notify_all();
+        else queue_cv_.notify_one();
     }
 
     // // push 绑定到距离首部pos位置之后的事务到队列随机位置

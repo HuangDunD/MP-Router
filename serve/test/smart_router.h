@@ -160,6 +160,7 @@ public:
         // 页面更新计数
         std::atomic<int> change_page_cnt = 0;
         std::atomic<int> page_update_cnt = 0;
+        std::atomic<int> page_update_missing_cnt = 0;
         // Ownership 事务计数
         std::atomic<int> ownership_random_txns = 0;
         std::atomic<int> ownership_entirely_txns = 0;
@@ -492,11 +493,11 @@ public:
         // assert(table_ids.size() == keys.size() && keys.size() == ctid_ret_pages.size());
         for(size_t i=0; i<table_ids.size(); i++) {
             page_id_t original_page = txn->accessed_page_ids[i];
+            stats_.page_update_cnt++;
             if(original_page == ctid_ret_pages[i]) {
                 // 说明访问的页面没有变化，直接更新所有权即可
                 // 仅访问了原来的页面, 仍然是这个节点的所有权
                 ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], original_page, routed_node_id); 
-                stats_.page_update_cnt++;
             }
             else if (original_page == -1) {
                 // 说明之前没有记录页面，直接设置新的页面和所有权

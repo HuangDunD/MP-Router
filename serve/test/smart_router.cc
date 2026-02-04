@@ -2044,10 +2044,9 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     
     // Shared variables for parallel execution context
     size_t thread_count = std::min<size_t>(worker_threads_, n);
-    thread_count = 1;
     if (thread_count == 0) thread_count = 1;
-    thread_count = 1;
-    size_t chunk = (n + thread_count - 1) / thread_count;
+    int preprocess_thread_count = 1;
+    size_t chunk = (n + preprocess_thread_count - 1) / preprocess_thread_count;
     std::vector<std::future<void>> futs;
     // Optimization: avoid new/delete overhead
     std::vector<SchedulingCandidateTxn> candidates(n);
@@ -2056,14 +2055,14 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     std::unordered_set<tx_id_t> conflicted_txns;
 
     // per-thread local containers
-    std::vector<std::unordered_map<tx_id_t, SchedulingCandidateTxn*>> local_txid_maps(thread_count);
+    std::vector<std::unordered_map<tx_id_t, SchedulingCandidateTxn*>> local_txid_maps(preprocess_thread_count);
     
     // Optimization: Weak conflict detection
-    std::vector<std::unordered_set<tx_id_t>> local_conflicted_txns(thread_count);
+    std::vector<std::unordered_set<tx_id_t>> local_conflicted_txns(preprocess_thread_count);
 
-    futs.reserve(thread_count);
+    futs.reserve(preprocess_thread_count);
 
-    for (size_t t = 0; t < thread_count; ++t) {
+    for (size_t t = 0; t < preprocess_thread_count; ++t) {
         size_t start = t * chunk;
         size_t end = std::min(n, start + chunk);
         futs.push_back(threadpool.enqueue([this, &txn_batch, start, end, t, &local_txid_maps, &local_conflicted_txns, &candidates]() {
@@ -2166,7 +2165,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     std::vector<tx_id_t> global_conflicted_txids;
     global_conflicted_txids.reserve(n);
 
-    for (size_t t = 0; t < thread_count; ++t) {
+    for (size_t t = 0; t < preprocess_thread_count; ++t) {
         for (auto &p : local_txid_maps[t]) {
             txid_to_txn_map.emplace(p.first, std::move(p.second));
         }
@@ -2297,7 +2296,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     // waiting the pending txns to be pushed to txn_queues_
     if(batch_id >= 0) {
         // 如果是第一个batch，则不需要等待
-        pending_txn_queue_->wait_for_pending_txn_empty();
+        // pending_txn_queue_->wait_for_pending_txn_empty();
         for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
             // 把该批的事务都分发完成，设置batch处理完成标志
             txn_queues_[node_id]->set_batch_finished();
@@ -2795,7 +2794,8 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     }
 
     logger->info("[Multi-Thread Scheduling] Batch id: " + std::to_string(batch_id) + 
-                    " Merged conflicted txn partitions into " + std::to_string(thread_count) + " threads." + 
+                    " Merged conflicted txn partitions from" + std::to_string(conflicted_txn_partitions.size()) + 
+                    " into " + std::to_string(thread_count) + " threads." + 
                     " Merged partitions per thread count: " + [&]() {
                         std::string counts_str;
                         counts_str += "[";

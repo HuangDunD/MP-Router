@@ -108,7 +108,7 @@ def main():
         ("0.6",   [15153.36, 15677.88, 19228.33, 18096.38, 27000.52]),
         ("0.7",   [14196.76, 14418.65, 18075.71, 15786.33, 24866.46]),
         ("0.8",   [12857.31, 12789.5,  15467.65, 13634.97, 21108.93]),
-        ("0.9",   [10486.94, 10454.78, 11695.23, 10949.11, 16722.47]),
+        ("0.9",   [10486.94, 10454.78, 11695.23, 10949.11, 17183.29]),
         ("0.95",  [8287.47,  8222.43,  7373.93,  8110.59,  14183.9]),
     ]
     
@@ -121,7 +121,7 @@ def main():
 
     # Figure setup: 1 row, 2 columns, separate Y axis to allow individual zooming
     # Reduced size for better fit in papers (approx single/double column width context)
-    fig_w, fig_h = 8, 3.5 
+    fig_w, fig_h = 8, 3 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h), sharey=False)
     
     # Bar configuration
@@ -159,7 +159,7 @@ def main():
     
     # Save
     out_path = os.path.join(outdir, outfile)
-    plt.savefig(out_path, dpi=600)
+    plt.savefig(out_path, dpi=600, bbox_inches="tight", pad_inches=0.05)
     print(f"Saved figure: {out_path}")
     plt.close(fig)
 
