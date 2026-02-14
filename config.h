@@ -43,6 +43,7 @@ extern int DB_TYPE;
 #define LOG_DEPENDENCY 0 // 0: no log 1: log
 #define LOG_QUEUE_STATUS 0 // 0: no log 1: log
 #define LOG_TXN_EXEC 0 // 0: no log 1: log
+#define LOG_LOAD_BALANCE 0 // 0: no log 1: log
 // for log
 extern std::string partition_log_file_; 
 

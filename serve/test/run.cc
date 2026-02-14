@@ -625,7 +625,17 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         // }
         if(ret == 0) smart_router->add_worker_thread_pop_empty_time(params->compute_node_id_connecter, params->thread_id, pop_time);
         else if (ret == 1) smart_router->add_worker_thread_pop_dag_time(params->compute_node_id_connecter, params->thread_id, pop_time);
-        else if (ret == 2) smart_router->add_worker_thread_pop_regular_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 2) {
+            if(pop_time > 100) {
+                logger_->info("High regular pop_time: " + std::to_string(pop_time) + " ms at Compute Node " + 
+                              std::to_string(compute_node_id) + 
+                              " Thread " + std::to_string(params->thread_id) + 
+                              " in batch " + std::to_string(con_batch_id) + 
+                              " call_id: " + std::to_string(call_id));
+            }
+            smart_router->add_worker_thread_pop_regular_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        }
+
         smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
 
         if (txn_entries.empty()) {

@@ -26,6 +26,11 @@ public:
     auto enqueue(F &&f, Args &&... args)
         -> std::future<typename std::result_of<F(Args...)>::type>;
 
+    size_t get_pending_task_count() {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        return tasks.size();
+    }
+
 private:
     std::vector<std::thread> workers;
     std::queue<std::function<void()> > tasks;

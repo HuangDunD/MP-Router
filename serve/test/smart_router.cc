@@ -2043,8 +2043,6 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     }
     
     // Shared variables for parallel execution context
-    size_t thread_count = std::min<size_t>(worker_threads_, n);
-    if (thread_count == 0) thread_count = 1;
     int preprocess_thread_count = 1;
     size_t chunk = (n + preprocess_thread_count - 1) / preprocess_thread_count;
     std::vector<std::future<void>> futs;
@@ -2252,6 +2250,13 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     for(auto& p : partitions) {
         conflicted_txn_partitions.push_back(std::move(p.second));
     }
+
+    // 只获取冲突事务涉及的页面的 ownership
+    // unique_conflict_pages 已经在 Merge 阶段收集完毕，此处只需去重
+    std::sort(unique_conflict_pages.begin(), unique_conflict_pages.end());
+    auto last_p = std::unique(unique_conflict_pages.begin(), unique_conflict_pages.end());
+    unique_conflict_pages.erase(last_p, unique_conflict_pages.end());
+    
     clock_gettime(CLOCK_MONOTONIC, &compute_union_end_time);
     time_stats_.compute_union_ms += 
         (compute_union_end_time.tv_sec - compute_union_start_time.tv_sec) * 1000.0 + (compute_union_end_time.tv_nsec - compute_union_start_time.tv_nsec) / 1000000.0;
@@ -2378,17 +2383,13 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     clock_gettime(CLOCK_MONOTONIC, &ownership_start_time);
     std::unordered_map<uint64_t, std::pair<std::vector<node_id_t>, bool>> page_ownership_to_node_map; // 记录每个页面对应的节点ID（Ownership表结果）
     page_ownership_to_node_map.reserve(unique_conflict_pages.size());
-    
-    // 只获取冲突事务涉及的页面的 ownership
-    // unique_conflict_pages 已经在 Merge 阶段收集完毕，此处只需去重
-    std::sort(unique_conflict_pages.begin(), unique_conflict_pages.end());
-    auto last_p = std::unique(unique_conflict_pages.begin(), unique_conflict_pages.end());
-    unique_conflict_pages.erase(last_p, unique_conflict_pages.end());
 
     // 并行获取 conflict pages ownership
     size_t num_pages = unique_conflict_pages.size();
-    size_t ownership_thread_count = std::min<size_t>(worker_threads_, (num_pages + 1000) / 1000); 
+    size_t ownership_thread_count = std::min<size_t>(std::min<size_t>(worker_threads_, 8ul), (num_pages + 1000) / 1000); 
     if(ownership_thread_count == 0) ownership_thread_count = 1;
+    logger->info("Unique conflict page count: " + std::to_string(num_pages) + 
+                    ", using " + std::to_string(ownership_thread_count) + " threads to fetch ownership info");
 
     std::vector<std::vector<std::pair<uint64_t, std::pair<std::vector<node_id_t>, bool>>>> local_ownership_results(ownership_thread_count);
     std::vector<std::future<void>> ownership_futs;
@@ -2420,7 +2421,9 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     std::vector<std::atomic<int>> ownership_ok_txn_cnt_per_node(ComputeNodeCount);
     std::vector<std::atomic<int>> expected_page_transfer_count_per_node(ComputeNodeCount);
     futs.clear();
-    futs.reserve(thread_count);
+    size_t conflict_free_thread_count = std::min<size_t>(std::min<size_t>(worker_threads_, 64ul), n);
+    if (conflict_free_thread_count == 0) conflict_free_thread_count = 1;
+    futs.reserve(conflict_free_thread_count);
     std::vector<double> compute_node_workload_benefit = this->workload_balance_penalty_weights_; // 负载均衡因子
     std::vector<double> remain_queue_balance_penalty_weights = this->remain_queue_balance_penalty_weights_; // 剩余队列负载均衡因子
     std::vector<double>  total_load_balance_penalty_weights(ComputeNodeCount);
@@ -2428,7 +2431,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
         total_load_balance_penalty_weights[i] = compute_node_workload_benefit[i] + remain_queue_balance_penalty_weights[i];
     }
     
-    for (size_t t = 0; t < thread_count; ++t) {
+    for (size_t t = 0; t < conflict_free_thread_count; ++t) {
         size_t start = t * chunk;
         size_t end = std::min(n, start + chunk);
         futs.push_back(threadpool.enqueue([this, &txn_batch, &txid_to_txn_map, start, end, t, &total_load_balance_penalty_weights, 
@@ -2601,9 +2604,10 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     std::vector<std::future<void>> conflict_dispatch_futs;
     size_t num_conflicts = global_conflicted_txids.size();
     if (num_conflicts > 0) {
-        size_t c_thread_count = std::min<size_t>(worker_threads_, (num_conflicts + 100) / 100); 
+        size_t c_thread_count = std::min<size_t>(std::min<size_t>(worker_threads_, 8ul), (num_conflicts + 100) / 100); 
         if(c_thread_count == 0) c_thread_count = 1;
         size_t c_chunk = (num_conflicts + c_thread_count - 1) / c_thread_count;
+        logger->info("Dispatching " + std::to_string(num_conflicts) + " conflicted txns using " + std::to_string(c_thread_count) + " threads");
         
         conflict_dispatch_futs.reserve(c_thread_count);
         for(size_t t = 0; t < c_thread_count; ++t) {
@@ -2768,6 +2772,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
 
     // !2. 多线程进行调度决策
     // 2.1 从并查集合并小的分区
+    size_t thread_count = std::min<size_t>(worker_threads_, 8ul); // 最多使用8线程进行调度决策，避免过度分散
     std::vector<std::vector<tx_id_t>> merged_partitions(thread_count);
     std::vector<int> merged_partitions_per_thread_count(thread_count, 0);
     std::vector<size_t> partition_sizes(thread_count, 0);
@@ -3677,6 +3682,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                     schedule_txn_cnt_per_node_this_batch[node_id].fetch_add(node_txn_count, std::memory_order_relaxed);
                 }
                 // if(WarmupEnd)
+                if(t==0)
                     logger->info("[SmartRouter Scheduling] Batch id : " + std::to_string(batch_id) + " thread " + std::to_string(t) +
                                     " final Scheduling ownership_ok txn to execute on node " + std::to_string(node_id) + 
                                     ", count: " + std::to_string(to_schedule_txns.size()) + " at this time txn queue size: " +
@@ -3882,6 +3888,7 @@ std::vector<double> SmartRouter::compute_load_balance_penalty_weights() {
     workload_balance_penalty_weights_ = penalty_weights;
 
     // 可选：打印/记录用于调试
+    if(LOG_LOAD_BALANCE)
     logger->info("Compute node workload penalty: " + [&]() {
         std::string s;
         for (size_t i = 0; i < penalty_weights.size(); ++i) {
@@ -3962,6 +3969,7 @@ std::vector<double> SmartRouter::compute_remain_queue_balance_penalty_weights() 
     remain_queue_balance_penalty_weights_ = penalty_weights;
 
     // 可选：打印/记录用于调试
+    if(LOG_LOAD_BALANCE)
     logger->info("Compute node remain queue penalty: " + [&]() {
         std::string s;
         for (size_t i = 0; i < penalty_weights.size(); ++i) {

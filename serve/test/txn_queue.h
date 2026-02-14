@@ -104,7 +104,13 @@ public:
 
     // 弹出最高优先级的一个完整批次
     std::list<TxnQueueEntry*> pop_ready_batch() {
+        // auto start_wait = std::chrono::steady_clock::now();
         std::unique_lock<std::mutex> lock(queue_mutex_);
+        // auto end_wait = std::chrono::steady_clock::now();
+        // double wait_ms = std::chrono::duration<double, std::milli>(end_wait - start_wait).count();
+        // if(wait_ms > 100) {
+        //     logger_->info("[DAGQueue Pop] High lock wait time: " + std::to_string(wait_ms) + " ms");
+        // }
         // 若存在 inflight 批次，则将其余量一次性弹出
         if (inflight_active_) {
             auto batch_entries = std::move(inflight_.entries);
@@ -543,7 +549,13 @@ public:
             }
             else {
                 // !get the full dag batch
+                // auto start_dag_pop_time = std::chrono::steady_clock::now();
                 batch_entries = std::move(dag_txn_queue_->pop_ready_batch());
+                // auto end_dag_pop_time = std::chrono::steady_clock::now();
+                // double dag_pop_ms = std::chrono::duration<double, std::milli>(end_dag_pop_time - start_dag_pop_time).count();
+                // if(dag_pop_ms > 100) {
+                //     logger_->info("[TxnQueue Pop] High dag pop time: " + std::to_string(dag_pop_ms) + " ms at node " + std::to_string(node_id_));
+                // }
                 assert(!batch_entries.empty());
                 assert(batch_entries.front() != nullptr);
                 current_queue_size_ -= static_cast<int>(batch_entries.size());

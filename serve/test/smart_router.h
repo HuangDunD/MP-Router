@@ -246,7 +246,7 @@ public:
           logger(logger_ptr),
           btree_service_(btree_service),
           metis_(metis),
-          threadpool(2 * worker_threads, *logger), 
+          threadpool(4 * worker_threads, *logger), 
           routed_txn_cnt_per_node(MaxComputeNodeCount), 
           batch_finished_flags(MaxComputeNodeCount, 0),
           workload_balance_penalty_weights_(MaxComputeNodeCount, 0),
@@ -298,7 +298,9 @@ public:
 
         // start the router thread
         if(SYSTEM_MODE <= 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
-            router_worker_threads_ = worker_threads_;
+            router_worker_threads_ = std::min(worker_threads_, 32); // SYSTEM_MODE 0-8, 13, 23-25 启动与工作线程数量相同的路由线程，但上限为32
+            std::cout << "Starting SmartRouter with " << router_worker_threads_ << " worker threads." << std::endl;
+            // router_worker_threads_ = worker_threads_;
             // for(int i=0; i<worker_threads_; i++) {
             //     std::thread router_thread([this, i]() {
             //         std::string thread_name = "SmartRouter_" + std::to_string(i);
@@ -1073,11 +1075,11 @@ public:
             std::vector<std::future<void>> futures;
             size_t batch_size = txn_batch->size();
 
-            for(int t=0; t<worker_threads_; t++) {
+            for(int t=0; t<router_worker_threads_; t++) {
                 futures.emplace_back(threadpool.enqueue([this, &txn_batch, t, batch_size]() {
                     std::vector<std::vector<TxnQueueEntry*>> local_node_txns(ComputeNodeCount);
                     
-                    for(size_t i = t; i < batch_size; i += worker_threads_) {
+                    for(size_t i = t; i < batch_size; i += router_worker_threads_) {
                         TxnQueueEntry* txn_entry = (*txn_batch)[i];
 
                         // --- Decision Logic ---
