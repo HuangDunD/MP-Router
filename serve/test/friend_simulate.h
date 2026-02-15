@@ -15,5 +15,10 @@ void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, 
 // 生成模拟社交网络图的函数, 
 void generate_friend_simulate_graph(std::vector<std::vector<std::pair<int, float>>> &adj_list, int num_users);
 
+// 动态更改朋友关系图
+void change_friends_dynamic(std::vector<std::vector<std::pair<int, float>>> &orig_graph,
+                            std::vector<std::vector<std::pair<int, float>>> &new_graph,
+                            double change_ratio);
+
 // 导出社交网络图到 CSV: src,dst,prob
 bool dump_friend_graph_csv(const std::vector<std::vector<std::pair<int,float>>> &adj_list, const std::string &path, size_t limit_nodes = 0);

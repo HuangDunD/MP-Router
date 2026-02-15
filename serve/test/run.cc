@@ -1311,7 +1311,7 @@ void print_usage(const char* program_name) {
     std::cout << "  " << program_name << " --system-mode 2 --account-count 100000" << std::endl;
 }
 
-void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger_) {
+void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger_, SmallBank* smallbank, ThreadPool* thread_pool) {
     using namespace std::chrono;
     uint64_t exec_last_count = 0;
     uint64_t route_last_count = 0;
@@ -1325,9 +1325,59 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
     txn_queue_size_snapshot.resize(ComputeNodeCount, 0);
     uint64_t page_op_last_count = 0;
     uint64_t cache_fusion_last_count = 0;
+
+    // for dynamic workload
+    auto start_experiment_time = steady_clock::now(); // dynamic workload start time
+    int current_phase = 0;
+    int phase1_end_time = 3 * 60;
+    int phase2_end_time = 8 * 60;
+    int phase3_end_time = 13 * 60;
+    int phase4_end_time = 18 * 60;
+
+    // for dynamic workload end
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
         auto now = steady_clock::now();
+
+        if (dynamic_workload) {
+            double elapsed_seconds = duration_cast<duration<double>>(now - start_experiment_time).count();
+            
+            // Phase transitions
+            if (current_phase == 0 && elapsed_seconds > phase1_end_time) {
+                // T=3m. Start recording stats.
+                std::cout << "\033[33m[Dynamic Workload] Warmup ended at 3m. Starting Stats Collection.\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Warmup ended at 3m. Starting Stats Collection.");
+                WarmupEnd = true; // Set warmup end
+                current_phase = 1;
+            }
+            else if (current_phase == 1 && elapsed_seconds > phase2_end_time) {
+                // T=8m. Metis Partition.
+                std::cout << "\033[33m[Dynamic Workload] Triggering Metis Partition at 8m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Triggering Metis Partition at 8m...");
+                if (smart_router) {
+                    thread_pool->enqueue([smart_router]{
+                        smart_router->get_metis_partitioner()->partition_internal_graph("dynamic_partition.csv", ComputeNodeCount);
+                    });
+                }
+                current_phase = 2;
+            }
+            else if (current_phase == 2 && elapsed_seconds > phase3_end_time) {
+                // T=13m. Change Friend Graph. the Graph has been created in advance, this step only switch the graph used.
+                std::cout << "\033[33m[Dynamic Workload] Changing User Friend Graph at 13m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Changing User Friend Graph at 13m...");
+                change_friend = true;
+                current_phase = 3;
+            }
+            else if (current_phase == 3 && elapsed_seconds > phase4_end_time) {
+                // T=18m. Stop.
+                std::cout << "\033[31m[Dynamic Workload] Stopping benchmark at 18m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Stopping benchmark at 18m...");
+                stop_benchmark = true;
+                current_phase = 4; // Done
+                break; 
+            }
+        }
+
         uint64_t exec_cur_count = exe_count.load(std::memory_order_relaxed);
         uint64_t route_cur_count = 0;
         uint64_t page_op_cur_count = 0;
@@ -2106,6 +2156,12 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--enable-dynamic") {
+            dynamic_workload = true;
+            std::cout << "Enable dynamic workload mode." << std::endl;
+            PARTITION_INTERVAL = UINT64_MAX; // disable periodic partitioning
+            std::cout << "Periodic partitioning disabled in dynamic workload mode." << std::endl;
+        }
         else {
             std::cerr << "Error: Unknown argument " << arg << std::endl;
             print_usage(argv[0]);
@@ -2620,7 +2676,7 @@ int main(int argc, char *argv[]) {
     smart_router->start_router();
 
     // Start a separate thread to print TPS periodically
-    std::thread tps_thread(print_tps_loop, smart_router, txn_pool, logger_);
+    std::thread tps_thread(print_tps_loop, smart_router, txn_pool, logger_, smallbank, &smart_router->get_threadpool());
     tps_thread.detach(); // Detach the thread to run independently
 
     while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.0) {

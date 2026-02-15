@@ -825,9 +825,9 @@ public:
         {
             std::unique_lock<std::mutex> lock(pool_mutex_);
             pool_cv_.wait(lock, [this, batch_size]() {
-                return txn_pool_.size() >= batch_size || stop_; // 如果停止标志被设置，也要退出等待
+                return txn_pool_.size() >= batch_size || stop_ || (dynamic_workload && stop_benchmark); // 如果停止标志被设置，也要退出等待
             }); 
-            if (stop_ && txn_pool_.size() < batch_size) {
+            if ((stop_ && txn_pool_.size() < batch_size) || (dynamic_workload && stop_benchmark)) {
                 return {}; // 如果停止且池中事务不足，返回空向量
             }
             struct timespec ts;

@@ -1899,6 +1899,10 @@ public:
         return pending_txn_queue_->get_pending_txn_cnt_on_node(node_id);
     }
 
+    NewMetis* get_metis_partitioner() { return metis_; }
+
+    ThreadPool& get_threadpool() { return threadpool; }
+    
     // TIT通知后续事务ready时调用：立即将其推入对应节点队列执行
     void schedule_ready_txn(std::vector<TxnQueueEntry*> entries, int finish_call_id);
 

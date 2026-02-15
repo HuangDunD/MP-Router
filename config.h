@@ -28,7 +28,7 @@ extern int SYSTEM_MODE;
 extern int DB_TYPE;
 
 // 定义所跑的workload 0:smallbank 1:tpcc
-#define WORKLOAD_MODE 1 // 0: ycsb 1: tpcc
+#define WORKLOAD_MODE 0 // 0: ycsb 1: tpcc
 #define LOG_ACCESS_KEY 0 // 0: no log 1: log
 #define LOG_FRIEND_GRAPH 0 // 0: no log 1: log
 #define LOG_METIS_DECISION 0 // 0: no log 1: log
@@ -79,3 +79,8 @@ extern std::atomic<int> exe_count;
 extern std::atomic<int> generated_txn_count;
 extern std::atomic<uint64_t> tx_id_generator;
 extern int Workload_Type;
+
+// for dynamic workload
+extern bool dynamic_workload; // 是否启用动态workload
+extern bool change_friend; // 是否改变朋友关系
+extern std::atomic<bool> stop_benchmark; // 停止benchmark的标志
