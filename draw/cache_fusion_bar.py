@@ -29,6 +29,16 @@ else:
 # Global setting for hatch (texture) line width
 rcParams['hatch.linewidth'] = 0.3 
 
+# Configure fonts for academic papers (Times New Roman is standard)
+rcParams['font.family'] = 'serif'
+# Use Times New Roman as the primary serif font
+rcParams['font.serif'] = ['Arial']
+rcParams['font.size'] = 12
+rcParams['axes.labelsize'] = 14
+rcParams['xtick.labelsize'] = 12
+rcParams['ytick.labelsize'] = 12
+rcParams['legend.fontsize'] = 12
+
 def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
     labels = [item[0] for item in data]
     # Transpose data to get a list of values for each system
@@ -57,7 +67,7 @@ def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
 
     ax.set_xticks(x_base)
     # Rotation 0 is better for short labels like numbers or percentages
-    ax.set_xticklabels(labels, rotation=0, ha='center', fontsize=12)
+    ax.set_xticklabels(labels, rotation=0, ha='center', fontsize=14)
     
     # Reduce margins on left and right
     ax.set_xlim(-0.55, len(labels) - 1 + 0.55)
@@ -70,7 +80,7 @@ def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
     ax.set_ylim(0, 5.5)
     
     if xlabel:
-        ax.set_xlabel(xlabel, fontsize=14)
+        ax.set_xlabel(xlabel, fontsize=16)
 
 def main():
     # Output file
@@ -93,22 +103,22 @@ def main():
     hatches = ['////', '\\\\\\\\', 'xxxx', 'oo', '....']
 
     zipfian_data = [
-        ("0.6",   [2.37,  2.22, 1.36,  1.83,  0.91]),
+        ("0.6",   [2.37,  2.22, 1.36,  1.83,  0.88]),
         ("0.7",   [2.59,  2.41, 1.57,  2.18,  0.99]),
-        ("0.8",   [3.05,  2.85, 1.97,  2.57,  1.25]),
-        ("0.9",   [3.79,  3.62, 2.71,  3.41,  1.41]),
-        ("0.95",  [4.35,  4.16, 3.39,  4.04,  1.80]),
+        ("0.8",   [3.05,  2.85, 1.97,  2.57,  1.15]),
+        ("0.9",   [3.79,  3.62, 2.71,  3.41,  1.33]),
+        ("0.95",  [4.35,  4.16, 3.39,  4.04,  1.33]),
     ]
     
     hotspot_data = [
         ("100%",   [2.21,  2.04, 1.33,  1.70,  0.86]),
-        ("10%",    [2.48,  2.30, 1.43,  1.95,  0.95]),
-        ("1%",     [3.74,  3.62, 2.44,  3.44,  1.77]),
-        ("0.1%",   [5.14,  4.99, 4.26,  4.83,  3.22])
+        ("10%",    [2.48,  2.30, 1.43,  1.95,  0.85]),
+        ("1%",     [3.74,  3.62, 2.44,  3.44,  1.63]),
+        ("0.1%",   [5.14,  4.99, 4.26,  4.83,  2.89])
     ]
 
     # Figure setup: 1 row, 2 columns, separate Y axis to allow individual zooming
-    fig_w, fig_h = 14, 5
+    fig_w, fig_h = 8, 3
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h), sharey=False)
     
     # Bar configuration
@@ -121,8 +131,10 @@ def main():
     plot_subgroup(ax2, hotspot_data, systems, colors, hatches, bar_width, xlabel="Hotspot Fraction")
     
     # Set Y-label for both plots as they have different scales
-    ax1.set_ylabel("Ownership Transfer Times Per Txn", fontsize=14)
-    ax2.set_ylabel("Ownership Transfer Times Per Txn", fontsize=14)
+    ax1.set_ylabel("Ownership Transfers / Txn", fontsize=14)
+    ax2.set_ylabel("Ownership Transfers / Txn", fontsize=14)
+    ax1.yaxis.set_label_coords(-0.08, 0.42)
+    ax2.yaxis.set_label_coords(-0.08, 0.42)
 
     # Common Legend
     # We take handles and labels from one of the axes
@@ -131,22 +143,23 @@ def main():
         handles, 
         labels,
         loc='lower center', 
-        bbox_to_anchor=(0.5, 0.89), # Higher position
-        prop={'weight': 'bold', 'size': 14}, 
-        handlelength=2.5,
-        handleheight=1.5,
+        bbox_to_anchor=(0.5, 0.86), # Higher position
+        prop={'weight': 'bold', 'size': 12}, 
+        handlelength=1.5,
+        handleheight=1.2,
         frameon=False,
-        ncol=5 
+        ncol=5,
+        columnspacing=1.0
     )
     
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
     # Adjust top margin to accommodate the legend
     # Add wspace to prevent Y-axis overlap
-    plt.subplots_adjust(top=0.88)
+    plt.subplots_adjust(top=0.88, wspace=0.20)
     
     # Save
     out_path = os.path.join(outdir, outfile)
-    plt.savefig(out_path, dpi=600)
+    plt.savefig(out_path, dpi=600, bbox_inches="tight", pad_inches=0.05)
     print(f"Saved figure: {out_path}")
     plt.close(fig)
 

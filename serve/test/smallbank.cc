@@ -1050,43 +1050,44 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
             return;
         }
         int city_cnt = static_cast<int>(SmallBankCityType::Count);
-        for(int i = start; i < end; i++) {
-            int id = id_list[i];
-            int balance = 1000 + ((id - 1) % 1000); // Random balance
-            std::string name = "Account_" + std::to_string(id);
-            int city = ((id - 1) / (smallbank_account / city_cnt) ) % city_cnt;
-            assert(city >=0 && city < city_cnt);
-            // 使用RETURNING子句获取插入数据的位置信息
-            std::string insert_checking_sql = "INSERT INTO checking (id, balance, city, name) VALUES (" +
-                                        std::to_string(id) + ", " +
-                                        std::to_string(balance) + ", " +
-                                        std::to_string(city) + ", '" +
-                                        name + "') RETURNING ctid, id";
-            std::string insert_savings_sql = "INSERT INTO savings (id, balance, city, name) VALUES (" +
-                                        std::to_string(id) + ", " +
-                                        std::to_string(balance) + ", " +
-                                        std::to_string(city) + ", '" +
-                                        name + "') RETURNING ctid, id";
+        
+        int batch_size = 1000;
+        std::vector<std::string> batch_tuples;
+        batch_tuples.reserve(batch_size);
 
+        auto flush_batch = [&](const std::vector<std::string>& tuples) {
+            if (tuples.empty()) return;
             try {
                 pqxx::work txn_create(conn00);
+                std::string base_checking = "INSERT INTO checking (id, balance, city, name) VALUES ";
+                std::string base_savings = "INSERT INTO savings (id, balance, city, name) VALUES ";
+                
+                std::string values_part;
+                for (size_t k = 0; k < tuples.size(); ++k) {
+                    values_part += tuples[k];
+                    if (k < tuples.size() - 1) {
+                        values_part += ",";
+                    }
+                }
+                
+                std::string insert_checking_sql = base_checking + values_part + " RETURNING ctid, id";
+                std::string insert_savings_sql = base_savings + values_part + " RETURNING ctid, id";
+
                 // 执行checking表插入并获取位置信息
                 pqxx::result checking_result = txn_create.exec(insert_checking_sql);                
-                if (!checking_result.empty()) {
-                    std::string ctid = checking_result[0]["ctid"].as<std::string>();
-                    // ctid 为 (page_id, tuple_index) 格式, 这里要把ctid转换为page_id
+                for (const auto& row : checking_result) {
+                    std::string ctid = row["ctid"].as<std::string>();
                     auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                    int inserted_id = checking_result[0]["id"].as<int>();
-                    // 按 id 直接记录页号，避免拷贝 pair
+                    int inserted_id = row["id"].as<int>();
                     ret.checking_page[inserted_id] = page_id;
                 }
                 
                 // 执行savings表插入并获取位置信息
                 pqxx::result savings_result = txn_create.exec(insert_savings_sql);
-                if (!savings_result.empty()) {
-                    std::string ctid = savings_result[0]["ctid"].as<std::string>();
+                for (const auto& row : savings_result) {
+                    std::string ctid = row["ctid"].as<std::string>();
                     auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid);
-                    int inserted_id = savings_result[0]["id"].as<int>();
+                    int inserted_id = row["id"].as<int>();
                     ret.savings_page[inserted_id] = page_id;
                 }
                 
@@ -1094,6 +1095,28 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
             } catch (const std::exception &e) {
                 std::cerr << "Error while inserting data: " << e.what() << std::endl;
             }
+        };
+
+        for(int i = start; i < end; i++) {
+            int id = id_list[i];
+            int balance = 1000 + ((id - 1) % 1000); // Random balance
+            std::string name = "Account_" + std::to_string(id);
+            int city = ((id - 1) / (smallbank_account / city_cnt) ) % city_cnt;
+            assert(city >=0 && city < city_cnt);
+            
+            std::string tuple_str = "(" + std::to_string(id) + ", " +
+                                    std::to_string(balance) + ", " +
+                                    std::to_string(city) + ", '" +
+                                    name + "')";
+            batch_tuples.push_back(tuple_str);
+
+            if (batch_tuples.size() >= batch_size) {
+                flush_batch(batch_tuples);
+                batch_tuples.clear();
+            }
+        }
+        if (!batch_tuples.empty()) {
+            flush_batch(batch_tuples);
         }
     }; 
 

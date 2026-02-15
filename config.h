@@ -33,7 +33,7 @@ extern int DB_TYPE;
 #define LOG_FRIEND_GRAPH 0 // 0: no log 1: log
 #define LOG_METIS_DECISION 0 // 0: no log 1: log
 #define LOG_OWNERSHIP_CHANGE 0 // 0: no log 1: log
-#define LOG_PAGE_UPDATE 1 // 0: no log 1: log
+#define LOG_PAGE_UPDATE 0 // 0: no log 1: log
 #define LOG_KROUTER_SCHEDULING_DEBUG 0 // 0: no log 1: log
 #define LOG_METIS_OWNERSHIP_DECISION 0 // 0: no log 1: log
 #define WORKLOAD_AFFINITY_MODE 1 // 0: key affinity 1: city-key affinity
@@ -69,6 +69,7 @@ extern std::vector<uint64_t> hottest_keys; // for debug
 extern int NumBucket;
 extern bool Enable_Long_Txn; // 是否启用长事务
 extern int Long_Txn_Length; // 长事务的长度
+extern double Key_Page_Map_Cache_Ratio; // 能缓存key-page映射的比例, 0.0-1.0
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;

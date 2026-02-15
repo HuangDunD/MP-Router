@@ -64,7 +64,7 @@ public:
     struct Config {
         std::size_t partition_nums = ComputeNodeCount; // 分区数量，通常等于计算节点数量
 
-        std::size_t hot_hash_cap_bytes = 640ULL * 1024ULL * 1024ULL; // 默认 64 MB, 作为 hot hash 的内存预算
+        std::size_t hot_hash_entry_limit = 1000000; // 默认 100W 条目
         int thread_pool_size = 16;
         std::string log_file = "smart_router_metis.log"; // 日志文件
     };
@@ -126,21 +126,29 @@ public:
         
         // ! txn worker 时间分解
         std::vector<std::vector<double>> worker_thread_exec_time_ms;
+        std::vector<std::vector<double>> worker_thread_update_key_page_time_ms;
         std::vector<std::vector<double>> pop_txn_from_queue_ms_per_thread;
+            std::vector<std::vector<double>> pop_txn_empty_ms_per_thread;
+            std::vector<std::vector<double>> pop_txn_dag_ms_per_thread;
+            std::vector<std::vector<double>> pop_txn_regular_ms_per_thread;
         std::vector<std::vector<double>> wait_next_batch_ms_per_thread;
         std::vector<std::vector<double>> mark_done_ms_per_thread;
         std::vector<std::vector<double>> log_debug_info_ms_per_thread;
 
         std::vector<double> pop_txn_total_ms_per_node;
+            std::vector<double> pop_txn_empty_total_ms_per_node;
+            std::vector<double> pop_txn_dag_total_ms_per_node;
+            std::vector<double> pop_txn_regular_total_ms_per_node;
         std::vector<double> wait_next_batch_total_ms_per_node;
         std::vector<double> sum_worker_thread_exec_time_ms_per_node;
+        std::vector<double> sum_worker_thread_update_key_page_time_ms_per_node;
         std::vector<double> mark_done_total_ms_per_node;
         std::vector<double> log_debug_info_total_ms_per_node;
     };
 
     struct Stats {
         // 当前大小
-        std::size_t hot_hash_bytes = 0;
+        std::size_t hot_hash_entries = 0;
         std::size_t btree_bytes = 0; // 追踪但不受大小限制
         // 查找计数
         std::uint64_t hot_hit = 0;
@@ -152,6 +160,7 @@ public:
         // 页面更新计数
         std::atomic<int> change_page_cnt = 0;
         std::atomic<int> page_update_cnt = 0;
+        std::atomic<int> page_update_missing_cnt = 0;
         // Ownership 事务计数
         std::atomic<int> ownership_random_txns = 0;
         std::atomic<int> ownership_entirely_txns = 0;
@@ -193,15 +202,37 @@ public:
     class HotEntry {
     public:
         page_id_t page = -1; // 初始化page字段
-        std::uint64_t freq = 0;
+        mutable std::atomic<uint64_t> freq{0};
         node_id_t key_access_last_node = -1; // 最近访问的节点ID，-1表示未设置
         uint64_t last_access_time = 0; // 最近访问时间（毫秒级）
         // LRU 列表迭代器
         std::list<DataItemKey>::iterator lru_it;
+        mutable std::atomic<bool> referenced{false};
 
         HotEntry(){};
         HotEntry(page_id_t p, std::uint64_t f, std::list<DataItemKey>::iterator it)
         : page(p), freq(f), lru_it(it) {}
+
+        HotEntry(const HotEntry& other) {
+            page = other.page;
+            freq.store(other.freq.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            key_access_last_node = other.key_access_last_node;
+            last_access_time = other.last_access_time;
+            lru_it = other.lru_it;
+            referenced.store(other.referenced.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        }
+
+        HotEntry& operator=(const HotEntry& other) {
+            if (this != &other) {
+                page = other.page;
+                freq.store(other.freq.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                key_access_last_node = other.key_access_last_node;
+                last_access_time = other.last_access_time;
+                lru_it = other.lru_it;
+                referenced.store(other.referenced.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            }
+            return *this;
+        }
     };
 
 public:
@@ -234,14 +265,22 @@ public:
         time_stats_.push_txn_to_queue_ms_per_thread.resize(worker_threads_, 0.0);
 
         time_stats_.pop_txn_from_queue_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.pop_txn_empty_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.pop_txn_dag_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.pop_txn_regular_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
         time_stats_.wait_next_batch_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
         time_stats_.worker_thread_exec_time_ms.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.worker_thread_update_key_page_time_ms.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
         time_stats_.mark_done_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
         time_stats_.log_debug_info_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
 
         time_stats_.pop_txn_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_empty_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_dag_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_regular_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.wait_next_batch_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.sum_worker_thread_exec_time_ms_per_node.resize(ComputeNodeCount, 0.0); 
+        time_stats_.sum_worker_thread_update_key_page_time_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.mark_done_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.log_debug_info_total_ms_per_node.resize(ComputeNodeCount, 0.0);
 
@@ -454,11 +493,16 @@ public:
         // assert(table_ids.size() == keys.size() && keys.size() == ctid_ret_pages.size());
         for(size_t i=0; i<table_ids.size(); i++) {
             page_id_t original_page = txn->accessed_page_ids[i];
+            stats_.page_update_cnt++;
             if(original_page == ctid_ret_pages[i]) {
                 // 说明访问的页面没有变化，直接更新所有权即可
                 // 仅访问了原来的页面, 仍然是这个节点的所有权
                 ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], original_page, routed_node_id); 
-                stats_.page_update_cnt++;
+            }
+            else if (original_page == -1) {
+                // 说明之前没有记录页面，直接设置新的页面和所有权
+                ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], ctid_ret_pages[i], routed_node_id);
+                insert_or_victim_hot(table_ids[i], keys[i], ctid_ret_pages[i]);
             }
             else {
                 // 数据所在位置发生了变化, 需要更新key-page映射
@@ -493,6 +537,7 @@ public:
     // init key-page mapping when load data
     inline void initial_key_page(table_id_t table_id, itemkey_t key, page_id_t page) {
     #if !MLP_PREDICTION
+        if(stats_.hot_hash_entries > cfg_.hot_hash_entry_limit) return; // 超预算则不插入新条目
         std::unique_lock<std::shared_mutex> lock(hot_mutex_);
         auto it = hot_key_map.find({table_id, key});
         if (it == hot_key_map.end()) {
@@ -503,20 +548,20 @@ public:
             entry.freq = 1;
             entry.lru_it = hot_lru_.begin();
             hot_key_map.emplace(DataItemKey{table_id, key}, std::move(entry));
-            stats_.hot_hash_bytes += hot_entry_size_model_();
+            stats_.hot_hash_entries++;
             // std::cout << "Initialized hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
             // 检查是否超预算, 超预算则驱逐
-            while (stats_.hot_hash_bytes > cfg_.hot_hash_cap_bytes && !hot_lru_.empty()) {
+            while (stats_.hot_hash_entries > cfg_.hot_hash_entry_limit && !hot_lru_.empty()) {
                 DataItemKey evict_key = hot_lru_.back();
                 auto evict_it = hot_key_map.find(evict_key);
                 if (evict_it != hot_key_map.end()) {
-                    stats_.hot_hash_bytes -= hot_entry_size_model_();
+                    stats_.hot_hash_entries--;
                     stats_.evict_hot_entries++;
                     hot_key_map.erase(evict_it);
                 }
                 hot_lru_.pop_back();
-                std::cout << "Evicted hot key: (table_id=" << evict_key.table_id << ", key=" << evict_key.key << ")" <<
-                        std::endl;
+                // std::cout << "Evicted hot key: (table_id=" << evict_key.table_id << ", key=" << evict_key.key << ")" <<
+                //         std::endl;
             }
         }
     #else
@@ -660,6 +705,7 @@ public:
         bool is_scheduled = false; // 是否已经被调度, 避免重复调度
         int hot_level = 0; // 热点级别
         int dense_id = -1; // 线程本地稠密ID, 用于优化IPQ
+        int valid_page_count = 0; // 有效页面数量
     };
 
     void compute_benefit_for_node(SchedulingCandidateTxn* sc, std::vector<int>& ownership_node_count, std::vector<double>& compute_node_workload_benefit,
@@ -1334,8 +1380,24 @@ public:
         time_stats_.worker_thread_exec_time_ms[node_id][thread_id] += exec_time_ms;
     }
 
+    void add_worker_thread_update_time(node_id_t node_id, int thread_id, double update_time_ms) {
+        time_stats_.worker_thread_update_key_page_time_ms[node_id][thread_id] += update_time_ms;
+    }
+
     void add_worker_thread_pop_time(node_id_t node_id, int thread_id, double pop_time_ms) {
         time_stats_.pop_txn_from_queue_ms_per_thread[node_id][thread_id] += pop_time_ms;
+    }
+
+    void add_worker_thread_pop_empty_time(node_id_t node_id, int thread_id, double pop_empty_wait_time_ms) {
+        time_stats_.pop_txn_empty_ms_per_thread[node_id][thread_id] += pop_empty_wait_time_ms;
+    }
+
+    void add_worker_thread_pop_dag_time(node_id_t node_id, int thread_id, double pop_dag_time_ms) {
+        time_stats_.pop_txn_dag_ms_per_thread[node_id][thread_id] += pop_dag_time_ms;
+    }
+
+    void add_worker_thread_pop_regular_time(node_id_t node_id, int thread_id, double pop_regular_time_ms) {
+        time_stats_.pop_txn_regular_ms_per_thread[node_id][thread_id] += pop_regular_time_ms;
     }
 
     void add_worker_thread_wait_next_batch_time(node_id_t node_id, int thread_id, double wait_time_ms) {
@@ -1384,9 +1446,29 @@ public:
                 time_stats_.sum_worker_thread_exec_time_ms_per_node[i] += t;
             }
 
+            time_stats_.sum_worker_thread_update_key_page_time_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.worker_thread_update_key_page_time_ms[i]) {
+                time_stats_.sum_worker_thread_update_key_page_time_ms_per_node[i] += t;
+            }
+
             time_stats_.pop_txn_total_ms_per_node[i] = 0.0;
             for (const auto& t : time_stats_.pop_txn_from_queue_ms_per_thread[i]) {
                 time_stats_.pop_txn_total_ms_per_node[i] += t; 
+            }
+
+            time_stats_.pop_txn_empty_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_empty_ms_per_thread[i]) {
+                time_stats_.pop_txn_empty_total_ms_per_node[i] += t;
+            }
+
+            time_stats_.pop_txn_dag_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_dag_ms_per_thread[i]) {
+                time_stats_.pop_txn_dag_total_ms_per_node[i] += t;
+            }
+
+            time_stats_.pop_txn_regular_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_regular_ms_per_thread[i]) {
+                time_stats_.pop_txn_regular_total_ms_per_node[i] += t;
             }
 
             time_stats_.wait_next_batch_total_ms_per_node[i] = 0.0;
@@ -1470,15 +1552,15 @@ private:
         if (it != hot_key_map.end()) {
             // hot hash 命中
             stats_.hot_hit++;
-            it->second.freq++;
-            // !更新 LRU 列表, 把当前的key移动到前端, 先不更新了
-            // if (it->second.lru_it != hot_lru_.begin()) {
-            //     hot_lru_.splice(hot_lru_.begin(), hot_lru_, it->second.lru_it);
-            // }
+            it->second.freq.fetch_add(1, std::memory_order_relaxed);
+            // !不需要更新 LRU 列表，只需要标记 referenced
+            it->second.referenced.store(true, std::memory_order_relaxed);
             txn->accessed_page_ids.push_back(it->second.page); // 记录访问过的page id
             return it->second;
         } else { 
+            stats_.hot_miss++;
             HotEntry empty_entry;
+            txn->accessed_page_ids.push_back(empty_entry.page); // 记录一个无效的page id, 保证 accessed_page_ids 与 table_ids 对齐
             return empty_entry;
             // hot hash 未命中
             // stats_.hot_miss++;
@@ -1507,8 +1589,20 @@ private:
     
     // 插入映射。如果存储满了, 会在预算内驱逐。
     inline HotEntry insert_or_victim_hot(table_id_t table_id, itemkey_t key, page_id_t page) {
-        // 当前的key一定不会在map中存在
-        assert(hot_key_map.find({table_id, key}) == hot_key_map.end());
+        // 策略1: Try Lock. 如果锁竞争激烈，直接放弃缓存本次插入，避免阻塞主线程，反正只是Cache
+        std::unique_lock<std::shared_mutex> lock(hot_mutex_, std::try_to_lock);
+        if(!lock.owns_lock()) {
+             // 没抢到锁，直接返回临时对象，不进Cache
+             return HotEntry{page, 1, hot_lru_.end()}; 
+        }
+
+        // Double-check: 再次检查 key 是否已存在 (处理并发 race condition)
+        auto existing_it = hot_key_map.find({table_id, key});
+        if (existing_it != hot_key_map.end()) {
+             // 别人已经插进去了，直接返回现有的
+             return existing_it->second;
+        }
+        
         // 插入新条目
         hot_lru_.push_front({table_id, key});
         auto [it, ok] = hot_key_map.emplace(
@@ -1517,27 +1611,47 @@ private:
         );
         if (!ok) assert(false); // 不应该发生
 
-        stats_.hot_hash_bytes += hot_entry_size_model_();
-        std::cout << "Inserted hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
-        // 检查是否超预算, 超预算则驱逐
-        while (stats_.hot_hash_bytes > cfg_.hot_hash_cap_bytes && !hot_lru_.empty()) {
-            const auto & evict_key = hot_lru_.back();
-            auto evict_it = hot_key_map.find(evict_key);
-            if (evict_it != hot_key_map.end()) {
-                stats_.hot_hash_bytes -= hot_entry_size_model_();
-                stats_.evict_hot_entries++;
-                hot_key_map.erase(evict_it);
+        stats_.hot_hash_entries++;
+        // std::cout << "Inserted hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
+        
+        // 策略2: Batch Eviction. 如果超限，一次性腾出 10% 的空间 (Low Watermark)
+        // 避免每次 insert 都触发昂贵的 CLOCK 循环
+        if (stats_.hot_hash_entries > cfg_.hot_hash_entry_limit) {
+            size_t low_watermark = cfg_.hot_hash_entry_limit * 0.90; 
+            while (stats_.hot_hash_entries > low_watermark && !hot_lru_.empty()) {
+                const auto & candidate_key = hot_lru_.back();
+                auto victim_it = hot_key_map.find(candidate_key);
+                
+                if (victim_it == hot_key_map.end()) {
+                    // Should not happen, but safe cleanup
+                    hot_lru_.pop_back();
+                    continue;
+                }
+
+                if (victim_it->second.referenced.load(std::memory_order_relaxed)) {
+                    // Give second chance
+                    victim_it->second.referenced.store(false, std::memory_order_relaxed);
+                    // Move to front (splice is efficient, iterator invalidated? No, list iterator stable)
+                    hot_lru_.splice(hot_lru_.begin(), hot_lru_, std::prev(hot_lru_.end()));
+                    // it->second.lru_it 仍然有效，指向同一个节点，只是位置变了
+                } else {
+                    // Evict
+                    stats_.hot_hash_entries--;
+                    stats_.evict_hot_entries++;
+                    hot_key_map.erase(victim_it);
+                    hot_lru_.pop_back();
+                    // std::cout << "Evicted hot key: (table_id=" << candidate_key.table_id << ", key=" << candidate_key.key << ")" << std::endl;
+                    // logger->info("Evicted hot key: (table_id=" + std::to_string(candidate_key.table_id) + ", key=" + std::to_string(candidate_key.key) + ")");
+                }
             }
-            hot_lru_.pop_back();
-            std::cout << "Evicted hot key: (table_id=" << evict_key.table_id << ", key=" << evict_key.key << ")" <<
-                    std::endl;
         }
-        return hot_key_map.at({table_id, key});
+        return it->second;
     }
 
     inline void insert_batch_bnode(table_id_t table_id, BtreeNode *return_node) {
         if (return_node == nullptr) return;
-        if (stats_.hot_hash_bytes > cfg_.hot_hash_cap_bytes * 0.9) return; // 热点缓存快满了就不插入了
+        std::unique_lock<std::shared_mutex> lock(hot_mutex_);
+        if (stats_.hot_hash_entries > cfg_.hot_hash_entry_limit * 0.9) return; // 热点缓存快满了就不插入了
         // 批量插入B+树的非叶子节点
         for (size_t i = 0; i < return_node->keys.size(); i++) {
             itemkey_t key = return_node->keys[i];
@@ -1552,9 +1666,9 @@ private:
                 entry.freq = 1;
                 entry.lru_it = hot_lru_.begin();
                 hot_key_map.emplace(DataItemKey{table_id, key}, entry);
-                stats_.hot_hash_bytes += hot_entry_size_model_();
-                std::cout << "Inserted hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page <<
-                        std::endl;
+                stats_.hot_hash_entries++;
+                // std::cout << "Inserted hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page <<
+                //         std::endl;
             }
         }
     }
@@ -1882,9 +1996,9 @@ private:
     // --------- DAG Ready Scheduling ---------
 public:
     // 注册一个尚未就绪的事务，用于后续ready时快速调度
-    void register_pending_txn(TxnQueueEntry* entry, int node_id) {
-        if (!entry) return; 
-        pending_txn_queue_->add_pendingtxn_on_node(entry, node_id);
+    bool register_pending_txn(TxnQueueEntry* entry, int node_id) {
+        assert(entry != nullptr);
+        return pending_txn_queue_->add_pendingtxn_on_node(entry, node_id);
     }
 
     int get_pending_txn_count() {

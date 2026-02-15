@@ -606,8 +606,8 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         timespec pop_start_time, pop_end_time;
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
-        int call_id;
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
+        int call_id, ret;
+        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id, &ret);
         // if(WarmupEnd)
         //     logger_->info("Compute Node " + std::to_string(compute_node_id) + 
         //                 " Thread " + std::to_string(params->thread_id) + 
@@ -617,6 +617,15 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
         double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
                           (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
+        // if(pop_time > 10) {
+        //     logger_->info("High pop_time: " + std::to_string(pop_time) + " ms at Compute Node " + 
+        //                   std::to_string(compute_node_id) + 
+        //                   " Thread " + std::to_string(params->thread_id) + 
+        //                   " in batch " + std::to_string(con_batch_id));
+        // }
+        if(ret == 0) smart_router->add_worker_thread_pop_empty_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 1) smart_router->add_worker_thread_pop_dag_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 2) smart_router->add_worker_thread_pop_regular_time(params->compute_node_id_connecter, params->thread_id, pop_time);
         smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
 
         if (txn_entries.empty()) {
@@ -748,10 +757,17 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                 // ! 无需commit 外层事务
                 // txn->commit();
 
+                struct timespec update_start_time, update_end_time;
+                clock_gettime(CLOCK_MONOTONIC, &update_start_time);
                 if(smart_router) {
                     smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
                                                   keys, rw, ctid_ret_page_ids, compute_node_id);
                 }
+                clock_gettime(CLOCK_MONOTONIC, &update_end_time);
+                double update_time = (update_end_time.tv_sec - update_start_time.tv_sec) * 1000.0 +
+                                     (update_end_time.tv_nsec - update_start_time.tv_nsec) / 1000000.0;
+                smart_router->add_worker_thread_update_time(params->compute_node_id_connecter, params->thread_id, update_time);
+                
             } catch (const std::exception &e) {
                 std::cerr << "Transaction (SP) failed: " << e.what() << std::endl;
                 logger_->info("Transaction (SP) failed: " + std::string(e.what()));
@@ -2162,6 +2178,20 @@ int main(int argc, char *argv[]) {
             PARTITION_INTERVAL = UINT64_MAX; // disable periodic partitioning
             std::cout << "Periodic partitioning disabled in dynamic workload mode." << std::endl;
         }
+        else if (arg == "--key-page-ratio") {
+            if (i + 1 < argc) {
+                Key_Page_Map_Cache_Ratio = std::stod(argv[++i]);
+                if (Key_Page_Map_Cache_Ratio < 0.0 || Key_Page_Map_Cache_Ratio > 1.5) {
+                    std::cerr << "Error: Key_Page_Map_Cache_Ratio must be between 0.0 and 1.5" << std::endl;
+                    return -1;
+                }
+                std::cout << "Key-Page ratio set to: " << Key_Page_Map_Cache_Ratio << std::endl;
+            } else {
+                std::cerr << "Error: --key-page-ratio requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else {
             std::cerr << "Error: Unknown argument " << arg << std::endl;
             print_usage(argv[0]);
@@ -2292,10 +2322,10 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
 
         // kes 四机, 新版本
-        // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
-        // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
-        // DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
-        // DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
 
         // kes 单机
         // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
@@ -2308,8 +2338,8 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
         // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank"); // pg13
 
-        DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
-        DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
 
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
@@ -2526,6 +2556,11 @@ int main(int argc, char *argv[]) {
     NewMetis* metis = new NewMetis(logger_);
 
     SmartRouter::Config cfg{};
+    if(Workload_Type == 0) {
+        cfg.hot_hash_entry_limit = account_num * Key_Page_Map_Cache_Ratio * 2; // 两张表
+    } else {
+        cfg.hot_hash_entry_limit = 640ULL * 1024ULL * 1024ULL; // 开的尽可能大，对于其他负载我们不做key 不足的实验
+    }
     SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, pending_txn_queue, worker_threads, nullptr, metis, logger_, smallbank, ycsb, tpcc);
     std::cout << "Smart Router initialized." << std::endl;
 
