@@ -961,7 +961,13 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
     bool enable_multi_update_experiment = Enable_Long_Txn; // 从配置中读取是否启用长事务实验
     int multi_update_length = Long_Txn_Length; // 从配置中读取长事务的长度
     
-    while(generated_txn_count < total_txn_to_generate) {
+    while(true) {
+        if(dynamic_workload){
+            if(stop_benchmark.load(std::memory_order_relaxed)) break;
+        } else {
+            if(generated_txn_count >= total_txn_to_generate) break;
+        }
+
         std::vector<TxnQueueEntry*> txn_batch;
         for (int i = 0; i < 0.1 * BatchRouterProcessSize; i++){
             generated_txn_count++;

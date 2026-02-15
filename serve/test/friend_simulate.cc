@@ -161,6 +161,102 @@ void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, 
     for(auto &t : threads) t.join();
 }
 
+void change_friends_dynamic(std::vector<std::vector<std::pair<int, float>>> &orig_graph,
+                            std::vector<std::vector<std::pair<int, float>>> &new_graph,
+                            double change_ratio) {
+    int num_users = orig_graph.size();
+    new_graph.resize(num_users);
+
+    int num_threads = std::thread::hardware_concurrency();
+    if(num_threads == 0) num_threads = 4;
+    std::vector<std::thread> threads;
+    int chunk_size = num_users / num_threads;
+
+    auto worker = [&](int start, int end, int seed) {
+        std::mt19937 gen(seed);
+        std::uniform_real_distribution<float> weightDist(0.001f, 1.0f);
+        // Use uniform distribution for global user selection
+        std::uniform_int_distribution<int> user_dist(0, num_users - 1);
+
+        for(int u = start; u < end; ++u) {
+            if (orig_graph[u].empty()) {
+                new_graph[u].clear();
+                continue;
+            }
+
+            const auto& old_friends = orig_graph[u];
+            int total_friends = old_friends.size();
+            
+            // Determine how many friends to change for this user
+            // Using binomial distribution to simulate "randomly change X friends" based on probability
+            std::binomial_distribution<int> change_dist(total_friends, change_ratio);
+            int num_change = change_dist(gen);
+            int num_keep = total_friends - num_change;
+            
+            std::vector<std::pair<int, float>> next_friends;
+            next_friends.reserve(total_friends);
+            std::unordered_set<int> current_friend_ids;
+
+            // Strategy: Shuffle old friends, keep first 'num_keep'
+            std::vector<std::pair<int, float>> shuffled_old = old_friends; // copy
+            std::shuffle(shuffled_old.begin(), shuffled_old.end(), gen);
+
+            for(int i = 0; i < num_keep; ++i) {
+                next_friends.push_back(shuffled_old[i]);
+                current_friend_ids.insert(shuffled_old[i].first);
+            }
+
+            // Add new friends
+            int added_new = 0;
+            // Retry limit to avoid infinite loop
+            int attempts = 0; 
+            while (added_new < num_change && attempts < 100) {
+                int candidate = user_dist(gen);
+                if (candidate != u && current_friend_ids.find(candidate) == current_friend_ids.end()) {
+                    current_friend_ids.insert(candidate);
+                    next_friends.emplace_back(candidate, 0.0f); // weight updated later
+                    added_new++;
+                    attempts = 0;
+                } else {
+                    attempts++;
+                }
+            }
+
+            // Assign new random weights and normalize
+            float sum_w = 0.0f;
+            for (auto &p : next_friends) {
+                p.second = weightDist(gen);
+                sum_w += p.second;
+            }
+            if (sum_w > 0.0f) {
+                for (auto &p : next_friends) p.second /= sum_w;
+            }
+            
+            // Sort
+            std::sort(next_friends.begin(), next_friends.end(), [](const auto &a, const auto &b){ 
+                return a.first < b.first; 
+            });
+
+            // Fix precision
+            float acc = 0.0f;
+            for (size_t k = 0; k + 1 < next_friends.size(); ++k) acc += next_friends[k].second;
+            if (!next_friends.empty()) {
+                next_friends.back().second = std::max(0.0f, 1.0f - acc);
+            }
+
+            new_graph[u] = std::move(next_friends);
+        }
+    };
+
+    for(int i=0; i<num_threads; ++i) {
+        int start = i * chunk_size;
+        int end = (i == num_threads - 1) ? num_users : (i + 1) * chunk_size;
+        threads.emplace_back(worker, start, end, std::random_device{}());
+    }
+
+    for(auto &t : threads) t.join();
+}
+
 // 生成模拟社交网络图的函数, 
 void generate_friend_simulate_graph(std::vector<std::vector<std::pair<int, float>>> &adj_list, int num_users) {
 	adj_list.clear();

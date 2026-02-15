@@ -177,7 +177,11 @@ public:
         double r = (double)rand() / RAND_MAX;
         if (r < AffinityTxnRatio) {
             // 使用亲和性账号
-            const auto &friends = user_friend_graph[acc1 - 1]; // acc1
+            std::vector<std::pair<int, float>> friends;
+            if(dynamic_workload && change_friend)
+                friends = user_friend_graph_dynamic[acc1 - 1]; // acc1
+            else
+                friends = user_friend_graph[acc1 - 1]; // acc1
             if (!friends.empty()) {
                 // 根据朋友的权重选择一个朋友账号
                 double p = (double)rand() / RAND_MAX;
@@ -252,6 +256,7 @@ public:
         generate_friend_simulate_graph(user_friend_graph, num_users);
     #elif WORKLOAD_AFFINITY_MODE == 1
         generate_friend_city_simulate_graph(user_friend_graph, num_users, (int)SmallBankCityType::Count);
+        change_friends_dynamic(user_friend_graph, user_friend_graph_dynamic, 0.5); // 50%变化
     #endif
         std::cout << "Generated friend graph for " << num_users << " users." << std::endl;
 #if LOG_FRIEND_GRAPH
@@ -402,5 +407,6 @@ private:
     double hotspot_access_prob; 
     double zipfian_theta;
     std::vector<std::vector<std::pair<int, float>>> user_friend_graph; // 每个用户的朋友图, 模拟亲和性
+    std::vector<std::vector<std::pair<int, float>>> user_friend_graph_dynamic; // 这个数据结构仅对于动态workload有用, 朋友关系进行改变的第二张图
     std::string friend_graph_export_file = "friend_graph.csv"; // 导出社交图 CSV 文件
 };
