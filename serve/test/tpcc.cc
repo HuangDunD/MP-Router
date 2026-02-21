@@ -32,7 +32,10 @@ const std::vector<bool> TPCC::RW_FLAGS_ARR[5] = {
     {false, false}
 };
 
-TPCC::TPCC(int num_warehouses) : num_warehouses_(num_warehouses) {}
+TPCC::TPCC(int num_warehouses, int access_pattern_type) : num_warehouses_(num_warehouses), access_pattern(access_pattern_type) {
+    assert(num_warehouses > 0);
+    assert(access_pattern_type == 0 || access_pattern_type == 2); // For now we only support uniform and hotspot access patterns
+}
 
 std::vector<table_id_t> TPCC::get_table_ids_by_txn_type(int txn_type, int key_size) {
     if (txn_type == (int)TPCCTxType::kNewOrder) {
@@ -277,7 +280,7 @@ void TPCC::create_table(pqxx::connection *conn) {
         
         std::vector<std::thread> extend_threads;
         for (size_t i = 0; i < extend_tables.size(); ++i) {
-            extend_threads.emplace_back([i, extend_tables, extend_sizes](){
+            extend_threads.emplace_back([this, i, extend_tables, extend_sizes](){
                 pqxx::connection conn_extend(DBConnection[0]);
                 if (!conn_extend.is_open()) {
                     std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
@@ -320,10 +323,13 @@ void TPCC::load_data() {
                     return;
                 }
                 try {
-                    pqxx::nontransaction txn(c);
                     int start = i * items_per_thread + 1;
                     int end = (i == item_threads_count - 1) ? ITEM_COUNT : (i + 1) * items_per_thread;
+                    
+                    // Use transaction for batching
+                    pqxx::work txn(c);
                     load_item(txn, start, end);
+                    txn.commit();
                 } catch (const std::exception &e) {
                     std::cerr << "Error loading items: " << e.what() << std::endl;
                 }
@@ -363,6 +369,7 @@ void TPCC::load_data() {
                 }
             });
         }
+                
         for (auto& t : wh_threads) t.join();
         
         std::cout << "TPC-C data loaded." << std::endl;
@@ -371,22 +378,46 @@ void TPCC::load_data() {
     }
 }
 
-void TPCC::load_item(pqxx::nontransaction &txn, int start_id, int end_id) {
-    // Simplified item loading
-    // std::cout << "Loading Items " << start_id << " to " << end_id << "..." << std::endl;
+// Helper for batch insert
+void exec_batch_insert(pqxx::transaction_base &txn, const std::string& table, const std::vector<std::string>& columns, const std::vector<std::string>& values_list) {
+    if (values_list.empty()) return;
+    std::stringstream ss;
+    ss << "INSERT INTO " << table << " (";
+    for (size_t i = 0; i < columns.size(); ++i) {
+        ss << columns[i] << (i == columns.size() - 1 ? "" : ", ");
+    }
+    ss << ") VALUES ";
+    for (size_t i = 0; i < values_list.size(); ++i) {
+        ss << "(" << values_list[i] << ")" << (i == values_list.size() - 1 ? ";" : ", ");
+    }
+    txn.exec(ss.str());
+}
+
+void TPCC::load_item(pqxx::transaction_base &txn, int start_id, int end_id) {
+    std::vector<std::string> values_batch;
+    values_batch.reserve(1000);
+    std::vector<std::string> columns = {"i_id", "i_im_id", "i_name", "i_price", "i_data"};
+    
     for (int i = start_id; i <= end_id; ++i) {
-        std::string sql = "INSERT INTO item (i_id, i_im_id, i_name, i_price, i_data) VALUES (" +
+        std::string val = 
             std::to_string(i) + ", " +
             std::to_string(random_int(1, 10000)) + ", '" +
             random_string(14, 24) + "', " +
             std::to_string(random_int(100, 10000) / 100.0) + ", '" +
-            random_string(26, 50) + "')";
-        txn.exec(sql);
+            random_string(26, 50) + "'";
+        
+        values_batch.push_back(val);
+        
+        if (values_batch.size() >= 1000) {
+            exec_batch_insert(txn, "item", columns, values_batch);
+            values_batch.clear();
+        }
     }
+    exec_batch_insert(txn, "item", columns, values_batch);
 }
 
-void TPCC::load_warehouse(pqxx::nontransaction &txn, int w_id) {
-    std::string sql = "INSERT INTO warehouse (w_id, w_name, w_street_1, w_street_2, w_city, w_state, w_zip, w_tax, w_ytd) VALUES (" +
+void TPCC::load_warehouse(pqxx::transaction_base &txn, int w_id) {
+    std::string val = 
         std::to_string(w_id) + ", '" +
         random_string(6, 10) + "', '" +
         random_string(10, 20) + "', '" +
@@ -394,13 +425,20 @@ void TPCC::load_warehouse(pqxx::nontransaction &txn, int w_id) {
         random_string(10, 20) + "', '" +
         random_string(2, 2) + "', '" +
         random_nstring(9, 9) + "', " +
-        std::to_string(random_int(0, 2000) / 10000.0) + ", 300000.00)";
-    txn.exec(sql);
+        std::to_string(random_int(0, 2000) / 10000.0) + ", 300000.00";
+    
+    // Warehouse is single row per call, but let's keep consistent interface
+    std::vector<std::string> columns = {"w_id", "w_name", "w_street_1", "w_street_2", "w_city", "w_state", "w_zip", "w_tax", "w_ytd"};
+    exec_batch_insert(txn, "warehouse", columns, {val});
 }
 
-void TPCC::load_stock(pqxx::nontransaction &txn, int w_id) {
+void TPCC::load_stock(pqxx::transaction_base &txn, int w_id) {
+    std::vector<std::string> values_batch;
+    values_batch.reserve(1000);
+    std::vector<std::string> columns = {"s_i_id", "s_w_id", "s_quantity", "s_dist_01", "s_dist_02", "s_dist_03", "s_dist_04", "s_dist_05", "s_dist_06", "s_dist_07", "s_dist_08", "s_dist_09", "s_dist_10", "s_ytd", "s_order_cnt", "s_remote_cnt", "s_data"};
+
     for (int i = 1; i <= ITEM_COUNT; ++i) {
-        std::string sql = "INSERT INTO stock (s_i_id, s_w_id, s_quantity, s_dist_01, s_dist_02, s_dist_03, s_dist_04, s_dist_05, s_dist_06, s_dist_07, s_dist_08, s_dist_09, s_dist_10, s_ytd, s_order_cnt, s_remote_cnt, s_data) VALUES (" +
+        std::string val = 
             std::to_string(i) + ", " +
             std::to_string(w_id) + ", " +
             std::to_string(random_int(10, 100)) + ", '" +
@@ -408,14 +446,23 @@ void TPCC::load_stock(pqxx::nontransaction &txn, int w_id) {
             random_string(24, 24) + "', '" + random_string(24, 24) + "', '" + random_string(24, 24) + "', '" +
             random_string(24, 24) + "', '" + random_string(24, 24) + "', '" + random_string(24, 24) + "', '" +
             random_string(24, 24) + "', 0, 0, 0, '" +
-            random_string(26, 50) + "')";
-        txn.exec(sql);
+            random_string(26, 50) + "'";
+        
+        values_batch.push_back(val);
+        if (values_batch.size() >= 1000) {
+            exec_batch_insert(txn, "stock", columns, values_batch);
+            values_batch.clear();
+        }
     }
+    exec_batch_insert(txn, "stock", columns, values_batch);
 }
 
-void TPCC::load_district(pqxx::nontransaction &txn, int w_id) {
+void TPCC::load_district(pqxx::transaction_base &txn, int w_id) {
+    std::vector<std::string> values_batch;
+    std::vector<std::string> columns = {"d_id", "d_w_id", "d_name", "d_street_1", "d_street_2", "d_city", "d_state", "d_zip", "d_tax", "d_ytd", "d_next_o_id"};
+
     for (int d = 1; d <= DIST_PER_WARE; ++d) {
-        std::string sql = "INSERT INTO district (d_id, d_w_id, d_name, d_street_1, d_street_2, d_city, d_state, d_zip, d_tax, d_ytd, d_next_o_id) VALUES (" +
+        std::string val = 
             std::to_string(d) + ", " +
             std::to_string(w_id) + ", '" +
             random_string(6, 10) + "', '" +
@@ -424,14 +471,23 @@ void TPCC::load_district(pqxx::nontransaction &txn, int w_id) {
             random_string(10, 20) + "', '" +
             random_string(2, 2) + "', '" +
             random_nstring(9, 9) + "', " +
-            std::to_string(random_int(0, 2000) / 10000.0) + ", 30000.00, " + std::to_string(CUST_PER_DIST + 1) + ")";
-        txn.exec(sql);
+            std::to_string(random_int(0, 2000) / 10000.0) + ", 30000.00, " + std::to_string(CUST_PER_DIST + 1);
+        values_batch.push_back(val);
     }
+    exec_batch_insert(txn, "district", columns, values_batch);
 }
 
-void TPCC::load_customer(pqxx::nontransaction &txn, int w_id, int d_id) {
+void TPCC::load_customer(pqxx::transaction_base &txn, int w_id, int d_id) {
+    std::vector<std::string> cust_batch;
+    std::vector<std::string> hist_batch;
+    cust_batch.reserve(1000);
+    hist_batch.reserve(1000);
+    
+    std::vector<std::string> cust_cols = {"c_id", "c_d_id", "c_w_id", "c_first", "c_middle", "c_last", "c_street_1", "c_street_2", "c_city", "c_state", "c_zip", "c_phone", "c_since", "c_credit", "c_credit_lim", "c_discount", "c_balance", "c_ytd_payment", "c_payment_cnt", "c_delivery_cnt", "c_data"};
+    std::vector<std::string> hist_cols = {"h_c_id", "h_c_d_id", "h_c_w_id", "h_d_id", "h_w_id", "h_date", "h_amount", "h_data"};
+
     for (int c = 1; c <= CUST_PER_DIST; ++c) {
-        std::string sql = "INSERT INTO customer (c_id, c_d_id, c_w_id, c_first, c_middle, c_last, c_street_1, c_street_2, c_city, c_state, c_zip, c_phone, c_since, c_credit, c_credit_lim, c_discount, c_balance, c_ytd_payment, c_payment_cnt, c_delivery_cnt, c_data) VALUES (" +
+        std::string val = 
             std::to_string(c) + ", " +
             std::to_string(d_id) + ", " +
             std::to_string(w_id) + ", '" +
@@ -445,36 +501,55 @@ void TPCC::load_customer(pqxx::nontransaction &txn, int w_id, int d_id) {
             random_nstring(16, 16) + "', NOW(), '" +
             (random_int(0, 1) == 0 ? "GC" : "BC") + "', 50000.00, " +
             std::to_string(random_int(0, 5000) / 10000.0) + ", -10.00, 10.00, 1, 0, '" +
-            random_string(300, 500) + "')";
-        txn.exec(sql);
+            random_string(300, 500) + "'";
+        cust_batch.push_back(val);
         
-        // History
-        std::string h_sql = "INSERT INTO history (h_c_id, h_c_d_id, h_c_w_id, h_d_id, h_w_id, h_date, h_amount, h_data) VALUES (" +
+        std::string h_val = 
             std::to_string(c) + ", " +
             std::to_string(d_id) + ", " +
             std::to_string(w_id) + ", " +
             std::to_string(d_id) + ", " +
             std::to_string(w_id) + ", NOW(), 10.00, '" +
-            random_string(12, 24) + "')";
-        txn.exec(h_sql);
+            random_string(12, 24) + "'";
+        hist_batch.push_back(h_val);
+        
+        if (cust_batch.size() >= 1000) {
+            exec_batch_insert(txn, "customer", cust_cols, cust_batch);
+            exec_batch_insert(txn, "history", hist_cols, hist_batch);
+            cust_batch.clear();
+            hist_batch.clear();
+        }
     }
+    exec_batch_insert(txn, "customer", cust_cols, cust_batch);
+    exec_batch_insert(txn, "history", hist_cols, hist_batch);
 }
 
-void TPCC::load_orders(pqxx::nontransaction &txn, int w_id, int d_id) {
+void TPCC::load_orders(pqxx::transaction_base &txn, int w_id, int d_id) {
+    std::vector<std::string> ord_batch;
+    std::vector<std::string> ol_batch;
+    std::vector<std::string> no_batch;
+    ord_batch.reserve(1000);
+    ol_batch.reserve(5000);
+    no_batch.reserve(1000);
+    
+    std::vector<std::string> ord_cols = {"o_id", "o_d_id", "o_w_id", "o_c_id", "o_entry_d", "o_carrier_id", "o_ol_cnt", "o_all_local"};
+    std::vector<std::string> ol_cols = {"ol_o_id", "ol_d_id", "ol_w_id", "ol_number", "ol_i_id", "ol_supply_w_id", "ol_delivery_d", "ol_quantity", "ol_amount", "ol_dist_info"};
+    std::vector<std::string> no_cols = {"no_o_id", "no_d_id", "no_w_id"};
+
     for (int o = 1; o <= CUST_PER_DIST; ++o) {
-        std::string sql = "INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_carrier_id, o_ol_cnt, o_all_local) VALUES (" +
+        std::string ord_val = 
             std::to_string(o) + ", " +
             std::to_string(d_id) + ", " +
             std::to_string(w_id) + ", " +
             std::to_string(random_int(1, CUST_PER_DIST)) + ", NOW(), " +
             (o < CUST_PER_DIST - 900 + 1 ? std::to_string(random_int(1, DIST_PER_WARE)) : "NULL") + ", " +
-            std::to_string(random_int(5, 15)) + ", 1)";
-        txn.exec(sql);
+            std::to_string(random_int(5, 15)) + ", 1";
+        ord_batch.push_back(ord_val);
         
         // OrderLine
         int ol_cnt = random_int(5, 15);
         for (int ol = 1; ol <= ol_cnt; ++ol) {
-            std::string ol_sql = "INSERT INTO order_line (ol_o_id, ol_d_id, ol_w_id, ol_number, ol_i_id, ol_supply_w_id, ol_delivery_d, ol_quantity, ol_amount, ol_dist_info) VALUES (" +
+            std::string ol_val = 
                 std::to_string(o) + ", " +
                 std::to_string(d_id) + ", " +
                 std::to_string(w_id) + ", " +
@@ -483,19 +558,31 @@ void TPCC::load_orders(pqxx::nontransaction &txn, int w_id, int d_id) {
                 std::to_string(w_id) + ", " +
                 (o < CUST_PER_DIST - 900 + 1 ? "NOW()" : "NULL") + ", 5, " +
                 (o < CUST_PER_DIST - 900 + 1 ? "0.00" : std::to_string(random_int(10, 10000) / 100.0)) + ", '" +
-                random_string(24, 24) + "')";
-            txn.exec(ol_sql);
+                random_string(24, 24) + "'";
+            ol_batch.push_back(ol_val);
         }
         
         // NewOrder (last 900 orders)
         if (o >= CUST_PER_DIST - 900 + 1) {
-            std::string no_sql = "INSERT INTO new_order (no_o_id, no_d_id, no_w_id) VALUES (" +
+            std::string no_val = 
                 std::to_string(o) + ", " +
                 std::to_string(d_id) + ", " +
-                std::to_string(w_id) + ")";
-            txn.exec(no_sql);
+                std::to_string(w_id);
+            no_batch.push_back(no_val);
+        }
+        
+        if (ord_batch.size() >= 500) {
+            exec_batch_insert(txn, "orders", ord_cols, ord_batch);
+            exec_batch_insert(txn, "order_line", ol_cols, ol_batch);
+            exec_batch_insert(txn, "new_order", no_cols, no_batch);
+            ord_batch.clear();
+            ol_batch.clear();
+            no_batch.clear();
         }
     }
+    exec_batch_insert(txn, "orders", ord_cols, ord_batch);
+    exec_batch_insert(txn, "order_line", ol_cols, ol_batch);
+    exec_batch_insert(txn, "new_order", no_cols, no_batch);
 }
 
 void TPCC::create_tpcc_stored_procedures(pqxx::connection *conn) {
@@ -628,7 +715,23 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
             std::vector<itemkey_t> tpcc_params;
             
             // Generate keys based on txn type
-            int w_id = random_int(1, num_warehouses_);
+            int w_id = -1;
+            if(access_pattern == 0) {
+                w_id = random_int(1, num_warehouses_);
+            }
+            else if (access_pattern == 2) {
+               // Hotspot
+               int hotspot_end = num_warehouses_ / ComputeNodeCount;
+               if (hotspot_end < 1) hotspot_end = 1;
+               
+               if (random_int(1, 100) <= hotspot_ratio * 100) {
+                   w_id = random_int(1, hotspot_end);
+               } else {
+                   w_id = random_int(1, num_warehouses_);
+               }
+            } else {
+                w_id = random_int(1, num_warehouses_);
+            }
             int d_id = random_int(1, DIST_PER_WARE);
             int c_id = nurand(1023, 1, CUST_PER_DIST);
             

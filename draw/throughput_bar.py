@@ -120,8 +120,8 @@ def main():
     ]
 
     # Figure setup: 1 row, 2 columns, separate Y axis to allow individual zooming
-    # Reduced size for better fit in papers (approx single/double column width context)
-    fig_w, fig_h = 8, 3 
+    # Reduced height as requested
+    fig_w, fig_h = 8.5, 2.5 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h), sharey=False)
     
     # Bar configuration
@@ -130,12 +130,20 @@ def main():
     bar_width = total_width / n_sys
 
     # Plot Subgroups
+    # Zipfian
     plot_subgroup(ax1, zipfian_data, systems, colors, hatches, bar_width, xlabel=r"Skewness ($\theta$)")
+    # Moved title lower and adjusted fontsize
+    ax1.text(0.5, -0.35, "(a) Zipfian distribution", transform=ax1.transAxes, 
+             ha='center', va='top', fontsize=14, weight='bold')
+    
+    # Hotspot
     plot_subgroup(ax2, hotspot_data, systems, colors, hatches, bar_width, xlabel="Hotspot Fraction")
+    ax2.text(0.5, -0.35, "(b) Uniform-hotspot distribution", transform=ax2.transAxes, 
+             ha='center', va='top', fontsize=14, weight='bold')
     
     # Set Y-label for both plots as they have different scales
-    ax1.set_ylabel("Throughput (KTPS)", fontsize=16)
-    ax2.set_ylabel("Throughput (KTPS)", fontsize=16)
+    ax1.set_ylabel("Throughput (KTPS)", fontsize=14)
+    ax2.set_ylabel("Throughput (KTPS)", fontsize=14)
 
     # Common Legend
     # We take handles and labels from one of the axes
@@ -153,9 +161,11 @@ def main():
         columnspacing=1.0
     )
     
+    # Increase bottom margin to make room for the text added below axes
+    plt.subplots_adjust(bottom=0.15, top=0.85, wspace=0.25)
     # Use rect parameter to reserve space for legend at the top
-    # [left, bottom, right, top] in normalized (0, 1) figure coordinates
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    # plt.tight_layout(rect=[0, 0.1, 1, 0.9]) # tight_layout handles texts badly sometimes
+
     
     # Save
     out_path = os.path.join(outdir, outfile)

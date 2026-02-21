@@ -27,23 +27,22 @@ else:
 
 rcParams["font.family"] = "serif"
 rcParams["font.serif"] = ["Arial"]
-rcParams["font.size"] = 8
-rcParams["axes.labelsize"] = 10
-rcParams["xtick.labelsize"] = 8
-rcParams["ytick.labelsize"] = 8
-rcParams["legend.fontsize"] = 8
-
+rcParams['font.size'] = 12
+rcParams['axes.labelsize'] = 14
+rcParams['xtick.labelsize'] = 12
+rcParams['ytick.labelsize'] = 12
+rcParams['legend.fontsize'] = 12
 
 def main() -> None:
 	# Data
-	batch_sizes = [10, 50, 100, 500, 1000, 5000, 10000, 50000, 100000]
-	throughput = [2090.62, 16682.91, 17562.6, 18643.48, 21858.69, 21844.15, 23121.71]
+	batch_sizes = [10, 100, 500, 1000, 5000, 10000, 50000, 100000]
+	throughput = [2090.62, 16682.91, 17793.46, 18822.3, 19505.85, 21858.69, 21844.15, 23121.71]
 
 	# Convert to KTPS for consistency with other plots
 	throughput_k = [val / 1000.0 for val in throughput]
 
 	# Figure setup (slightly smaller than previous plots)
-	fig_w, fig_h = 3.6, 2
+	fig_w, fig_h = 6, 4
 	fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
 
 	ax.plot(

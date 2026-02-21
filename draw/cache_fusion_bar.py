@@ -79,6 +79,10 @@ def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
     # Here we set it from 0 to 6 to cover all data points (max ~5.14)
     ax.set_ylim(0, 5.5)
     
+    # Increase y-ticks density
+    from matplotlib.ticker import MultipleLocator
+    ax.yaxis.set_major_locator(MultipleLocator(1))
+    
     if xlabel:
         ax.set_xlabel(xlabel, fontsize=16)
 
@@ -118,7 +122,7 @@ def main():
     ]
 
     # Figure setup: 1 row, 2 columns, separate Y axis to allow individual zooming
-    fig_w, fig_h = 8, 3
+    fig_w, fig_h = 8.5, 2.5
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h), sharey=False)
     
     # Bar configuration
@@ -128,13 +132,18 @@ def main():
 
     # Plot Subgroups
     plot_subgroup(ax1, zipfian_data, systems, colors, hatches, bar_width, xlabel=r"Skewness ($\theta$)")
+    ax1.text(0.5, -0.35, "(a) Zipfian distribution", transform=ax1.transAxes, 
+             ha='center', va='top', fontsize=14, weight='bold')
+
     plot_subgroup(ax2, hotspot_data, systems, colors, hatches, bar_width, xlabel="Hotspot Fraction")
+    ax2.text(0.5, -0.35, "(b) Uniform-hotspot distribution", transform=ax2.transAxes, 
+             ha='center', va='top', fontsize=14, weight='bold')
     
     # Set Y-label for both plots as they have different scales
     ax1.set_ylabel("Ownership Transfers / Txn", fontsize=14)
     ax2.set_ylabel("Ownership Transfers / Txn", fontsize=14)
-    ax1.yaxis.set_label_coords(-0.08, 0.42)
-    ax2.yaxis.set_label_coords(-0.08, 0.42)
+    ax1.yaxis.set_label_coords(-0.08, 0.40)
+    ax2.yaxis.set_label_coords(-0.10, 0.40)
 
     # Common Legend
     # We take handles and labels from one of the axes
@@ -152,10 +161,8 @@ def main():
         columnspacing=1.0
     )
     
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
-    # Adjust top margin to accommodate the legend
-    # Add wspace to prevent Y-axis overlap
-    plt.subplots_adjust(top=0.88, wspace=0.20)
+    # Increase bottom margin to make room for the text added below axes
+    plt.subplots_adjust(bottom=0.15, top=0.85, wspace=0.25)
     
     # Save
     out_path = os.path.join(outdir, outfile)

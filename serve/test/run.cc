@@ -1842,7 +1842,7 @@ int main(int argc, char *argv[]) {
     
     // for smallbank
     int account_num = 300000; // Number of accounts to load
-    int warehouse_num = 10; // Number of warehouses for tpcc
+    int warehouse_num = 100; // Number of warehouses for tpcc
 
     // btree read parameters
     int read_btree_mode = 0; // 0: read from conn0, 1: read from random conn
@@ -2306,7 +2306,8 @@ int main(int argc, char *argv[]) {
         if(access_pattern == 2) ycsb->set_hotspot_params(hotspot_fraction, hotspot_access_prob);  
         std::cout << "YCSB benchmark initialized." << std::endl;
     } else if (Workload_Type == 2) {
-        tpcc = new TPCC(warehouse_num); // Use the specified number of warehouses
+        tpcc = new TPCC(warehouse_num, access_pattern); // Use the specified number of warehouses
+        if(access_pattern == 2) tpcc->set_hotspot_ratio(hotspot_access_prob); // For TPC-C, we can only set hotspot ratio for warehouses
         std::cout << "TPC-C benchmark initialized with " << warehouse_num << " warehouses." << std::endl;
     }
 

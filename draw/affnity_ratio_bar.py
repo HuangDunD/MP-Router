@@ -74,7 +74,7 @@ def plot_single_group(ax, data, systems, colors, hatches, bar_width, xlabel=None
     ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
     
     # Y-axis scaling
-    ax.set_ylim(5, 25)
+    ax.set_ylim(0, 25)
     ax.yaxis.set_major_locator(ticker.MultipleLocator(5))
     
     if xlabel:

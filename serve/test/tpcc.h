@@ -42,12 +42,13 @@ enum class TPCCTableType : uint64_t {
 
 class TPCC {
 public:
-    TPCC(int num_warehouses);
+    TPCC(int num_warehouses, int access_pattern_type);
 
     void create_table(pqxx::connection *conn);
     void load_data();
     void create_tpcc_stored_procedures(pqxx::connection *conn);
     void generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool);
+    void set_hotspot_ratio(double ratio) { hotspot_ratio = ratio; }
     
     // Helper to get table IDs involved in a transaction type
     std::vector<table_id_t> get_table_ids_by_txn_type(int txn_type, int key_size);
@@ -105,14 +106,16 @@ public:
 
 private:
     int num_warehouses_;
-    
+    int access_pattern; // 0: uniform, 1: zipfian, 2: hotspot
+    double hotspot_ratio; // For hotspot access pattern, the ratio of accesses to hotspot warehouses
+
     // Helper functions for data loading
-    void load_item(pqxx::nontransaction &txn, int start_id, int end_id);
-    void load_warehouse(pqxx::nontransaction &txn, int w_id);
-    void load_stock(pqxx::nontransaction &txn, int w_id);
-    void load_district(pqxx::nontransaction &txn, int w_id);
-    void load_customer(pqxx::nontransaction &txn, int w_id, int d_id);
-    void load_orders(pqxx::nontransaction &txn, int w_id, int d_id);
+    void load_item(pqxx::transaction_base &txn, int start_id, int end_id);
+    void load_warehouse(pqxx::transaction_base &txn, int w_id);
+    void load_stock(pqxx::transaction_base &txn, int w_id);
+    void load_district(pqxx::transaction_base &txn, int w_id);
+    void load_customer(pqxx::transaction_base &txn, int w_id, int d_id);
+    void load_orders(pqxx::transaction_base &txn, int w_id, int d_id);
 
     // Helper functions for transaction generation
     int generate_txn_type();
