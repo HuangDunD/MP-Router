@@ -4,7 +4,9 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
-                "/home/hcy/local/include"
+                "/home/hcy/local/include",
+                "/root/yashandb-client/include",
+                "/root/local/include"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",

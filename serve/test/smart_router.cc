@@ -578,7 +578,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                 }
                 else if (SYSTEM_MODE == 13){ 
                     // 考虑Ownership, Metis 分区和Load Balance
-                    total_benefit = benefit1 + benefit2 + benefit3;
+                    total_benefit = benefit1 + benefit3;
                 }
                 else {
                     assert(false);
@@ -605,6 +605,13 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
             }
             if (best_node != -1) {
                 result.smart_router_id = best_node;
+            }
+
+            // update now the ownership table
+            if(table_ids.size() != txn->accessed_page_ids.size()) assert(false);
+            for (int i=0; i<keys.size(); i++) {
+                ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i],
+                                        txn->accessed_page_ids[i], result.smart_router_id);
             }
             #if LOG_METIS_OWNERSHIP_DECISION
             if (WarmupEnd) {
@@ -2005,7 +2012,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
 // 从而可以降低worker端等待事务调度完成的结果，pipeline效率更高。
 void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch) {
     
-    assert(SYSTEM_MODE == 11); // 仅支持模式11
+    assert(SYSTEM_MODE == 11 || SYSTEM_MODE == 26 || SYSTEM_MODE == 27); // 仅支持模式11
     
     if (WarmupEnd)
         logger->info("[SmartRouter Scheduling] Start scheduling for txn batch of size " + std::to_string(txn_batch->size()));
@@ -2434,13 +2441,27 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     for (size_t t = 0; t < conflict_free_thread_count; ++t) {
         size_t start = t * chunk;
         size_t end = std::min(n, start + chunk);
-        futs.push_back(threadpool.enqueue([this, &txn_batch, &txid_to_txn_map, start, end, t, &total_load_balance_penalty_weights, 
+        futs.push_back(threadpool.enqueue([this, &txn_batch, &txid_to_txn_map, start, end, t, total_load_balance_penalty_weights, 
                 conflicted_txns, &page_ownership_to_node_map, &candidate_txn_cnt, &ownership_ok_txn_cnt_per_node, &page_to_txn_range_map, 
                 &unconflict_and_ownership_ok_txn_cnt, &unconflict_and_ownership_cross_txn_cnt, &unconflict_and_shared_txn_cnt, 
                 &schedule_txn_cnt_per_node_this_batch, &expected_page_transfer_count_per_node]() {
             
+            // Local copy of weights to update periodically
+            std::vector<double> current_weights = total_load_balance_penalty_weights;
+            
             std::vector<std::list<TxnQueueEntry*>> node_routed_txns(ComputeNodeCount);
             for (size_t idx = start; idx < end; ++idx) {
+                // Periodically update weights based on current batch progress
+                // if ((idx - start) % 50 == 0) {
+                //     for(int i=0; i<ComputeNodeCount; i++) {
+                //         std::vector<double> compute_node_workload_benefit = this->workload_balance_penalty_weights_; // 负载均衡因子
+                //         std::vector<double> remain_queue_balance_penalty_weights = this->remain_queue_balance_penalty_weights_; // 剩余队列负载均衡因子
+                //         for(int i=0; i<ComputeNodeCount; i++) {
+                //             current_weights[i] = compute_node_workload_benefit[i] + remain_queue_balance_penalty_weights[i];
+                //         }
+                //     }
+                // }
+
                 tx_id_t tx_id = txn_batch->at(idx)->tx_id;
                 
                 // ! Phase A: Only process Non-Conflicting transactions
@@ -2470,8 +2491,8 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                         node_id_t best_node = -1;
                         int max_compute_node_workload_benefit = -1;
                         for(const auto& node_id : candidate_ownership_nodes) {
-                            if(total_load_balance_penalty_weights[node_id] > max_compute_node_workload_benefit) {
-                                max_compute_node_workload_benefit = total_load_balance_penalty_weights[node_id];
+                            if(current_weights[node_id] > max_compute_node_workload_benefit) {
+                                max_compute_node_workload_benefit = current_weights[node_id];
                                 best_node = node_id;
                             }
                         }
@@ -2509,7 +2530,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 } else {
                     // 记录为候选事务
                     // 使用历史负载均衡信息直接快速计算
-                    compute_benefit_for_node(sc, sc->ownership_node_count, total_load_balance_penalty_weights, 0.0 , 1.0, 1.0);
+                    compute_benefit_for_node(sc, sc->ownership_node_count, current_weights, 0.0 , 1.0, 1.0);
                     assert(sc->node_benefit_map.size() == ComputeNodeCount);
                     // 如果该事务没有冲突，可以直接调度
                     // 选择benefit最高的节点作为will_route_node
@@ -2717,6 +2738,12 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
         for(int i=0; i<ComputeNodeCount; i++){
             logger->info("Node " + std::to_string(i) + 
                             " expected page transfer count: " + std::to_string(expected_page_transfer_count_per_node[i].load()));
+        }
+        // print the txn queue size 
+        for(int i=0; i<ComputeNodeCount; i++){
+            int queue_size = txn_queues_[i]->size();
+            logger->info("Node " + std::to_string(i) + 
+                            " txn queue size: " + std::to_string(queue_size));
         }
     #if LOG_KROUTER_SCHEDULING_DEBUG
         // print txn_conflict_map
@@ -3332,37 +3359,39 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 // ! IMPORTANT !!!
                 // ! 生成group作为障碍, 并且关联后续事务与对应的屏障（注入依赖）
                 // 1.5.1. Create Group for Prior Txns (Victims) and Update Fences
-                assert(next_time_schedule_txn.size() > 0);
-                if(!schedule_txn_prior.empty()) {
-                    // 只要有转移页面，就可能有需要等待的事务。
-                    // 遍历所有导致需要等待的页面（即本次转移的页面）
-                    for(auto [transfer_page, _] : transfer_pages) {
-                        // 找出涉及该页面的 prior 事务
-                        // ! Optimized: Use pre-built map
-                        if (!transfer_page_to_prior_txns.count(transfer_page)) continue;
-                        
-                        auto& involved_prior_txns = transfer_page_to_prior_txns[transfer_page];
-
-                        if(!involved_prior_txns.empty()) {
-                            // 为该页面创建一个独立的 DependencyGroup
-                            std::shared_ptr<DependencyGroup> page_group = std::make_shared<DependencyGroup>();
-                            page_group->group_id = rand(); // 或使用 atomic counter
-                            page_group->unfinish_txn_count = static_cast<int>(involved_prior_txns.size());
-
-                            // 将 group 注册到这些 prior 事务的通知列表中
-                            for(auto prior_txn_sc : involved_prior_txns) {
-                                prior_txn_sc->txn->notification_groups.push_back(page_group);
-                            }
-
-                            // 更新该页面的 fence，指向这个新的 group
-                            page_fences[transfer_page] = page_group;
+                if(SYSTEM_MODE != 26){
+                    assert(next_time_schedule_txn.size() > 0);
+                    if(!schedule_txn_prior.empty()) {
+                        // 只要有转移页面，就可能有需要等待的事务。
+                        // 遍历所有导致需要等待的页面（即本次转移的页面）
+                        for(auto [transfer_page, _] : transfer_pages) {
+                            // 找出涉及该页面的 prior 事务
+                            // ! Optimized: Use pre-built map
+                            if (!transfer_page_to_prior_txns.count(transfer_page)) continue;
                             
-                            #if LOG_DEPENDENCY
-                            if(t==0)
-                            logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
-                                            " fence updated to group " + std::to_string(page_group->group_id) + 
-                                            " count: " + std::to_string(involved_prior_txns.size()));
-                            #endif
+                            auto& involved_prior_txns = transfer_page_to_prior_txns[transfer_page];
+
+                            if(!involved_prior_txns.empty()) {
+                                // 为该页面创建一个独立的 DependencyGroup
+                                std::shared_ptr<DependencyGroup> page_group = std::make_shared<DependencyGroup>();
+                                page_group->group_id = rand(); // 或使用 atomic counter
+                                page_group->unfinish_txn_count = static_cast<int>(involved_prior_txns.size());
+
+                                // 将 group 注册到这些 prior 事务的通知列表中
+                                for(auto prior_txn_sc : involved_prior_txns) {
+                                    prior_txn_sc->txn->notification_groups.push_back(page_group);
+                                }
+
+                                // 更新该页面的 fence，指向这个新的 group
+                                page_fences[transfer_page] = page_group;
+                                
+                                #if LOG_DEPENDENCY
+                                if(t==0)
+                                logger->info("[SmartRouter Scheduling] Page " + std::to_string(transfer_page) + 
+                                                " fence updated to group " + std::to_string(page_group->group_id) + 
+                                                " count: " + std::to_string(involved_prior_txns.size()));
+                                #endif
+                            }
                         }
                     }
                 }
@@ -3439,7 +3468,11 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
                     if(dag_ready_txn[node_id].empty() ) continue;
                     size_t cnt = dag_ready_txn[node_id].size(); // Capture size before move
-                    txn_queues_[node_id]->push_txn_dag_ready(std::move(dag_ready_txn[node_id]), 1); // 放到最前面执行
+                    if(SYSTEM_MODE != 27) {
+                        txn_queues_[node_id]->push_txn_dag_ready(std::move(dag_ready_txn[node_id]), 1); // 放到最前面执行
+                    } else {
+                        txn_queues_[node_id]->push_txn_back_batch(std::move(dag_ready_txn[node_id])); 
+                    }
                     scheduled_front_txn_cnt += cnt;
                     local_scheduled_front_txn_cnt[t] += cnt; 
                     assert(dag_ready_txn[node_id].empty());
@@ -3763,7 +3796,11 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                             ", count: " + std::to_string(cnt) + 
                             ", at this time txn queue size: " + this->get_txn_queue_now_status());
         #endif 
-            txn_queues_[node_id]->push_txn_dag_ready(std::move(to_schedule[node_id]), 3);
+            if(SYSTEM_MODE != 27){
+                txn_queues_[node_id]->push_txn_dag_ready(std::move(to_schedule[node_id]), 3);
+            } else {
+                txn_queues_[node_id]->push_txn_back_batch(std::move(to_schedule[node_id])); 
+            }
         }
     }
 
@@ -3803,7 +3840,11 @@ void SmartRouter::schedule_ready_txn(std::vector<TxnQueueEntry*> entries, int fi
     //                 }()));
     for (size_t node_id = 0; node_id < to_schedule.size(); ++node_id) {
         if (!to_schedule[node_id].empty()) {
-            txn_queues_[node_id]->push_txn_dag_ready(std::move(to_schedule[node_id]), 2);
+            if(SYSTEM_MODE != 27) {
+                txn_queues_[node_id]->push_txn_dag_ready(std::move(to_schedule[node_id]), 2);
+            } else {
+                txn_queues_[node_id]->push_txn_back_batch(std::move(to_schedule[node_id]));
+            }
         }
     }
 }

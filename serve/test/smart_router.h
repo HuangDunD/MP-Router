@@ -327,7 +327,7 @@ public:
             });
             router_thread.detach();
         }
-        else if (SYSTEM_MODE == 11) {
+        else if (SYSTEM_MODE == 11 || SYSTEM_MODE == 26 || SYSTEM_MODE == 27) {
             router_worker_threads_ = 1; // SYSTEM_MODE 11 只启动一个路由线程
             // SYSTEM_MODE 11 的 SmartRouter 线程启动逻辑（如果有不同的话）
             std::thread router_thread([this]() {
@@ -1263,7 +1263,7 @@ public:
     }
 
     void run_router_batch_worker_pipeline() {
-        assert(SYSTEM_MODE == 11);         
+        assert(SYSTEM_MODE == 11 || SYSTEM_MODE == 26 || SYSTEM_MODE == 27);         
 
         // wait for router start work
         std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
@@ -1300,7 +1300,7 @@ public:
             // 计时
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-            if(SYSTEM_MODE == 11) {
+            if(SYSTEM_MODE == 11 || SYSTEM_MODE == 26 || SYSTEM_MODE == 27) {
                 // this->get_route_primary_batch_schedule_v2(txn_batch);
                 this->get_route_primary_batch_schedule_v3(txn_batch);
             }
