@@ -43,20 +43,25 @@ def main():
     # Systems to compare
     systems = [
         "MP-Router", 
-        "w/o Scheduling" 
+        "w/o barrier",
+        "w/o critical-path",
+        "w/o scheduling" 
     ]
     
     # Colors
-    colors = ["#e47474", "#e0e474dc"] 
+    colors = ["#e47474", "#74a8e4c2", "#74e4bfce", "#e4e474"]
     # Hatches
-    hatches = ['....', '////']
+    hatches = ['....', '////', 'xxxx', '----']
 
     # Data from ablation.py attachment
-    # Format: (Skewness, [MP-Router, w/o Batch])
+    # Format: (Skewness, [MP-Router, w/o Scheduling])
+    # 19333.63	18128.2
+    # 16090.22	15202.88
+    # 7346.82	10850.71
     data = [
-        ("0.8",   [21108.93, 20048.45]),
-        ("0.9",   [17183.29, 14458.48]),
-        ("0.95",  [14183.9, 7824.58]),
+        ("0.8",   [21108.93, 19333.63, 18128.2, 18930.5]),
+        ("0.9",   [17183.29, 16090.22, 15202.88, 12773.06]),
+        ("0.95",  [14183.9, 7346.82, 10850.71, 6688.58]),
     ]
     
     # Figure setup: Slimmer single plot
@@ -110,7 +115,7 @@ def main():
     # Legend
     ax.legend(
         loc='upper center', 
-        bbox_to_anchor=(0.4, 1.15),  # Lowered from 1.25 to 1.15
+        bbox_to_anchor=(0.4, 1.30),
         prop={'weight': 'bold', 'size': 8}, 
         handlelength=1.5, 
         handleheight=1.2,
@@ -120,7 +125,7 @@ def main():
     )
     
     # Adjust layout to make room for legend
-    plt.tight_layout(rect=[0, 0, 1, 0.9]) # Increased top from 0.75 to 0.9
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
     
     # Save
     out_path = os.path.join(outdir, outfile)

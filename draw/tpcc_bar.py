@@ -66,7 +66,7 @@ def main():
     raw_data_map = [
         ("Normal", [1167.04, 1300.29, 915.01, 1078.9, 5588.79]),
         ("50%",    [1354.9,  1330.77, 1289.93, 1320.62, 5909.92]),
-        ("80%",    [1317.72, 1281.79, 1270.28, 1239.66, 4704.8]),
+        ("80%",    [1317.72, 1281.79, 1270.28, 1239.66, 5165.38]),
         ("90%",    [1247.59, 1193.56, 1294.28, 1202.52, 6172.2]),
     ]
 
@@ -89,7 +89,7 @@ def main():
 
     # Figure setup
     # Single plot size (approx half of the 2-subplot figure width)
-    fig_w, fig_h = 4, 3
+    fig_w, fig_h = 6.5, 5.5
     fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
     
     # Bar configuration

@@ -81,7 +81,7 @@ def main():
             ("Wait", w / total * 100, "#d3d3d3", ""),
             ("Fetch Txn", f / total * 100, "#85c0e9", ""), 
             ("Preprocess", p / total * 100, "#4a90e2", "...."),
-            ("Sched. (No-Confl.)", scf / total * 100, "#ffb347", ""),
+            ("Sched. (Confl.-Free)", scf / total * 100, "#ffb347", ""),
             ("Sched. (Confl.)", sc / total * 100, "#e47474", "////")
         ]
     
@@ -140,7 +140,7 @@ def main():
     ax.grid(axis='x', linestyle='--', alpha=0.5, zorder=0)
     
     # Custom Legend
-    legend_keys = ["Wait", "Fetch Txn", "Preprocess", "Sched. (No-Confl.)", "Sched. (Confl.)", "Execute Txn", "Update Key-Page"]
+    legend_keys = ["Wait", "Fetch Txn", "Preprocess", "Sched. (Confl.-Free)", "Sched. (Confl.)", "Execute Txn"]
     handles = [legend_elements[k] for k in legend_keys]
     
     # Move legend higher up to avoid overlap
@@ -149,11 +149,11 @@ def main():
         legend_keys,
         loc='upper center', 
         bbox_to_anchor=(0.44, 1.35), # Moved up from 1.25
-        prop={'size': 9}, 
+        prop={'size': 10}, 
         handlelength=1.5, 
         handleheight=1.2,
         frameon=False,
-        ncol=4,
+        ncol=3,
         columnspacing=1.0
     )
     

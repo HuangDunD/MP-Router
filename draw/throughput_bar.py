@@ -81,6 +81,10 @@ def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
     bottom_val = int(5)
     ax.set_ylim(bottom=bottom_val)
     
+    # Set tick spacing to 5
+    from matplotlib.ticker import MultipleLocator
+    ax.yaxis.set_major_locator(MultipleLocator(5))
+    
     if xlabel:
         ax.set_xlabel(xlabel, fontsize=16)
 
@@ -113,7 +117,7 @@ def main():
     ]
     
     hotspot_data = [
-        ("100%",   [14411.01, 16357.22, 20074.59, 19134.37, 26707.86]),
+        ("100%",   [14411.01, 16357.22, 20074.59, 19134.37, 29414.35]),
         ("10%",    [14743.19, 14150.31, 18504.18, 17196.27, 26156.22]),
         ("1%",     [10308.37, 10461.43, 12545.3,  10876.99, 17248.04]),
         ("0.1%",   [8510.3,   7899.38,  9208.47,  8608.64,  12055.23])

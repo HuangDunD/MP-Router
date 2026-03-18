@@ -56,7 +56,7 @@ def main() -> None:
 	)
 
 	ax.set_xscale("log")
-	ax.set_xlabel("Batch Size")
+	ax.set_xlabel("Txn Window Size")
 	ax.set_ylabel("Throughput (KTPS)")
 	ax.grid(axis="both", linestyle="--", alpha=0.5, zorder=0)
 
