@@ -662,7 +662,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             exe_count++;
-            if(!WarmupEnd && (SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 11 
+            if(!WarmupEnd && (SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 11 || SYSTEM_MODE == 13
                 || SYSTEM_MODE == 26 || SYSTEM_MODE == 27) && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
                 WarmupEnd = true;
                 std::cout << "Warmup Ended for Mode 0, exe_count: " << exe_count << std::endl;
