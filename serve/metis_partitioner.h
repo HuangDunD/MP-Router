@@ -33,7 +33,7 @@
 #include <metis.h>
 
 // Enable automatic partitioning via preprocessor directive
-#define ENABLE_AUTO_PARTITION
+// #define ENABLE_AUTO_PARTITION
 
 class NewMetis {
 public:

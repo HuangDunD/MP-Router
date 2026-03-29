@@ -907,6 +907,16 @@ public:
         pool_cv_.notify_all();
     }
 
+    void clear() {
+        std::unique_lock<std::mutex> lock(pool_mutex_);
+        for(auto entry : txn_pool_) {
+            delete entry;
+        }
+        txn_pool_.clear();
+        current_pool_size_ = 0;
+        pool_cv_.notify_all();
+    }
+
     int size() {
         return current_pool_size_.load();
     }
@@ -949,7 +959,14 @@ public:
     void stop_pool() {
         stop_ = true;
         for(int i = 0; i < num_sub_pool_; i++){
+            // 唤醒所有阻塞在 fetch_batch_txns_from_pool 的线程
             pools[i]->stop_pool();
+        }
+    }
+
+    void clear() {
+        for(int i = 0; i < num_sub_pool_; i++){
+            pools[i]->clear();
         }
     }
 

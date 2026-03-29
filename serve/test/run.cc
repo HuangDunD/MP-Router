@@ -1345,14 +1345,15 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
     // for dynamic workload
     auto start_experiment_time = steady_clock::now(); // dynamic workload start time
     int current_phase = 0;
-    int phase1_end_time = 3 * 60;
-    int phase2_end_time = 8 * 60;
-    int phase3_end_time = 13 * 60;
-    int phase4_end_time = 18 * 60;
+    int phase1_end_time = 5 * 60;
+    int phase2_end_time = 10 * 60;
+    int phase3_end_time = 15 * 60;
+    int phase4_end_time = 20 * 60;
+    int phase5_end_time = 25 * 60;
 
     // for dynamic workload end
     while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::this_thread::sleep_for(std::chrono::seconds(5)); // Print every 5 seconds
         auto now = steady_clock::now();
 
         if (dynamic_workload) {
@@ -1360,36 +1361,49 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
             
             // Phase transitions
             if (current_phase == 0 && elapsed_seconds > phase1_end_time) {
-                // T=3m. Start recording stats.
-                std::cout << "\033[33m[Dynamic Workload] Warmup ended at 3m. Starting Stats Collection.\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Warmup ended at 3m. Starting Stats Collection.");
+                // T=5m. Start recording stats.
+                std::cout << "\033[33m[Dynamic Workload] Warmup ended at 5m. Triggering Metis Partition. \033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Warmup ended at 5m. Triggering Metis Partition.");
                 WarmupEnd = true; // Set warmup end
-                current_phase = 1;
-            }
-            else if (current_phase == 1 && elapsed_seconds > phase2_end_time) {
-                // T=8m. Metis Partition.
-                std::cout << "\033[33m[Dynamic Workload] Triggering Metis Partition at 8m...\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Triggering Metis Partition at 8m...");
                 if (smart_router) {
                     thread_pool->enqueue([smart_router]{
                         smart_router->get_metis_partitioner()->partition_internal_graph("dynamic_partition.csv", ComputeNodeCount);
                     });
                 }
+                current_phase = 1;
+            }
+            else if (current_phase == 1 && elapsed_seconds > phase2_end_time) {
+                // T=10m. Change Affinity to 0.2
+                std::cout << "\033[33m[Dynamic Workload] Changing AffinityTxnRatio to 0.2 at 10m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Changing AffinityTxnRatio to 0.2 at 10m...");
+                AffinityTxnRatio = 0.2;
                 current_phase = 2;
+                txn_pool->clear();
             }
             else if (current_phase == 2 && elapsed_seconds > phase3_end_time) {
-                // T=13m. Change Friend Graph. the Graph has been created in advance, this step only switch the graph used.
-                std::cout << "\033[33m[Dynamic Workload] Changing User Friend Graph at 13m...\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Changing User Friend Graph at 13m...");
+                // T=15m. Change Friend Graph.
+                std::cout << "\033[33m[Dynamic Workload] Changing User Friend Graph at 15m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Changing User Friend Graph at 15m...");
                 change_friend = true;
+                AffinityTxnRatio = 0.8; // Change back to 0.8 to see the effect of friend graph change more clearly
                 current_phase = 3;
+                txn_pool->clear();
             }
             else if (current_phase == 3 && elapsed_seconds > phase4_end_time) {
-                // T=18m. Stop.
-                std::cout << "\033[31m[Dynamic Workload] Stopping benchmark at 18m...\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Stopping benchmark at 18m...");
+                // T=20m. Change Skewness to Zipfian with theta=0.95
+                std::cout << "\033[33m[Dynamic Workload] Changing access pattern to Zipfian (theta=0.95) at 20m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Changing access pattern to Zipfian (theta=0.95) at 20m...");
+                if(smallbank) smallbank->set_zipfian_theta(0.95);
+                current_phase = 4;
+                txn_pool->clear();
+            }
+            else if (current_phase == 4 && elapsed_seconds > phase5_end_time) {
+                // T=25m. Stop.
+                std::cout << "\033[31m[Dynamic Workload] Stopping benchmark at 25m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Stopping benchmark at 25m...");
                 stop_benchmark = true;
-                current_phase = 4; // Done
+                current_phase = 5; // Done
+                txn_pool->stop_pool(); // Signal txn pool to stop accepting new transactions
                 break; 
             }
         }
@@ -2714,7 +2728,7 @@ int main(int argc, char *argv[]) {
     std::thread tps_thread(print_tps_loop, smart_router, txn_pool, logger_, smallbank, &smart_router->get_threadpool());
     tps_thread.detach(); // Detach the thread to run independently
 
-    while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.0) {
+    while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.0 && !dynamic_workload) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     std::cout << "\033[31m Warmup rounds completed. Create the smart router snapshot. \033[0m" << std::endl;

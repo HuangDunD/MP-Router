@@ -2,7 +2,7 @@
 
 int SYSTEM_MODE = 0;
 // ! pay attention: need modify this when use different database
-int DB_TYPE = 0; // 0: PostgreSQL, 1: YashanDB
+int DB_TYPE = 1; // 0: PostgreSQL, 1: YashanDB
 std::vector<std::string> DBConnection;
 std::vector<YashanConnInfo> YashanDBConnections;
 int worker_threads = 16; 
