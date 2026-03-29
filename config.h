@@ -38,7 +38,7 @@ extern int DB_TYPE;
 #define LOG_METIS_OWNERSHIP_DECISION 0 // 0: no log 1: log
 #define WORKLOAD_AFFINITY_MODE 1 // 0: key affinity 1: city-key affinity
 #define SYS_8_DECISION_TYPE_COUNT 19 // for SYSTEM_MODE 8, 17 types of ownership changes
-#define MLP_PREDICTION 1 // 0: no mlp prediction, just use key-value, 1: use mlp prediction
+#define MLP_PREDICTION 0 // 0: no mlp prediction, just use key-value, 1: use mlp prediction
 #define LOG_BATCH_ROUTER 0 // 0: no log 1: log
 #define LOG_DEPENDENCY 0 // 0: no log 1: log
 #define LOG_QUEUE_STATUS 0 // 0: no log 1: log
