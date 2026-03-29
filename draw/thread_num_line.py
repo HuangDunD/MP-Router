@@ -83,9 +83,9 @@ def main():
     colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#e47474"]
     
     # Markers for line chart distinction
-    markers = ['o', 's', '^', 'D', '*']
+    markers = ['o', 's', '^', 'p', 'D'] # Circle, Square, Triangle Up, Diamond, Plus (Pentagon)
     linestyles = ['--', '--', '--', '--', '-'] # MP-Router solid, others dashed
-    linewidths = [2, 2, 2, 2, 2.5] # Make MP-Router slightly thicker
+    linewidths = [3, 3, 3, 3, 3.5] # Make MP-Router slightly thicker
 
     # Figure setup
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -111,8 +111,8 @@ def main():
     ax.set_xticks(x)
     ax.set_xticklabels([str(tc) for tc in thread_counts])
     
-    ax.set_xlabel("Number of Connections", fontsize=14)
-    ax.set_ylabel("Throughput (KTPS)", fontsize=14)
+    ax.set_xlabel("Number of Connections", fontsize=20)
+    ax.set_ylabel("Throughput (KTPS)", fontsize=20)
     
     ax.grid(axis='y', linestyle='--', alpha=0.5)
     ax.grid(axis='x', linestyle='--', alpha=0.3)

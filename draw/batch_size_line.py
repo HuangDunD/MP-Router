@@ -50,14 +50,14 @@ def main() -> None:
 		throughput_k,
 		color="#215aecc1",
 		marker="s",
-		markersize=4,
-		linewidth=1.8,
+		markersize=8,
+		linewidth=3,
 		# zorder=3,
 	)
 
 	ax.set_xscale("log")
-	ax.set_xlabel("Txn Window Size")
-	ax.set_ylabel("Throughput (KTPS)")
+	ax.set_xlabel("Txn Window Size", fontsize=20)
+	ax.set_ylabel("Throughput (KTPS)", fontsize=20)
 	ax.grid(axis="both", linestyle="--", alpha=0.5, zorder=0)
 
 	# Keep tight margins

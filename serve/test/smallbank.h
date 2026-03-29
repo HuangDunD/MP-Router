@@ -300,6 +300,8 @@ public:
             pqxx::work txn(*conn0);
             txn.exec("CREATE unlogged TABLE checking (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
             txn.exec("CREATE unlogged TABLE savings (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
+            // txn.exec("CREATE TABLE checking (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
+            // txn.exec("CREATE TABLE savings (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
             // create index
             txn.exec("CREATE INDEX idx_checking_id ON checking (id)");
             txn.exec("CREATE INDEX idx_savings_id ON savings (id)");

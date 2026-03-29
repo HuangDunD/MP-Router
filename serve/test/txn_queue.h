@@ -261,8 +261,11 @@ public:
         return ids;
     }
 
-    int get_pending_txn_cnt_on_node(int node_id){
-        std::unique_lock<std::mutex> lock(pending_mutex_);
+    int get_pending_txn_cnt_on_node(int node_id, bool mutex = true) {
+        if (mutex) {
+            std::unique_lock<std::mutex> lock(pending_mutex_);
+            return pending_txn_cnt_per_node_[node_id];
+        }
         return pending_txn_cnt_per_node_[node_id];
     }
 
@@ -388,6 +391,10 @@ public:
         }
     ~TxnQueue() = default;
     
+    void set_batch_cv(std::condition_variable* batch_cv) {
+        batch_cv_ = batch_cv;
+    }
+
     std::list<TxnQueueEntry*> pop_txn(int* ret_call_id = nullptr, int* ret_type = nullptr) {
         int call_id = rand();
         if(ret_call_id != nullptr) *ret_call_id = call_id;
@@ -567,8 +574,13 @@ public:
                                 " from txn queue of compute node " + std::to_string(node_id_) +
                                 ", current queue size: " + std::to_string(current_queue_size_) + 
                                 ", schedule_txn_cnt: " + std::to_string(schedule_txn_cnt) +
-                                ", schedule_txn_vec_cnt: " + std::to_string(schedule_txn_vec_cnt));
+                                ", schedule_txn_vec_cnt: " + std::to_string(schedule_txn_vec_cnt) + 
+                                ", pending_txn_cnt_on_node: " + std::to_string(pending_txn_queue_->get_pending_txn_cnt_on_node(node_id_, false)));
+
             #endif
+                if(current_queue_size_ == 0) {
+                    batch_cv_->notify_all(); // 可能有等待整个批次完成的线程
+                }
                 return std::move(batch_entries);
             }
         } else {
@@ -589,13 +601,17 @@ public:
                             ", schedule_txn_cnt: " + std::to_string(schedule_txn_cnt) +
                             ", schedule_txn_vec_cnt: " + std::to_string(schedule_txn_vec_cnt) +
                             ", regular_txn_cnt: " + std::to_string(regular_txn_cnt) +
-                            ", regular_txn_vec_cnt: " + std::to_string(regular_txn_vec_cnt));
+                            ", regular_txn_vec_cnt: " + std::to_string(regular_txn_vec_cnt) + 
+                            ", pending_txn_cnt_on_node: " + std::to_string(pending_txn_queue_->get_pending_txn_cnt_on_node(node_id_, false)));
         #endif
         }
 
         // 通知可能阻塞的生产者线程或消费者线程
         if(current_queue_size_ <= max_queue_size_ * 0.8 || !txn_queue_.empty() || !dag_txn_queue_->empty()) {
             queue_cv_.notify_all();
+        }
+        if(current_queue_size_ == 0) {
+            batch_cv_->notify_all(); // 可能有等待整个批次完成的线程
         }
         lock.unlock(); // !释放锁
         // add dependency check here, 这里只建议依赖吧, 先统计输出一下, 感觉改成类似确定性的思路不好做
@@ -646,7 +662,8 @@ public:
                         ", schedule_txn_cnt: " + std::to_string(schedule_txn_cnt) +
                         ", schedule_txn_vec_cnt: " + std::to_string(schedule_txn_vec_cnt) +
                         ", regular_txn_cnt: " + std::to_string(regular_txn_cnt) +
-                        ", regular_txn_vec_cnt: " + std::to_string(regular_txn_vec_cnt));
+                        ", regular_txn_vec_cnt: " + std::to_string(regular_txn_vec_cnt) + 
+                        ", pending_txn_cnt_on_node: " + std::to_string(pending_txn_queue_->get_pending_txn_cnt_on_node(node_id_, false)));
     #endif
         if(finished_) queue_cv_.notify_all();
         else queue_cv_.notify_one();
@@ -830,6 +847,7 @@ private:
     std::deque<std::list<TxnQueueEntry*>> txn_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
+    std::condition_variable* batch_cv_;
 
     SharedTxnQueue* shared_txn_queue_;
     DAGTxnQueue* dag_txn_queue_;

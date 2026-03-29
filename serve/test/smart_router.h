@@ -260,6 +260,7 @@ public:
         metis_->set_thread_pool(&threadpool);
         metis_->init_node_nums(cfg.partition_nums);
         ownership_table_ = new OwnershipTable(logger);
+        for(auto q: txn_queues_) q->set_batch_cv(&batch_cv);
         time_stats_.fetch_txn_from_pool_ms_per_thread.resize(worker_threads_, 0.0);
         time_stats_.schedule_decision_ms_per_thread.resize(worker_threads_, 0.0);
         time_stats_.push_txn_to_queue_ms_per_thread.resize(worker_threads_, 0.0);
@@ -401,7 +402,7 @@ public:
 #if MLP_PREDICTION
     // 仅在初始化结束后调用：对所有表的样本进行一次性训练
     // epochs: 训练轮数; lr: 学习率; log_every: 日志间隔（轮）
-    void mlp_train_after_init(int epochs = 50, double lr = 1, int log_every = 1) {
+    void mlp_train_after_init(int epochs = 50, double lr = 0.05, int log_every = 1) {
         std::vector<table_id_t> tables;
         {
             std::lock_guard<std::mutex> g(mlp_models_mtx_);
@@ -434,12 +435,19 @@ public:
                 }
                 std::cout << "[MLP] table " << t << " training: samples=" << sz
                           << ", epochs=" << epochs << ", lr=" << lr << std::endl;
+                
+                std::vector<int> indices(sz);
+                for (int i = 0; i < sz; ++i) indices[i] = i;
+                std::mt19937 rng(42 + t); // Deterministic but different per table
+
                 for (int e = 0; e < epochs; ++e) {
+                    std::shuffle(indices.begin(), indices.end(), rng);
                     {
                         std::lock_guard<std::mutex> lk(model.mtx);
                         for (int i = 0; i < sz; ++i) {
-                            double xn = mlp_norm_(model.inputs[i], in_min, in_max);
-                            double yn = mlp_norm_(model.outputs[i], out_min, out_max);
+                            int idx = indices[i];
+                            double xn = mlp_norm_(model.inputs[idx], in_min, in_max);
+                            double yn = mlp_norm_(model.outputs[idx], out_min, out_max);
                             model.net.train({xn}, {yn}, lr);
                         }
                     }
@@ -1585,6 +1593,12 @@ private:
             // hot hash 命中
             entry.page = pred.value();
         }
+    #if LOG_PREDICTION_RESULT
+        logger->info("MLP Prediction for (table_id=" + std::to_string(table_id) + ", key=" + std::to_string(key) + 
+                    "): predicted page " + std::to_string(entry.page) + 
+                    (pred.has_value() ? " [HIT]" : " [MISS]"));
+    #endif
+        txn->accessed_page_ids.push_back(entry.page); // 添加这一行记录预测的page id以对齐table_ids
         return entry;
     #endif
     }
@@ -1855,6 +1869,10 @@ private:
         double out_min = std::numeric_limits<double>::max();
         double out_max = std::numeric_limits<double>::lowest();
         std::mutex mtx; // protect data and min/max
+
+        PerTableMLP() {
+            net.setActivationOutput(mlp::actLinear);
+        }
     };
     
     static inline double mlp_norm_(double x, double lo, double hi) {

@@ -2346,6 +2346,14 @@ int main(int argc, char *argv[]) {
         DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
         DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
 
+        // ali 双机
+        // DBConnection.push_back("host=172.16.0.39 port=44321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=172.16.0.40 port=44321 user=system password=123456 dbname=smallbank");
+
+        // ali 双机
+        // DBConnection.push_back("host=10.10.2.28 port=54321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.28 port=54321 user=system password=123456 dbname=smallbank");
+
         // kes 单机
         // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
         // DBConnection.push_back("host=10.10.2.41 port=64321 user=system password=123456 dbname=smallbank");
