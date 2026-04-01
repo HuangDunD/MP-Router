@@ -2007,6 +2007,245 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
     return ;
 }
 
+void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch) {
+    assert(SYSTEM_MODE == 28); // chimera模式
+    
+    if (WarmupEnd) {
+        logger->info("[SmartRouter Scheduling] Start chimera scheduling for txn batch of size " + std::to_string(txn_batch->size()));
+    }
+
+    struct timespec start_time, end_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    size_t n = txn_batch->size();
+    
+    forbid_update_hot_entry();
+    
+    // 用于保存 Phase 2 的跨分区事务
+    std::vector<std::pair<TxnQueueEntry*, std::vector<uint64_t>>> cross_partition_txns;
+    std::unordered_set<uint64_t> partitioned_txn_unique_pages; 
+    std::unordered_set<uint64_t> cross_txn_unique_pages;
+    
+    std::vector<std::list<TxnQueueEntry*>> node_routed_txns(ComputeNodeCount);
+
+    for (size_t idx = 0; idx < n; ++idx) {
+        TxnQueueEntry* txn = (*txn_batch)[idx];
+        tx_id_t tx_id = txn->tx_id;
+        int txn_type = txn->txn_type;
+
+        std::vector<itemkey_t> accounts_keys;
+        std::vector<table_id_t> table_ids; 
+        std::vector<bool> rw;
+
+        if (Workload_Type == 0) {
+            table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);                
+            if (txn_type == 6) {
+                accounts_keys = txn->accounts;
+            } else {
+                itemkey_t account1 = txn->accounts[0];
+                itemkey_t account2 = txn->accounts[1];
+                smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
+            }
+            rw = smallbank_->get_rw_by_txn_type(txn_type);
+        } else if (Workload_Type == 1) { 
+            table_ids = ycsb_->get_table_ids_by_txn_type();
+            accounts_keys = txn->ycsb_keys;
+            rw = ycsb_->get_rw_flags();
+        } else if (Workload_Type == 2) {
+            accounts_keys = txn->tpcc_keys;
+            table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, accounts_keys.size());
+            rw = tpcc_->get_rw_flags_by_txn_type(txn_type, accounts_keys.size());
+        } else {
+            assert(false);
+        }
+        
+        std::vector<uint64_t> valid_pages;
+        std::unordered_set<uint32_t> partitions;
+        
+        for (size_t i = 0; i < accounts_keys.size(); ++i) {
+            auto entry = lookup(txn, table_ids[i], accounts_keys[i]);
+            if (entry.page != static_cast<page_id_t>(-1)) {
+                uint64_t table_page_id = (static_cast<uint64_t>(table_ids[i]) << 32) | entry.page;
+                valid_pages.push_back(table_page_id);
+                // Phase 1逻辑分区：利用 page hash % ComputeNodeCount
+                uint32_t partition_id = std::hash<uint64_t>{}(table_page_id) % ComputeNodeCount;
+                partitions.insert(partition_id);
+            }
+        }
+        
+        if (partitions.size() <= 1) {
+            // 不跨逻辑分区的事务，直接路由到该分区所在节点
+            int target_node = partitions.empty() ? (rand() % ComputeNodeCount) : *partitions.begin();
+            node_routed_txns[target_node].push_back(txn);
+            for (uint64_t p : valid_pages) {
+                partitioned_txn_unique_pages.insert(p);
+            }
+        } else {
+            // 跨分区的事务留给 Phase 2 处理
+            cross_partition_txns.push_back({txn, valid_pages});
+            for (uint64_t p : valid_pages) {
+                cross_txn_unique_pages.insert(p);
+            }
+        }
+    }
+    
+    allow_update_hot_entry();
+
+    // 等待上一个 batch 所有 db connector 线程完成该批次的路由
+    if(batch_id >= 0) {
+        for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+            txn_queues_[node_id]->set_batch_finished();
+        }
+    }
+    for(int i = 0; i < ComputeNodeCount; i++) {
+        std::unique_lock<std::mutex> lock(batch_mutex); 
+        batch_cv.wait(lock, [this]() { 
+            for(int j = 0; j < ComputeNodeCount; j++) {
+                if(txn_queues_[j]->size() == 0 && txn_queues_[j]->is_shared_queue_empty() && txn_queues_[j]->get_pending_txn_cnt_on_node(j) < 20) {
+                    return true;
+                }
+            }
+            return false;
+        });
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(batch_mutex); 
+        batch_id++;
+        for(int i = 0; i < ComputeNodeCount; i++) {
+            txn_queues_[i]->set_process_batch_id(batch_id);
+        }
+        batch_cv.notify_all();
+    }
+    
+    if(WarmupEnd) {
+        logger->info("[SmartRouter Scheduling] Batch id " + std::to_string(batch_id) + 
+                        " start scheduling, cross_partition_txns: " + std::to_string(cross_partition_txns.size()) + 
+                        ", partitioned_txn_unique_pages: " + std::to_string(partitioned_txn_unique_pages.size()) + 
+                        ", cross_txn_unique_pages: " + std::to_string(cross_txn_unique_pages.size()));
+        logger->info("[SmartRouter Scheduling] Batch id " + std::to_string(batch_id) + 
+                        " now txn queue status: " + this->get_txn_queue_now_status());
+    }
+    // 预处理结束
+    std::unordered_map<uint64_t, std::pair<std::vector<node_id_t>, bool>> ownership_cache;
+    std::vector<std::future<void>> futs;
+    futs.reserve(1 + ComputeNodeCount);
+
+    futs.push_back(threadpool.enqueue([this, &ownership_cache, &cross_txn_unique_pages, &partitioned_txn_unique_pages]() {
+        for (uint64_t page : cross_txn_unique_pages) {
+            ownership_cache[page] = ownership_table_->get_owner(page);
+            if(partitioned_txn_unique_pages.count(page) > 0 ){
+                std::pair<std::vector<node_id_t>, bool> new_status = {{(node_id_t)(std::hash<uint64_t>{}(page) % ComputeNodeCount)}, true};
+                ownership_cache[page] = new_status;
+            }
+        }
+    })); 
+
+    // --- Phase 1: 先把不跨区分区的事务路由好 ---
+    std::vector<int> phase1_txn_cnt(ComputeNodeCount, 0);
+    std::vector<int> phase2_txn_cnt(ComputeNodeCount, 0);
+
+    for(int node_id = 0; node_id < ComputeNodeCount; node_id++) { 
+        futs.push_back(threadpool.enqueue([this, node_id, &node_routed_txns, &phase1_txn_cnt]() { 
+            while(!node_routed_txns[node_id].empty()) {
+                std::list<TxnQueueEntry*> push_list;
+                int count = 0;
+                while(!node_routed_txns[node_id].empty() && count < BatchExecutorPOPTxnSize) {
+                    push_list.push_back(node_routed_txns[node_id].front());
+                    node_routed_txns[node_id].pop_front();
+                    count++;
+                }
+                phase1_txn_cnt[node_id] += count;
+                this->routed_txn_cnt_per_node[node_id] += count;
+                load_tracker_.record(node_id, count); 
+                txn_queues_[node_id]->push_txn_back_batch(push_list);
+            }
+        }));
+    }
+
+    for (auto& fut : futs) {
+        fut.get();
+    }
+
+    // --- Phase 2: 处理跨区分区的事务 ---
+    std::vector<double> current_workload_weights = this->workload_balance_penalty_weights_;
+    std::vector<double> current_queue_weights = this->remain_queue_balance_penalty_weights_;
+
+    // --- 依据 majority routing 和负载均衡 处理跨区事务 ---
+    for (auto& pair : cross_partition_txns) {
+        TxnQueueEntry* txn = pair.first;
+        const std::vector<uint64_t>& pages = pair.second;
+        
+        std::vector<int> owner_counts(ComputeNodeCount, 0);
+        for(uint64_t p : pages) {
+            const auto& owner_stats = ownership_cache[p];
+            for (node_id_t owner : owner_stats.first) {
+                if (owner >= 0 && owner < ComputeNodeCount) {
+                    owner_counts[owner]++;
+                }
+            }
+        }
+        
+        int target_node = -1;
+        double max_total_benefit = -1.0;
+        
+        for(int i = 0; i < ComputeNodeCount; i++) {
+            double benefit1 = pages.empty() ? 0 : static_cast<double>(owner_counts[i]) / pages.size();
+            double benefit3 = current_workload_weights[i] + current_queue_weights[i];    
+            double total_benefit = benefit1 + benefit3; 
+            if(total_benefit > max_total_benefit) {
+                max_total_benefit = total_benefit;
+                target_node = i;
+            }
+        }
+        
+        if (target_node == -1) target_node = rand() % ComputeNodeCount;
+        node_routed_txns[target_node].push_back(txn);
+        phase2_txn_cnt[target_node]++;
+        
+        // 更新快照，使同一个 batch 中排在后面的跨分区事务能看到最新路由
+        for (uint64_t p : pages) {
+            ownership_cache[p] = {{target_node}, true};
+        }
+
+        // 攒够一个vector batch 就发到队列里
+        if (node_routed_txns[target_node].size() >= BatchExecutorPOPTxnSize) {
+            int push_cnt = node_routed_txns[target_node].size();
+            this->routed_txn_cnt_per_node[target_node] += push_cnt;
+            load_tracker_.record(target_node, push_cnt); 
+            txn_queues_[target_node]->push_txn_back_batch(node_routed_txns[target_node]);
+            node_routed_txns[target_node].clear();
+        }
+    }
+    
+    // --- 批量推送到执行队列 (处理剩余的 Phase 2 事务) ---
+    for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+        if(!node_routed_txns[node_id].empty()) {
+            int push_cnt = node_routed_txns[node_id].size();
+            this->routed_txn_cnt_per_node[node_id] += push_cnt;
+            load_tracker_.record(node_id, push_cnt); 
+            txn_queues_[node_id]->push_txn_back_batch(node_routed_txns[node_id]);
+            node_routed_txns[node_id].clear();
+        }
+    }
+
+    if (WarmupEnd) {
+        std::string log_str = "[SmartRouter Scheduling] Chimera Batch Stats: ";
+        int total_p1 = 0, total_p2 = 0;
+        for (int i = 0; i < ComputeNodeCount; i++) {
+            total_p1 += phase1_txn_cnt[i];
+            total_p2 += phase2_txn_cnt[i];
+            log_str += "Node " + std::to_string(i) + "(P1:" + std::to_string(phase1_txn_cnt[i]) + ", P2:" + std::to_string(phase2_txn_cnt[i]) + ") ";
+        }
+        log_str += "| Total P1: " + std::to_string(total_p1) + ", Total P2: " + std::to_string(total_p2);
+        logger->info(log_str);
+    }
+    
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    time_stats_.schedule_total_ms += 
+        (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+}
+
 // 这里不再将 std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> 作为返回值，而是直接将txn_queues_作为输入，
 // 这样做的好处是可以不等待这个函数处理完成整个batch后再返回结果，而是可以在函数内部直接将调度好的事务放入对应的txn_queues_中，
 // 从而可以降低worker端等待事务调度完成的结果，pipeline效率更高。

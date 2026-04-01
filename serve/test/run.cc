@@ -663,7 +663,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
 
             exe_count++;
             if(!WarmupEnd && (SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 11 || SYSTEM_MODE == 13
-                || SYSTEM_MODE == 26 || SYSTEM_MODE == 27) && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
+                || SYSTEM_MODE == 26 || SYSTEM_MODE == 27 || SYSTEM_MODE == 28) && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
                 WarmupEnd = true;
                 std::cout << "Warmup Ended for Mode 0, exe_count: " << exe_count << std::endl;
             }
@@ -1585,7 +1585,7 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             exec_txn_cnt_per_node[compute_node_id]++;
             exe_count++;
             if(!WarmupEnd && (SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 11
-                || SYSTEM_MODE == 26 || SYSTEM_MODE == 27) && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
+                || SYSTEM_MODE == 26 || SYSTEM_MODE == 27 || SYSTEM_MODE == 28) && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
                 WarmupEnd = true;
                 std::cout << "Warmup Ended for Mode 0, exe_count: " << exe_count << std::endl;
             }
@@ -2275,6 +2275,9 @@ int main(int argc, char *argv[]) {
         break;
     case 27:
         std::cout << "\033[31m  MP-Router w/o critical queue \033[0m" << std::endl;
+        break;
+    case 28:
+        std::cout << "\033[31m  Chimera like 2 phase switch \033[0m" << std::endl;
         break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;

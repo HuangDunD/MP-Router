@@ -282,7 +282,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     if(SYSTEM_MODE >= 0 && SYSTEM_MODE <= 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
         // 对于这些模式, 是使用多线程router的，因此需要计算平均
         router->Record_time_ms(false, true, true);
-    } else if(SYSTEM_MODE == 11 || SYSTEM_MODE == 26 || SYSTEM_MODE == 27) {
+    } else if(SYSTEM_MODE == 11 || SYSTEM_MODE == 26 || SYSTEM_MODE == 27 || SYSTEM_MODE == 28) {
         router->Record_time_ms(false, false, true);
     }
     
