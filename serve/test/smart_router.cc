@@ -2023,10 +2023,11 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
     
     // 用于保存 Phase 2 的跨分区事务
     std::vector<std::pair<TxnQueueEntry*, std::vector<uint64_t>>> cross_partition_txns;
-    std::unordered_set<uint64_t> partitioned_txn_unique_pages; 
+    std::unordered_map<uint64_t, node_id_t> partitioned_txn_unique_pages; 
     std::unordered_set<uint64_t> cross_txn_unique_pages;
     
     std::vector<std::list<TxnQueueEntry*>> node_routed_txns(ComputeNodeCount);
+    std::vector<std::unordered_map<uint64_t, node_id_t>> warmup_graph_edges;
 
     for (size_t idx = 0; idx < n; ++idx) {
         TxnQueueEntry* txn = (*txn_batch)[idx];
@@ -2061,16 +2062,30 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
         
         std::vector<uint64_t> valid_pages;
         std::unordered_set<uint32_t> partitions;
+        std::unordered_map<uint64_t, node_id_t> table_page_ids; // 用于metis构建图
         
         for (size_t i = 0; i < accounts_keys.size(); ++i) {
             auto entry = lookup(txn, table_ids[i], accounts_keys[i]);
             if (entry.page != static_cast<page_id_t>(-1)) {
                 uint64_t table_page_id = (static_cast<uint64_t>(table_ids[i]) << 32) | entry.page;
                 valid_pages.push_back(table_page_id);
-                // Phase 1逻辑分区：利用 page hash % ComputeNodeCount
-                uint32_t partition_id = std::hash<uint64_t>{}(table_page_id) % ComputeNodeCount;
+                table_page_ids[table_page_id] = -1; // 填充用于构造图的信息
+                
+                // Phase 1逻辑分区：优先尝试 Metis 结果，如果不命中则退化为 Hash 映射
+                uint32_t partition_id;
+                int metis_node = metis_->get_metis_partitioning_result(table_page_id);
+                if (metis_node != -1) {
+                    partition_id = static_cast<uint32_t>(metis_node);
+                } else {
+                    partition_id = std::hash<uint64_t>{}(table_page_id) % ComputeNodeCount;
+                }
                 partitions.insert(partition_id);
             }
+        }
+
+        // 开销较大的 Metis 构建操作推迟到全局锁外执行
+        if (!WarmupEnd) {
+            warmup_graph_edges.push_back(std::move(table_page_ids));
         }
         
         if (partitions.size() <= 1) {
@@ -2078,7 +2093,7 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
             int target_node = partitions.empty() ? (rand() % ComputeNodeCount) : *partitions.begin();
             node_routed_txns[target_node].push_back(txn);
             for (uint64_t p : valid_pages) {
-                partitioned_txn_unique_pages.insert(p);
+                partitioned_txn_unique_pages[p] = static_cast<node_id_t>(target_node);
             }
         } else {
             // 跨分区的事务留给 Phase 2 处理
@@ -2090,6 +2105,13 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
     }
     
     allow_update_hot_entry();
+
+    if (!WarmupEnd) {
+        for (auto& edges : warmup_graph_edges) {
+            node_id_t metis_decision_node;
+            metis_->build_internal_graph(edges, &metis_decision_node);
+        }
+    }
 
     // 等待上一个 batch 所有 db connector 线程完成该批次的路由
     if(batch_id >= 0) {
@@ -2134,8 +2156,9 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
     futs.push_back(threadpool.enqueue([this, &ownership_cache, &cross_txn_unique_pages, &partitioned_txn_unique_pages]() {
         for (uint64_t page : cross_txn_unique_pages) {
             ownership_cache[page] = ownership_table_->get_owner(page);
-            if(partitioned_txn_unique_pages.count(page) > 0 ){
-                std::pair<std::vector<node_id_t>, bool> new_status = {{(node_id_t)(std::hash<uint64_t>{}(page) % ComputeNodeCount)}, true};
+            auto it = partitioned_txn_unique_pages.find(page);
+            if(it != partitioned_txn_unique_pages.end()){
+                std::pair<std::vector<node_id_t>, bool> new_status = {{it->second}, true};
                 ownership_cache[page] = new_status;
             }
         }
