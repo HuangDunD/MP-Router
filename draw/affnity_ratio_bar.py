@@ -74,7 +74,7 @@ def plot_single_group(ax, data, systems, colors, hatches, bar_width, xlabel=None
     ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
     
     # Y-axis scaling
-    ax.set_ylim(0, 25)
+    ax.set_ylim(5, 25)
     ax.yaxis.set_major_locator(ticker.MultipleLocator(5))
     
     if xlabel:
@@ -90,26 +90,27 @@ def main():
     
     # Systems
     systems = [
-        "Random", 
-        "MinWaiting", 
-        "Page Hash",
-        "Page Affinity", 
+        "RR", 
+        "MWR",
+        "PHR",
+        "PAR",
+        "CPR", 
         "MP-Router"
     ]
     
     # Colors & Hatches (Same as throughput_bar.py)
-    colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#e47474"] 
-    hatches = ['////', '\\\\\\\\', 'xxxx', 'oo', '....']
+    colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#e47474"] 
+    hatches = ['////', '\\\\\\\\', 'xxxx', 'oo', 'OOOO', '....']
 
     # Affinity Ratio Data
     # Format: ("Ratio Label", [Val_Sys1, Val_Sys2, Val_Sys3, Val_Sys4, Val_Sys5])
     affinity_data = [
-        ("0%",   [11422.28, 11406.93, 14423.42, 11927.11, 18810.77]),
-        ("20%",  [11456.56, 11758.52, 14092.08, 11853.77, 20111.88]),
-        ("40%",  [11685.11, 11618.66, 14445.79, 12541.94, 20228.77]),
-        ("60%",  [11723.22, 11919.56, 15166.45, 12788.67, 20624.47]),
-        ("80%",  [11952.01, 12069.88, 14930.87, 13154.42, 21704.75]),
-        ("100%", [11932.34, 12332.65, 14777.80, 13456.90, 22468.49]),
+        ("0%",   [11422.28, 11406.93, 14423.42, 11927.11, 14191.96, 18810.77]),
+        ("20%",  [11456.56, 11758.52, 14092.08, 11853.77, 14826.89, 20111.88]),
+        ("40%",  [11685.11, 11618.66, 14445.79, 12541.94, 15125.54, 20228.77]),
+        ("60%",  [11723.22, 11919.56, 15166.45, 12788.67, 15598.17, 20624.47]),
+        ("80%",  [11952.01, 12069.88, 14930.87, 13154.42, 16054.47, 21704.75]),
+        ("100%", [11932.34, 12332.65, 14777.80, 13456.90, 16129.94, 22468.49]),
     ]
 
     # Figure setup: Single plot
@@ -131,12 +132,12 @@ def main():
         labels,
         loc='upper center', 
         bbox_to_anchor=(0.5, 1), # Slightly above the plot
-        prop={'weight': 'bold', 'size': 11},
+        prop={'weight': 'bold', 'size': 12},
         handlelength=1.5,
         handleheight=1.2,
         frameon=False,
-        ncol=5, # 1 row
-        columnspacing=0.6
+        ncol=6, # 1 row
+        columnspacing=1
     )
     
     # Layout adjustment

@@ -74,7 +74,7 @@ def plot_single_group(ax, data, systems, colors, hatches, bar_width, xlabel=None
     ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
     
     # Y-axis scaling
-    ax.set_ylim(0, 25)
+    ax.set_ylim(5, 25)
     ax.yaxis.set_major_locator(ticker.MultipleLocator(5))
     
     if xlabel:
@@ -90,8 +90,9 @@ def main():
     
     # Systems to plot
     systems = [
-        "Page Hash",
-        "Page Affinity", 
+        "PHR",
+        "PAR",
+        "CPR",
         "MP-Router"
     ]
     
@@ -99,17 +100,17 @@ def main():
     # Page Hash: "#2ca02c99", 'xxxx'
     # Page Affinity: "#B157D790", 'oo'
     # MP-Router: "#e47474", '....'
-    colors = ["#2ca02c99", "#B157D790", "#e47474"] 
-    hatches = ['xxxx', 'oo', '....']
+    colors = ["#2ca02c99", "#B157D790", "#d6d027", "#e47474"] 
+    hatches = ['xxxx', 'oo', 'OOOO', '....']
 
     # Key Page Map Ratio Data (from original kp_bar.py text)
     # Format: ("Ratio Label", [Val_Sys1, Val_Sys2, Val_Sys3])
     data = [
-        ("20%", [11496.55, 12200.75, 17446.65]),
-        ("40%", [13194.30, 12556.18, 18315.40]),
-        ("60%", [12473.91, 12979.45, 19276.57]),
-        ("80%", [15044.52, 13345.97, 19616.36]),
-        ("100%", [15859.42, 14018.83, 21509.88]),
+        ("20%", [11496.55, 12200.75, 13101.61, 17446.65]),
+        ("40%", [13194.30, 12556.18, 13382.58, 18315.40]),
+        ("60%", [12473.91, 12979.45, 15195.31, 19276.57]),
+        ("80%", [15044.52, 13345.97, 15732.82, 19616.36]),
+        ("100%", [15859.42, 14018.83, 16060.25, 21509.88]),
     ]
 
     # Figure setup: Single plot
@@ -135,7 +136,7 @@ def main():
         handlelength=1.5,
         handleheight=1.2,
         frameon=False,
-        ncol=3, # 1 row
+        ncol=4, # 1 row
         columnspacing=0.6
     )
     

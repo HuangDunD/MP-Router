@@ -46,17 +46,18 @@ def main():
     
     # Systems
     systems = [
-        "Random", 
-        "MinWaiting", 
-        "Page Hash",
-        "Page Affinity", 
+        "RR",
+        "MWR",
+        "PHR",
+        "PAR",
+        "CPR",
         "MP-Router"
     ]
     
     # Colors
-    colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#e47474"] 
+    colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027",  "#e47474"] 
     # Hatches
-    hatches = ['////', '\\\\\\\\', 'xxxx', 'oo', '....']
+    hatches = ['////', '\\\\\\\\', 'xxxx', 'oo', 'OOOO', '....']
 
     # Data Structure: list of (Label, values_list)
     # Values are in TPS
@@ -64,10 +65,10 @@ def main():
     
     # Raw Data in TPS
     raw_data_map = [
-        ("Normal", [1167.04, 1300.29, 915.01, 1078.9, 5588.79]),
-        ("50%",    [1354.9,  1330.77, 1289.93, 1320.62, 5909.92]),
-        ("80%",    [1317.72, 1281.79, 1270.28, 1239.66, 5165.38]),
-        ("90%",    [1247.59, 1193.56, 1294.28, 1202.52, 6172.2]),
+        ("Normal", [1167.04, 1300.29, 915.01,  1078.9,  1225.25, 5588.79]),
+        ("50%",    [1354.9,  1330.77, 1289.93, 1320.62, 1214.43, 5909.92]),
+        ("80%",    [1317.72, 1281.79, 1270.28, 1239.66, 1154.68, 5165.38]),
+        ("90%",    [1247.59, 1193.56, 1294.28, 1202.52, 1166.08, 6172.2]),
     ]
 
     # Prepare data for plotting (Transpose: list of [val_sys1_norm, val_sys1_50, ...])
@@ -145,11 +146,11 @@ def main():
         legend_labels,
         loc='upper center', 
         bbox_to_anchor=(0.45, 1.15), 
-        prop={'weight': 'bold', 'size': 10}, 
+        prop={'weight': 'bold', 'size': 12}, 
         handlelength=1.5, 
         handleheight=1.2,
         frameon=False,
-        ncol=5,
+        ncol=6,
         columnspacing=1.0
     )
     
