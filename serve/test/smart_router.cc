@@ -198,6 +198,10 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
 
     try {
         if (SYSTEM_MODE == 2) {
+            // 用于长期统计整体 hash 分布是否均匀
+            static std::atomic<uint64_t> global_hash_cnt[32]{};
+            static std::atomic<uint64_t> total_hash_cnt{0};
+            
             // 对 page 做hash
             std::vector<int> key_hash_cnt(ComputeNodeCount, 0);
             for(auto page: page_to_node_map) { 
@@ -207,7 +211,19 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                 }
                 // 使用乘法Hash打散，避免直接取模导致的热点集中
                 size_t hash_val = page.first * 9973; 
-                key_hash_cnt[hash_val % ComputeNodeCount]++;
+                int target_node = hash_val % ComputeNodeCount;
+                key_hash_cnt[target_node]++;
+                
+                // 记录全局统计
+                global_hash_cnt[target_node]++;
+                uint64_t current_total = ++total_hash_cnt;
+                if (current_total % 100000 == 0) {
+                    std::string s = "[Hash Load Stat] Total pages: " + std::to_string(current_total) + " | Distribution: ";
+                    for(int i = 0; i < ComputeNodeCount; i++) {
+                        s += "Node " + std::to_string(i) + ":" + std::to_string(global_hash_cnt[i].load()) + " ";
+                    }
+                    logger->info(s);
+                }
             }
             // 找出最大值
             // int max_val = *std::max_element(key_hash_cnt.begin(), key_hash_cnt.end());
@@ -2010,6 +2026,9 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
 void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch) {
     assert(SYSTEM_MODE == 28); // chimera模式
     
+    // 选项开关：决定 Phase 2 跨区事务 majority routing 使用阶段1预计算出来的 partition 还是 ownership cache
+    const bool ENABLE_PHASE2_STATIC_MAJORITY = true;
+
     if (WarmupEnd) {
         logger->info("[SmartRouter Scheduling] Start chimera scheduling for txn batch of size " + std::to_string(txn_batch->size()));
     }
@@ -2025,6 +2044,7 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
     std::vector<std::pair<TxnQueueEntry*, std::vector<uint64_t>>> cross_partition_txns;
     std::unordered_map<uint64_t, node_id_t> partitioned_txn_unique_pages; 
     std::unordered_set<uint64_t> cross_txn_unique_pages;
+    std::unordered_map<uint64_t, uint32_t> page_initial_partition_map;
     
     std::vector<std::list<TxnQueueEntry*>> node_routed_txns(ComputeNodeCount);
     std::vector<std::unordered_map<uint64_t, node_id_t>> warmup_graph_edges;
@@ -2077,7 +2097,12 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
                 if (metis_node != -1) {
                     partition_id = static_cast<uint32_t>(metis_node);
                 } else {
-                    partition_id = std::hash<uint64_t>{}(table_page_id) % ComputeNodeCount;
+                    size_t hash_val = table_page_id * 9973; 
+                    partition_id = hash_val % ComputeNodeCount;
+                }
+                
+                if (ENABLE_PHASE2_STATIC_MAJORITY) {
+                    page_initial_partition_map[table_page_id] = partition_id;
                 }
                 partitions.insert(partition_id);
             }
@@ -2201,10 +2226,17 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
         
         std::vector<int> owner_counts(ComputeNodeCount, 0);
         for(uint64_t p : pages) {
-            const auto& owner_stats = ownership_cache[p];
-            for (node_id_t owner : owner_stats.first) {
-                if (owner >= 0 && owner < ComputeNodeCount) {
-                    owner_counts[owner]++;
+            if (ENABLE_PHASE2_STATIC_MAJORITY) {
+                auto it = page_initial_partition_map.find(p);
+                if (it != page_initial_partition_map.end() && it->second < ComputeNodeCount) {
+                    owner_counts[it->second]++;
+                }
+            } else {
+                const auto& owner_stats = ownership_cache[p];
+                for (node_id_t owner : owner_stats.first) {
+                    if (owner >= 0 && owner < ComputeNodeCount) {
+                        owner_counts[owner]++;
+                    }
                 }
             }
         }
