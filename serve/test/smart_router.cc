@@ -1,6 +1,10 @@
 #include "smart_router.h"
 #include "indexed_priority_queue.h"
 
+std::atomic<int> g_chimera_phase{0};
+std::atomic<uint64_t> g_chimera_phase1_exec_cnt{0};
+std::atomic<uint64_t> g_chimera_phase2_exec_cnt{0};
+
 // check 是否事务满足 ownership, 如果满足, 返回满足的节点集合
 // 同时传入 ownership_node_count 以便于后续计算分数
 std::vector<node_id_t> SmartRouter::checkif_txn_ownership_ok(SchedulingCandidateTxn* sc){
@@ -2144,17 +2148,19 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
             txn_queues_[node_id]->set_batch_finished();
         }
     }
-    for(int i = 0; i < ComputeNodeCount; i++) {
-        std::unique_lock<std::mutex> lock(batch_mutex); 
-        batch_cv.wait(lock, [this]() { 
-            for(int j = 0; j < ComputeNodeCount; j++) {
-                if(txn_queues_[j]->size() == 0 && txn_queues_[j]->is_shared_queue_empty() && txn_queues_[j]->get_pending_txn_cnt_on_node(j) < 20) {
-                    return true;
-                }
-            }
-            return false;
-        });
-    }
+    // for(int i = 0; i < ComputeNodeCount; i++) {
+    //     std::unique_lock<std::mutex> lock(batch_mutex); 
+    //     batch_cv.wait(lock, [this]() { 
+    //         for(int j = 0; j < ComputeNodeCount; j++) {
+    //             if(txn_queues_[j]->size() == 0 && txn_queues_[j]->is_shared_queue_empty() && txn_queues_[j]->get_pending_txn_cnt_on_node(j) < 20) {
+    //                 return true;
+    //             }
+    //         }
+    //         return false;
+    //     });
+    // }
+    // [Chimera 优化]: Chimera 模式下完全摒弃 batch 屏障，不再等待上一批次跑完，
+    // 利用队列现有的 max_queue_size_ 反压机制，实现纯流水线持续投递。
 
     {
         std::unique_lock<std::mutex> lock(batch_mutex); 
@@ -2268,7 +2274,7 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
             int push_cnt = node_routed_txns[target_node].size();
             this->routed_txn_cnt_per_node[target_node] += push_cnt;
             load_tracker_.record(target_node, push_cnt); 
-            txn_queues_[target_node]->push_txn_back_batch(node_routed_txns[target_node]);
+            txn_queues_[target_node]->push_txn_phase2_back_batch(node_routed_txns[target_node]);
             node_routed_txns[target_node].clear();
         }
     }
@@ -2279,7 +2285,7 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
             int push_cnt = node_routed_txns[node_id].size();
             this->routed_txn_cnt_per_node[node_id] += push_cnt;
             load_tracker_.record(node_id, push_cnt); 
-            txn_queues_[node_id]->push_txn_back_batch(node_routed_txns[node_id]);
+            txn_queues_[node_id]->push_txn_phase2_back_batch(node_routed_txns[node_id]);
             node_routed_txns[node_id].clear();
         }
     }
@@ -4498,4 +4504,195 @@ std::vector<double> SmartRouter::compute_remain_queue_balance_penalty_weights() 
     }());
 
     return penalty_weights;
+}
+
+void SmartRouter::run_chimera_phase_switch() {
+    uint64_t last_p1_cnt = g_chimera_phase1_exec_cnt.load();
+    uint64_t last_p2_cnt = g_chimera_phase2_exec_cnt.load();
+    double partition_avg_tps = 10000.0;
+    double global_avg_tps = 10000.0;
+    double cross_ratio = 0.5;
+    
+    const int epoch_time_us = 100000; 
+    int partition_time_us = 0.5 * epoch_time_us;
+    int global_time_us = 0.5 * epoch_time_us;
+
+    // 历史滑动窗口，用于计算过去 N 个 epoch 的平均值，避免抖动和饥饿死锁
+    std::vector<uint64_t> p1_diff_hist;
+    std::vector<uint64_t> p2_diff_hist;
+    std::vector<int> p1_time_hist;
+    std::vector<int> p2_time_hist;
+    const size_t kHistoryWindow = 50;
+
+    auto wait_with_early_exit = [&](int time_us, int phase) -> int {
+        if (time_us <= 0) return 0;
+        int wait_step_us = 2000; // 2ms步长检测
+        int waited = 0;
+        int empty_count = 0;
+        while (waited < time_us && chimera_switch_running_) {
+            std::this_thread::sleep_for(std::chrono::microseconds(wait_step_us));
+            waited += wait_step_us;
+            
+            bool all_empty = true;
+            for (int i = 0; i < ComputeNodeCount; ++i) {
+                if (txn_queues_[i]) {
+                    int sz = (phase == 0) ? txn_queues_[i]->get_phase1_size() : txn_queues_[i]->get_phase2_size();
+                    if (sz > 0) {
+                        all_empty = false;
+                        break;
+                    }
+                }
+            }
+            
+            if (all_empty) {
+                empty_count++;
+                // 连续多次为空才退出，防止调度或推送刚好处在间隔期间
+                if(empty_count >= 3) { 
+                    if (WarmupEnd) {
+                        logger->info("[Chimera Switch] Phase " + std::to_string(phase + 1) + " queues empty, early exit (" + std::to_string(waited/1000.0) + "/" + std::to_string(time_us/1000.0) + "ms)");
+                    }
+                    break;
+                }
+            } else {
+                empty_count = 0;
+            }
+        }
+        return waited;
+    };
+
+    while (chimera_switch_running_) {
+#if LOG_CHIMERA_PHASE_SWITCH
+        logger->info("[Chimera Switch] --- PHASE 1: PARTITION (Local Phase) START, duration: " + 
+                     std::to_string(partition_time_us / 1000.0) + " ms ---");
+#endif
+        // --- PHASE 1: PARTITION (局部 Phase) ---
+        g_chimera_phase = 0; 
+        for(int i = 0; i < ComputeNodeCount; i++) {
+            if (txn_queues_[i]) txn_queues_[i]->notify_worker_threads();
+        }
+        
+        int actual_p1_time = wait_with_early_exit(partition_time_us, 0);
+
+        // --- Dump Phase 1 remaining queue size ---
+        std::string p1_stats = "[Chimera Switch] End of Phase 1, Remaining Phase 1 Txns: ";
+        for(int i = 0; i < ComputeNodeCount; i++) {
+            if(txn_queues_[i]) {
+                p1_stats += "Node " + std::to_string(i) + ": " + std::to_string(txn_queues_[i]->get_phase1_size()) + " ";
+            }
+        }
+        logger->info(p1_stats);
+
+        if (!chimera_switch_running_) break;
+
+#if LOG_CHIMERA_PHASE_SWITCH
+        logger->info("[Chimera Switch] --- PHASE 2: GLOBAL (Cross-node Phase) START, duration: " + 
+                     std::to_string(global_time_us / 1000.0) + " ms ---");
+#endif
+        // --- PHASE 2: GLOBAL (跨节点 Phase) ---
+        g_chimera_phase = 1; 
+        for(int i = 0; i < ComputeNodeCount; i++) {
+            if (txn_queues_[i]) txn_queues_[i]->notify_worker_threads();
+        }
+
+        int actual_p2_time = wait_with_early_exit(global_time_us, 1);
+
+        // --- Dump Phase 2 remaining queue size ---
+        std::string p2_stats = "[Chimera Switch] End of Phase 2, Remaining Phase 2 Txns: ";
+        for(int i = 0; i < ComputeNodeCount; i++) {
+            if(txn_queues_[i]) {
+                p2_stats += "Node " + std::to_string(i) + ": " + std::to_string(txn_queues_[i]->get_phase2_size()) + " ";
+            }
+        }
+        logger->info(p2_stats);
+
+        // Dynamically calculate the next epoch phase lengths
+        uint64_t cur_p1_cnt = g_chimera_phase1_exec_cnt.load();
+        uint64_t cur_p2_cnt = g_chimera_phase2_exec_cnt.load();
+        uint64_t p1_diff = cur_p1_cnt - last_p1_cnt;
+        uint64_t p2_diff = cur_p2_cnt - last_p2_cnt;
+
+        last_p1_cnt = cur_p1_cnt;
+        last_p2_cnt = cur_p2_cnt;
+
+        // 计入滑动历史
+        p1_diff_hist.push_back(p1_diff);
+        p2_diff_hist.push_back(p2_diff);
+        // 使用实际等待的时间
+        p1_time_hist.push_back(actual_p1_time);
+        p2_time_hist.push_back(actual_p2_time);
+
+        if (p1_diff_hist.size() > kHistoryWindow) {
+            p1_diff_hist.erase(p1_diff_hist.begin());
+            p2_diff_hist.erase(p2_diff_hist.begin());
+            p1_time_hist.erase(p1_time_hist.begin());
+            p2_time_hist.erase(p2_time_hist.begin());
+        }
+
+        uint64_t sum_p1_diff = 0, sum_p2_diff = 0;
+        uint64_t sum_p1_time = 0, sum_p2_time = 0;
+        for (size_t i = 0; i < p1_diff_hist.size(); ++i) {
+            sum_p1_diff += p1_diff_hist[i];
+            sum_p2_diff += p2_diff_hist[i];
+            sum_p1_time += p1_time_hist[i];
+            sum_p2_time += p2_time_hist[i];
+        }
+
+        if (actual_p1_time > 0) {
+            partition_avg_tps = (double)p1_diff / actual_p1_time; // txns per us
+        }
+        if (actual_p2_time > 0) {
+            global_avg_tps = (double)p2_diff / actual_p2_time;
+        }
+
+        double history_partition_avg_tps = 10000.0;
+        double history_global_avg_tps = 10000.0;
+        if (sum_p1_time > 0) {
+            history_partition_avg_tps = (double)sum_p1_diff / sum_p1_time;
+        }
+        if (sum_p2_time > 0) {
+            history_global_avg_tps = (double)sum_p2_diff / sum_p2_time;
+        }
+
+        if (sum_p1_diff + sum_p2_diff > 0) {
+            cross_ratio = (double)sum_p2_diff / (sum_p1_diff + sum_p2_diff);
+        } else {
+            cross_ratio = 0.5; // 如果窗口内完全没有跑事务，重置为均衡模式
+        }
+
+        // 核心修复: 防止饿死(Starvation)循环。使用平滑的历史 TPS。
+        // 强制保障极端长尾情况下各阶段都能获得至少 5% 的处理时间比重。
+        if (cross_ratio > 0.95) cross_ratio = 0.95;
+        if (cross_ratio < 0.05) cross_ratio = 0.05;
+
+        // 避免当起步或某个阶段完全没有事务时吞吐量变成绝对的0，导致除0或公式崩溃
+        if (history_partition_avg_tps <= 0.0001) history_partition_avg_tps = 0.0001;
+        if (history_global_avg_tps <= 0.0001) history_global_avg_tps = 0.0001;
+
+        double denom = cross_ratio * history_partition_avg_tps + (1.0 - cross_ratio) * history_global_avg_tps;
+        partition_time_us = (1.0 - cross_ratio) * history_global_avg_tps * epoch_time_us / denom;
+        global_time_us = cross_ratio * history_partition_avg_tps * epoch_time_us / denom;
+
+        // 按照时间片总额度归一化
+        double scale = (double)epoch_time_us / (partition_time_us + global_time_us);
+        partition_time_us *= scale;
+        global_time_us *= scale;
+
+        // 兜底：最极端情况下每个阶段物理耗时保底分配 500 us (0.5ms)
+        if (partition_time_us < 500) {
+            partition_time_us = 500;
+            global_time_us = epoch_time_us - 500;
+        } else if (global_time_us < 500) {
+            global_time_us = 500;
+            partition_time_us = epoch_time_us - 500;
+        }
+
+#if LOG_CHIMERA_PHASE_SWITCH
+        logger->info("[Chimera Switch] --- Epoch Finish Stats --- \n"
+                     "  Phase 1 (Local) Exec Txns: " + std::to_string(p1_diff) + ", TPS: " + std::to_string(partition_avg_tps * 1000000.0) + " ops/s (Avg 50: " + std::to_string(history_partition_avg_tps * 1000000.0) + ")\n"
+                     "  Phase 2 (Global) Exec Txns: " + std::to_string(p2_diff) + ", TPS: " + std::to_string(global_avg_tps * 1000000.0) + " ops/s (Avg 50: " + std::to_string(history_global_avg_tps * 1000000.0) + ")\n"
+                     "  Cross Node Access Ratio (Avg 50): " + std::to_string(cross_ratio) + "\n"
+                     "  Next Epoch Calculated Phase 1 (Local): " + std::to_string(partition_time_us / 1000.0) + " ms\n"
+                     "  Next Epoch Calculated Phase 2 (Global): " + std::to_string(global_time_us / 1000.0) + " ms");
+#endif
+    }
 }

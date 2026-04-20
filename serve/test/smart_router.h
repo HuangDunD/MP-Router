@@ -353,9 +353,19 @@ public:
             }
         });
         compute_workload_balance_thread.detach();
+
+        if (SYSTEM_MODE == 28) {
+            chimera_phase_switch_thread_ = std::thread(&SmartRouter::run_chimera_phase_switch, this);
+        }
     }
 
     ~SmartRouter() {
+        if (SYSTEM_MODE == 28) {
+            chimera_switch_running_ = false;
+            if (chimera_phase_switch_thread_.joinable()) {
+                chimera_phase_switch_thread_.join();
+            }
+        }
         #if LOG_ACCESS_KEY
             // 转到 vector 便于排序
             std::vector<std::pair<int, long long>> vec(key_freq.begin(), key_freq.end());
@@ -2048,4 +2058,9 @@ public:
     PendingTxnSet* pending_txn_queue_;
     // Page Fences for dependency management
     std::unordered_map<uint64_t, std::shared_ptr<DependencyGroup>> page_fences;
+
+    // for chimer phase
+    std::thread chimera_phase_switch_thread_;
+    std::atomic<bool> chimera_switch_running_{true};
+    void run_chimera_phase_switch();
 };

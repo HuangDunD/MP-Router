@@ -382,6 +382,10 @@ private:
     Logger* logger_;
 };
 
+extern std::atomic<int> g_chimera_phase;
+extern std::atomic<uint64_t> g_chimera_phase1_exec_cnt;
+extern std::atomic<uint64_t> g_chimera_phase2_exec_cnt;
+
 // for every compute node db connections, we have a txn queue to store incoming txns
 class TxnQueue {
 public:
@@ -395,7 +399,98 @@ public:
         batch_cv_ = batch_cv;
     }
 
+    void notify_worker_threads() {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        queue_cv_.notify_all();
+    }
+
+    std::list<TxnQueueEntry*> pop_txn_chimera(int* ret_call_id = nullptr, int* ret_type = nullptr) {
+        int call_id = rand();
+        if(ret_call_id != nullptr) *ret_call_id = call_id;
+        std::list<TxnQueueEntry*> batch_entries;
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+
+        bool is_phase2_pop = false;
+
+        while(true) {
+            bool all_queues_empty = txn_queue_.empty() && dag_txn_queue_->empty() && phase2_txn_queue_.empty();
+            bool can_exit_completely = all_queues_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
+
+            if (g_chimera_phase == 1) { // Phase 2: Global
+                if(!phase2_txn_queue_.empty()) {
+                    is_phase2_pop = true;
+                    break;
+                }
+                if(can_exit_completely) {
+                    if(ret_type != nullptr) *ret_type = 0;
+                    batch_entries = std::move(shared_txn_queue_->pop_txn()); 
+                    return batch_entries;
+                } else {
+                    queue_cv_.wait(lock, [this]() { 
+                        bool has_txn = !phase2_txn_queue_.empty();
+                        bool all_empty = txn_queue_.empty() && dag_txn_queue_->empty() && phase2_txn_queue_.empty();
+                        bool can_exit = all_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
+                        return has_txn || can_exit || g_chimera_phase != 1;
+                    });
+                }
+            } else { // Phase 1: Partition
+                if(!txn_queue_.empty() || !dag_txn_queue_->empty()) {
+                    is_phase2_pop = false;
+                    break; 
+                }
+                if(can_exit_completely) {
+                    if(ret_type != nullptr) *ret_type = 0; 
+                    batch_entries = std::move(shared_txn_queue_->pop_txn()); 
+                    return batch_entries;
+                }
+                else { 
+                    queue_cv_.wait(lock, [this]() { 
+                        bool has_txn = !txn_queue_.empty() || !dag_txn_queue_->empty();
+                        bool all_empty = txn_queue_.empty() && dag_txn_queue_->empty() && phase2_txn_queue_.empty();
+                        bool can_exit = all_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
+                        return has_txn || can_exit || g_chimera_phase == 1; 
+                    });
+                }
+            }
+        }
+
+        if (is_phase2_pop) { 
+            if (phase2_txn_queue_.empty()) return {}; // double check for safety
+            batch_entries = std::move(phase2_txn_queue_.front());
+            phase2_txn_queue_.pop_front();
+            current_phase2_queue_size_ -= static_cast<int>(batch_entries.size());
+            queue_cv_.notify_all();
+            
+            g_chimera_phase2_exec_cnt.fetch_add(batch_entries.size(), std::memory_order_relaxed);
+            return batch_entries;
+        }
+
+        if(!dag_txn_queue_->empty()) {
+            if(ret_type != nullptr) *ret_type = 1; // dag type
+            batch_entries = std::move(dag_txn_queue_->pop_ready_batch());
+            if (batch_entries.empty()) return {}; // double check for safety
+            current_queue_size_ -= static_cast<int>(batch_entries.size()); // 只要保持队列长度大于0就行
+
+            queue_cv_.notify_all();
+            
+            g_chimera_phase1_exec_cnt.fetch_add(batch_entries.size(), std::memory_order_relaxed);
+            return batch_entries;
+        }
+
+        if (txn_queue_.empty()) return {}; // double check for safety
+        batch_entries = std::move(txn_queue_.front());
+        txn_queue_.pop_front();
+        current_queue_size_ -= static_cast<int>(batch_entries.size());
+
+        queue_cv_.notify_all();
+        
+        g_chimera_phase1_exec_cnt.fetch_add(batch_entries.size(), std::memory_order_relaxed);
+        return batch_entries;
+    }
+
     std::list<TxnQueueEntry*> pop_txn(int* ret_call_id = nullptr, int* ret_type = nullptr) {
+        if (SYSTEM_MODE == 28) return pop_txn_chimera(ret_call_id, ret_type);
+        
         int call_id = rand();
         if(ret_call_id != nullptr) *ret_call_id = call_id;
         std::list<TxnQueueEntry*> batch_entries; // ret
@@ -744,6 +839,49 @@ public:
         else queue_cv_.notify_one();
     }
 
+    void push_txn_phase2_back_batch(std::vector<TxnQueueEntry*> entries) {
+        if(entries.empty()) return;
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        queue_cv_.wait(lock, [this, &entries]() {
+            return current_phase2_queue_size_ + entries.size() < max_queue_size_;
+        });
+        
+        int i = 0;
+        // 1. Try to fill the last batch first
+        if (!phase2_txn_queue_.empty()) {
+            auto& last_batch = phase2_txn_queue_.back();
+            while (last_batch.size() < BatchExecutorPOPTxnSize && i < entries.size()) {
+                last_batch.push_back(entries[i]);
+                i++;
+                current_phase2_queue_size_++;
+            }
+        }
+
+        // 2. Create new batches for remaining entries
+        while(i < entries.size()) {
+            std::list<TxnQueueEntry*> batch;
+            for(int j = 0; j < BatchExecutorPOPTxnSize && i < entries.size(); j++, i++) {
+                batch.push_back(entries[i]);
+            }
+            current_phase2_queue_size_ += static_cast<int>(batch.size());
+            phase2_txn_queue_.emplace_back(std::move(batch)); 
+        }
+        if(finished_) queue_cv_.notify_all();
+        else queue_cv_.notify_one();
+    }
+    void push_txn_phase2_back_batch(std::list<TxnQueueEntry*>& entries) {
+        if(entries.empty()) return;
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        queue_cv_.wait(lock, [this, &entries]() {
+            return current_phase2_queue_size_ + entries.size() < max_queue_size_;
+        });
+        
+        current_phase2_queue_size_ += static_cast<int>(entries.size());
+        phase2_txn_queue_.emplace_back(std::move(entries));
+        if(finished_) queue_cv_.notify_all();
+        else queue_cv_.notify_one();
+    }
+
     // // push 绑定到距离首部pos位置之后的事务到队列随机位置
     // void push_txn_back_after_pos_rand(std::vector<TxnQueueEntry*> entries, double pos_ratio = 0.0){
     //     std::unique_lock<std::mutex> lock(queue_mutex_);
@@ -810,6 +948,14 @@ public:
         return current_queue_size_.load();
     }
 
+    int get_phase1_size() {
+        return current_queue_size_.load();
+    }
+
+    int get_phase2_size() {
+        return current_phase2_queue_size_.load();
+    }
+
     void set_finished() {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         finished_ = true;
@@ -845,6 +991,7 @@ public:
 
 private:
     std::deque<std::list<TxnQueueEntry*>> txn_queue_;
+    std::deque<std::list<TxnQueueEntry*>> phase2_txn_queue_; // 用于 Phase 2 跨区事务的独立积压队列
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::condition_variable* batch_cv_;
@@ -856,6 +1003,7 @@ private:
     SlidingTransactionInforTable* tit;
     node_id_t node_id_; // the compute node id this queue belongs to
     std::atomic<int> current_queue_size_ = 0;
+    std::atomic<int> current_phase2_queue_size_ = 0;
     int max_queue_size_; // max queue size
     bool finished_ = false;
 
