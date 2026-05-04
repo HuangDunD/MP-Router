@@ -1330,6 +1330,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --btree-read-mode <mode>    B-tree read mode (0=conn0, 1=random) [default: 0]" << std::endl;
     std::cout << "  --btree-frequency <seconds> B-tree refresh frequency in seconds [default: 5]" << std::endl;
     std::cout << "  --account-count <number>    Number of accounts to load [default: 300000]" << std::endl;
+    std::cout << "  --unlog                     Create UNLOGGED tables (default follows workload)" << std::endl;
     std::cout << "  --help                      Show this help message" << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
@@ -2026,6 +2027,10 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--unlog") {
+            USE_UNLOGGED_TABLES = true;
+            std::cout << "Use UNLOGGED tables: yes" << std::endl;
+        }
         else if (arg == "--partition-interval") {
             if (i + 1 < argc) {
                 PARTITION_INTERVAL = std::stoi(argv[++i]);
@@ -2350,10 +2355,10 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
 
         // kes 四机, 新版本
-        DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
-        DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
-        DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
-        DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
+        // DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
 
         // ali 双机
         // DBConnection.push_back("host=172.16.0.39 port=44321 user=system password=123456 dbname=smallbank");
@@ -2381,6 +2386,9 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
+
+        DBConnection.push_back("host=10.47.106.44 port=5432 user=hcy password=123456 dbname=smallbank");
+        DBConnection.push_back("host=10.47.106.44 port=5432 user=hcy password=123456 dbname=smallbank");
 
         ComputeNodeCount = DBConnection.size();
         std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;

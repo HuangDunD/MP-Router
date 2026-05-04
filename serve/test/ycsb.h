@@ -49,12 +49,12 @@ public:
 
     // 表：usertable(id INT PRIMARY KEY, field0 TEXT)
     void create_table(pqxx::connection* conn) {
-        std::cout << "Create YCSB table..." << std::endl;
+        std::cout << "Create YCSB table..." << (USE_UNLOGGED_TABLES ? " (UNLOGGED)" : "") << std::endl;
         try {
             pqxx::work txn(*conn);
             txn.exec("DROP TABLE IF EXISTS usertable");
-            txn.exec(R"SQL(
-            CREATE UNLOGGED TABLE usertable (
+            const std::string table_keyword = USE_UNLOGGED_TABLES ? "CREATE UNLOGGED TABLE " : "CREATE TABLE ";
+            txn.exec(table_keyword + R"SQL(usertable (
                 id INT, 
                 FIELD0   VARCHAR(100),
                 FIELD1   VARCHAR(100),

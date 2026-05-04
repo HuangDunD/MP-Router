@@ -274,7 +274,7 @@ public:
     };
 
     void create_table(pqxx::connection *conn0) {
-        std::cout << "Create table..." << std::endl;
+        std::cout << "Create table..." << (USE_UNLOGGED_TABLES ? " (UNLOGGED)" : "") << std::endl;
         // Load data into the database if needed
         // This is a placeholder for actual data loading logic
         std::string drop_table_sql = "DROP TABLE IF EXISTS checking";
@@ -298,10 +298,9 @@ public:
         // Create a new table and insert data
         try {
             pqxx::work txn(*conn0);
-            txn.exec("CREATE unlogged TABLE checking (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
-            txn.exec("CREATE unlogged TABLE savings (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
-            // txn.exec("CREATE TABLE checking (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
-            // txn.exec("CREATE TABLE savings (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
+            const std::string table_keyword = USE_UNLOGGED_TABLES ? "CREATE UNLOGGED TABLE " : "CREATE TABLE ";
+            txn.exec(table_keyword + "checking (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
+            txn.exec(table_keyword + "savings (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
             // create index
             txn.exec("CREATE INDEX idx_checking_id ON checking (id)");
             txn.exec("CREATE INDEX idx_savings_id ON savings (id)");

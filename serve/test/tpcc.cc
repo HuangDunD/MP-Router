@@ -90,9 +90,10 @@ int TPCC::get_total_keys(TPCCTableType table_type) const {
 }
 
 void TPCC::create_table(pqxx::connection *conn) {
-    std::cout << "Creating TPC-C tables..." << std::endl;
+    std::cout << "Creating TPC-C tables..." << (USE_UNLOGGED_TABLES ? " (UNLOGGED)" : "") << std::endl;
     try {
         pqxx::work txn(*conn);
+        const std::string table_keyword = USE_UNLOGGED_TABLES ? "CREATE UNLOGGED TABLE " : "CREATE TABLE ";
 
         // Drop tables if exist
         txn.exec("DROP TABLE IF EXISTS order_line CASCADE");
@@ -106,8 +107,7 @@ void TPCC::create_table(pqxx::connection *conn) {
         txn.exec("DROP TABLE IF EXISTS warehouse CASCADE");
         
         // Warehouse
-        txn.exec(R"SQL(
-            CREATE UNLOGGED TABLE warehouse (
+        txn.exec(table_keyword + R"SQL(warehouse (
                 w_id INT PRIMARY KEY,
                 w_name VARCHAR(10),
                 w_street_1 VARCHAR(20),
@@ -121,8 +121,7 @@ void TPCC::create_table(pqxx::connection *conn) {
         )SQL");
 
         // District
-        txn.exec(R"SQL(
-            CREATE UNLOGGED TABLE district (
+        txn.exec(table_keyword + R"SQL(district (
                 d_id INT,
                 d_w_id INT,
                 d_name VARCHAR(10),
@@ -139,8 +138,7 @@ void TPCC::create_table(pqxx::connection *conn) {
         )SQL");
 
         // Customer
-        txn.exec(R"SQL(
-            CREATE UNLOGGED TABLE customer (
+        txn.exec(table_keyword + R"SQL(customer (
                 c_id INT,
                 c_d_id INT,
                 c_w_id INT,
@@ -167,8 +165,7 @@ void TPCC::create_table(pqxx::connection *conn) {
         )SQL");
 
         // History
-        txn.exec(R"SQL(
-            CREATE UNLOGGED TABLE history (
+        txn.exec(table_keyword + R"SQL(history (
                 h_c_id INT,
                 h_c_d_id INT,
                 h_c_w_id INT,
@@ -181,8 +178,7 @@ void TPCC::create_table(pqxx::connection *conn) {
         )SQL");
 
         // NewOrder
-        txn.exec(R"SQL(
-            CREATE UNLOGGED TABLE new_order (
+        txn.exec(table_keyword + R"SQL(new_order (
                 no_o_id INT,
                 no_d_id INT,
                 no_w_id INT,
@@ -191,8 +187,7 @@ void TPCC::create_table(pqxx::connection *conn) {
         )SQL");
 
         // Orders
-        txn.exec(R"SQL(
-            CREATE UNLOGGED TABLE orders (
+        txn.exec(table_keyword + R"SQL(orders (
                 o_id INT,
                 o_d_id INT,
                 o_w_id INT,
@@ -206,8 +201,7 @@ void TPCC::create_table(pqxx::connection *conn) {
         )SQL");
 
         // OrderLine
-        txn.exec(R"SQL(
-            CREATE UNLOGGED TABLE order_line (
+        txn.exec(table_keyword + R"SQL(order_line (
                 ol_o_id INT,
                 ol_d_id INT,
                 ol_w_id INT,
@@ -223,8 +217,7 @@ void TPCC::create_table(pqxx::connection *conn) {
         )SQL");
 
         // Item
-        txn.exec(R"SQL(
-            CREATE UNLOGGED TABLE item (
+        txn.exec(table_keyword + R"SQL(item (
                 i_id INT PRIMARY KEY,
                 i_im_id INT,
                 i_name VARCHAR(24),
@@ -234,8 +227,7 @@ void TPCC::create_table(pqxx::connection *conn) {
         )SQL");
 
         // Stock
-        txn.exec(R"SQL(
-            CREATE UNLOGGED TABLE stock (
+        txn.exec(table_keyword + R"SQL(stock (
                 s_i_id INT,
                 s_w_id INT,
                 s_quantity INT,
