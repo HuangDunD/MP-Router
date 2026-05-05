@@ -259,7 +259,11 @@ public:
     {
         metis_->set_thread_pool(&threadpool);
         metis_->init_node_nums(cfg.partition_nums);
-        ownership_table_ = new OwnershipTable(logger);
+        if (SYSTEM_MODE == 4) {
+            ownership_table_ = nullptr;
+        } else {
+            ownership_table_ = new OwnershipTable(logger);
+        }
         for(auto q: txn_queues_) q->set_batch_cv(&batch_cv);
         time_stats_.fetch_txn_from_pool_ms_per_thread.resize(worker_threads_, 0.0);
         time_stats_.schedule_decision_ms_per_thread.resize(worker_threads_, 0.0);
@@ -499,6 +503,7 @@ public:
     // 如果key不存在, 则不进行任何操作
     inline void update_key_page(TxnQueueEntry* txn, std::vector<table_id_t>& table_ids, std::vector<itemkey_t>& keys, std::vector<bool>& rw, 
             std::vector<page_id_t> ctid_ret_pages, node_id_t routed_node_id) { // txn_type for SYSTEM_MODE 8
+        if (ownership_table_ == nullptr) return;
         // 这个地方可能ctid_ret_pages的数量不等于keys, 因为这个事务可能触发了回滚, 此时需要将table_ids, keys截断一下
         if(txn->accessed_page_ids.size() == 0) return; // 说明没有记录访问的页面，可能是system_mode 4无需维护key-page映射，直接返回
         assert(txn->accessed_page_ids.size() == keys.size());
@@ -1524,10 +1529,12 @@ public:
     }
 
     int get_ownership_changes() const {
+        if (ownership_table_ == nullptr) return 0;
         return ownership_table_->get_ownership_changes();
     }
 
     std::vector<int> get_ownership_changes_per_txn_type() const {
+        if (ownership_table_ == nullptr) return std::vector<int>(SYS_8_DECISION_TYPE_COUNT, 0);
         return ownership_table_->get_ownership_changes_per_txn_type();
     }
 
@@ -1978,7 +1985,7 @@ private:
     BtreeIndexService *btree_service_;
 
     // 页面所有权表
-    OwnershipTable* ownership_table_;
+    OwnershipTable* ownership_table_ = nullptr;
 
     //for metis
     ThreadPool threadpool;
