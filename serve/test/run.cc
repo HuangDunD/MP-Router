@@ -15,6 +15,7 @@
 #include <fstream>
 #include <streambuf>
 #include <iomanip>
+#include <sstream>
 
 #include "smallbank.h"
 #include "ycsb.h"
@@ -31,6 +32,7 @@
 
 std::vector<TxnQueue*> txn_queues; // one queue per compute node
 std::vector<std::atomic<int>> exec_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
+static std::atomic<bool> warmup_transition_started{false};
 
 // SmallBank 数据加载时产生的键→页映射（按 id 直接索引），用于初始化 Router
 static SmallBank::TableKeyPageMap g_smallbank_key_page_map;
@@ -131,6 +133,64 @@ void generate_perf_kwr_report(int start_snapshot_id, int end_snapshot_id, std::s
         std::cerr << "Error while generating performance report: " << e.what() << std::endl;
     }
     delete conn0;
+}
+
+static bool warmup_end_supported_mode() {
+    return SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 11 || SYSTEM_MODE == 13 ||
+           SYSTEM_MODE == 26 || SYSTEM_MODE == 27 || SYSTEM_MODE == 28 || SYSTEM_MODE == 29 ||
+           SYSTEM_MODE == 30;
+}
+
+static void reset_pg_runtime_stats_after_warmup(Logger* logger_) {
+    if (DB_TYPE != 0 || DBConnection.empty()) {
+        return;
+    }
+
+    try {
+        pqxx::connection conn(DBConnection[0]);
+        pqxx::work txn(conn);
+        txn.exec("SELECT pg_stat_reset()");
+        txn.exec("DO $$ BEGIN IF to_regproc('pg_stat_reset_logical_fast') IS NOT NULL THEN EXECUTE 'SELECT pg_stat_reset_logical_fast()'; END IF; END $$");
+        txn.exec("SELECT pg_stat_reset_shared('wal')");
+        txn.exec("SELECT pg_stat_reset_shared('bgwriter')");
+        txn.commit();
+        std::cout << "PostgreSQL runtime stats reset after warmup." << std::endl;
+        if (logger_) {
+            logger_->info("PostgreSQL runtime stats reset after warmup.");
+        }
+    } catch (const std::exception &e) {
+        std::cerr << "Failed to reset PostgreSQL runtime stats after warmup: " << e.what() << std::endl;
+        if (logger_) {
+            logger_->warning("Failed to reset PostgreSQL runtime stats after warmup: " + std::string(e.what()));
+        }
+    }
+}
+
+static void maybe_finish_warmup(Logger* logger_) {
+    if (WarmupEnd || !warmup_end_supported_mode()) {
+        return;
+    }
+
+    uint64_t warmup_threshold = MetisWarmupRound * PARTITION_INTERVAL;
+    if (static_cast<uint64_t>(exe_count.load(std::memory_order_relaxed)) <= warmup_threshold) {
+        return;
+    }
+
+    bool expected = false;
+    if (!warmup_transition_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    reset_pg_runtime_stats_after_warmup(logger_);
+    WarmupEnd = true;
+
+    std::ostringstream os;
+    os << "Warmup Ended for Mode " << SYSTEM_MODE
+       << ", exe_count: " << exe_count.load(std::memory_order_relaxed);
+    std::cout << os.str() << std::endl;
+    if (logger_) {
+        logger_->info(os.str());
+    }
 }
 
 void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* ycsb, TPCC* tpcc) {
@@ -310,6 +370,7 @@ void run_smallbank_empty(thread_params* params, Logger* logger_){
         for(auto& txn_entry : txn_entries) {
             // just for statistics
             exe_count++;
+            maybe_finish_warmup(logger_);
 
             tx_id_t tx_id = txn_entry->tx_id;
             int txn_type = txn_entry->txn_type;
@@ -389,10 +450,7 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
         // 执行std::list<TxnQueueEntry*> txn_entries中的每个事务
         for (auto& txn_entry : txn_entries) {
             exe_count++;
-            if(!WarmupEnd && SYSTEM_MODE == 0 && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
-                WarmupEnd = true;
-                std::cout << "Warmup Ended for Mode 0, exe_count: " << exe_count << std::endl;
-            }
+            maybe_finish_warmup(logger_);
             exec_txn_cnt_per_node[compute_node_id]++;
 
             tx_id_t tx_id = txn_entry->tx_id;
@@ -662,11 +720,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             exe_count++;
-            if(!WarmupEnd && (SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 11 || SYSTEM_MODE == 13
-                || SYSTEM_MODE == 26 || SYSTEM_MODE == 27 || SYSTEM_MODE == 28 || SYSTEM_MODE == 29 || SYSTEM_MODE == 30) && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
-                WarmupEnd = true;
-                std::cout << "Warmup Ended for Mode 0, exe_count: " << exe_count << std::endl;
-            }
+            maybe_finish_warmup(logger_);
             exec_txn_cnt_per_node[compute_node_id]++;
 
             tx_id_t tx_id = txn_entry->tx_id;
@@ -957,6 +1011,7 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
 
         for (auto& txn_entry : txn_entries) {
             exe_count++;
+            maybe_finish_warmup(logger_);
             exec_txn_cnt_per_node[compute_node_id]++;
             while (con->is_open() == false) {
                 std::cerr << "Connection is broken, reconnecting..." << std::endl;
@@ -1090,6 +1145,7 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
             exe_count++;
+            maybe_finish_warmup(logger_);
             exec_txn_cnt_per_node[compute_node_id]++;
 
             tx_id_t tx_id = txn_entry->tx_id;
@@ -1294,6 +1350,7 @@ void run_ycsb_txns_empty(thread_params* params, Logger* logger_) {
 
         for (auto& txn_entry : txn_entries) {
             exe_count++;
+            maybe_finish_warmup(logger_);
             exec_txn_cnt_per_node[compute_node_id]++;
 
             tx_id_t tx_id = txn_entry->tx_id;
@@ -1585,11 +1642,7 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             // Update stats
             exec_txn_cnt_per_node[compute_node_id]++;
             exe_count++;
-            if(!WarmupEnd && (SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 11
-                || SYSTEM_MODE == 26 || SYSTEM_MODE == 27 || SYSTEM_MODE == 28 || SYSTEM_MODE == 29 || SYSTEM_MODE == 30) && exe_count > MetisWarmupRound * PARTITION_INTERVAL) {
-                WarmupEnd = true;
-                std::cout << "Warmup Ended for Mode 0, exe_count: " << exe_count << std::endl;
-            }
+            maybe_finish_warmup(logger_);
 
             tx_id_t tx_id = txn_entry->tx_id;
             int txn_type = txn_entry->txn_type;
@@ -2761,6 +2814,7 @@ int main(int argc, char *argv[]) {
     while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+    maybe_finish_warmup(logger_);
     std::cout << "\033[31m Warmup rounds completed. Create the smart router snapshot. \033[0m" << std::endl;
     auto warmup_end_time = std::chrono::high_resolution_clock::now();
     long long warmup_exe_count = exe_count;
