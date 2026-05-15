@@ -946,9 +946,12 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
 
     std::vector<itemkey_t> accounts_vec(2);
     ZipfGen* zipfian_gen = nullptr;
-    if (!zipfian_gen) {
-        uint64_t zipf_seed = 2 * thread_id * GetCPUCycle();
-        uint64_t zipf_seed_mask = (uint64_t(1) << 48) - 1;
+    FiniteZipfGen* finite_zipfian_gen = nullptr;
+    uint64_t zipf_seed = 2 * thread_id * GetCPUCycle();
+    uint64_t zipf_seed_mask = (uint64_t(1) << 48) - 1;
+    if (use_finite_zipfian) {
+        finite_zipfian_gen = new FiniteZipfGen(get_account_count(), zipfian_theta, zipf_seed & zipf_seed_mask);
+    } else {
         // 仅让线程0负责填充全局hottest_keys，避免并发写冲突和重复填充
         std::vector<uint64_t>* hot_keys_ptr = (thread_id == 0) ? &hottest_keys : nullptr;
         zipfian_gen = new ZipfGen(get_account_count(), zipfian_theta, zipf_seed & zipf_seed_mask, NumBucket, hot_keys_ptr);
@@ -982,7 +985,7 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
                 multi_accounts.reserve(multi_update_length);
                 for(int k = 0; k < multi_update_length; k++) {
                     itemkey_t acc;
-                    generate_account_id(acc, zipfian_gen);
+                    generate_account_id(acc, zipfian_gen, finite_zipfian_gen);
                     multi_accounts.push_back(acc);
                 }
                 // sort accounts to avoid deadlock
@@ -994,9 +997,9 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
                 // Randomly select a transaction type and accounts
                 int txn_type = generate_txn_type();
                 if(txn_type == 0 || txn_type == 1) { // TxAmagamate or TxSendPayment
-                    generate_two_account_ids(accounts_vec[0], accounts_vec[1], zipfian_gen);
+                    generate_two_account_ids(accounts_vec[0], accounts_vec[1], zipfian_gen, finite_zipfian_gen);
                 } else {
-                    generate_account_id(accounts_vec[0], zipfian_gen);
+                    generate_account_id(accounts_vec[0], zipfian_gen, finite_zipfian_gen);
                 }
                 // Create a new transaction object
                 txn_entry = new TxnQueueEntry(tx_id, txn_type, accounts_vec);
@@ -1019,6 +1022,10 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
     if (zipfian_gen) {
         delete zipfian_gen;
         zipfian_gen = nullptr;
+    }
+    if (finite_zipfian_gen) {
+        delete finite_zipfian_gen;
+        finite_zipfian_gen = nullptr;
     }
 }
 

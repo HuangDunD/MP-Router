@@ -69,6 +69,7 @@ extern int PreExtendIndexPageSize; // 预分配索引页面大小
 extern bool LOAD_DATA_ONLY; // 仅加载数据模式
 extern bool SKIP_LOAD_DATA; // 跳过加载数据模式
 extern bool USE_UNLOGGED_TABLES; // 是否创建非日志表
+extern bool DISABLE_TABLE_AUTOVACUUM; // 建表后是否关闭 autovacuum
 extern std::vector<uint64_t> hottest_keys; // for debug
 extern int NumBucket;
 extern bool Enable_Long_Txn; // 是否启用长事务

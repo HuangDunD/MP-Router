@@ -1,9 +1,12 @@
 #pragma once
 
 #include <cassert>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <iostream>
+#include <stdexcept>
+#include <vector>
 
 #include "util/fast_random.h"
 
@@ -256,3 +259,67 @@ class ZipfGen {
 
   uint64_t num_buckets_;
 } __attribute__((aligned(128)));  // To prevent false sharing caused by adjacent cacheline prefetching
+
+class FiniteZipfGen {
+ public:
+  FiniteZipfGen(uint64_t n, double sigma, uint64_t rand_seed, double epsilon = 0.001)
+      : rand_(rand_seed) {
+    if (n == 0 || sigma < 0.0 || epsilon <= 0.0 || epsilon >= 0.5) {
+      throw std::invalid_argument("FiniteZipfGen requires n > 0, sigma >= 0, and 0 < epsilon < 0.5");
+    }
+
+    double sum = 0.0;
+    uint64_t last = UINT64_MAX;
+
+    for (uint64_t i = 0; i < n; ++i) {
+      sum += std::exp(-sigma * std::log(static_cast<double>(i + 1)));
+      if (last == UINT64_MAX ||
+          static_cast<double>(i) * (1.0 - epsilon) > static_cast<double>(last)) {
+        keys_.push_back(i);
+        cdf_.push_back(sum);
+        last = i;
+      }
+    }
+
+    if (keys_.empty() || keys_.back() != n - 1) {
+      keys_.push_back(n - 1);
+      cdf_.push_back(sum);
+    }
+
+    cdf_.back() = 1.0;
+    for (int i = static_cast<int>(cdf_.size()) - 2; i >= 0; --i) {
+      cdf_[i] /= sum;
+    }
+  }
+
+  uint64_t next() {
+    double u = rand_.next_f64();
+    auto it = std::lower_bound(cdf_.begin(), cdf_.end(), u);
+    size_t idx = static_cast<size_t>(it - cdf_.begin());
+
+    if (idx >= keys_.size()) {
+      idx = keys_.size() - 1;
+    }
+    if (idx == 0) {
+      return keys_[0];
+    }
+
+    uint64_t ceiling = keys_[idx];
+    uint64_t lower = keys_[idx - 1];
+    uint64_t span = ceiling - lower;
+    if (span == 0) {
+      return ceiling;
+    }
+
+    uint64_t offset = static_cast<uint64_t>(rand_.next_f64() * static_cast<double>(span));
+    if (offset >= span) {
+      offset = span - 1;
+    }
+    return ceiling - offset;
+  }
+
+ private:
+  std::vector<uint64_t> keys_;
+  std::vector<double> cdf_;
+  Rand rand_;
+} __attribute__((aligned(128)));

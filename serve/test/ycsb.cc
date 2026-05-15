@@ -6,9 +6,12 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
 
     std::vector<itemkey_t> keys_vec(10);
     ZipfGen* zipfian_gen = nullptr;
-    if (!zipfian_gen) {
-        uint64_t zipf_seed = 2 * thread_id * GetCPUCycle();
-        uint64_t zipf_seed_mask = (uint64_t(1) << 48) - 1;
+    FiniteZipfGen* finite_zipfian_gen = nullptr;
+    uint64_t zipf_seed = 2 * thread_id * GetCPUCycle();
+    uint64_t zipf_seed_mask = (uint64_t(1) << 48) - 1;
+    if (use_finite_zipfian_) {
+        finite_zipfian_gen = new FiniteZipfGen(get_record_count(), zipfian_theta_, zipf_seed & zipf_seed_mask);
+    } else {
         zipfian_gen = new ZipfGen(get_record_count(), zipfian_theta_, zipf_seed & zipf_seed_mask);
     }
 
@@ -22,7 +25,7 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
             // Simulate some work
             // Randomly select a transaction type and accounts
             int txn_type = generate_txn_type();
-            generate_ten_keys(keys_vec, zipfian_gen);
+            generate_ten_keys(keys_vec, zipfian_gen, finite_zipfian_gen);
             // Create a new transaction object
             TxnQueueEntry* txn_entry = new TxnQueueEntry(tx_id, txn_type, {}, keys_vec);
             txn_batch.push_back(txn_entry);
@@ -43,6 +46,10 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
     if (zipfian_gen) {
         delete zipfian_gen;
         zipfian_gen = nullptr;
+    }
+    if (finite_zipfian_gen) {
+        delete finite_zipfian_gen;
+        finite_zipfian_gen = nullptr;
     }
 }
 

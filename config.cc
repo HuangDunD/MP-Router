@@ -25,6 +25,7 @@ int PreExtendIndexPageSize = 50000; // 预分配索引页面大小
 bool LOAD_DATA_ONLY = false;
 bool SKIP_LOAD_DATA = false;
 bool USE_UNLOGGED_TABLES = false;
+bool DISABLE_TABLE_AUTOVACUUM = true;
 std::vector<uint64_t> hottest_keys; // for debug
 int NumBucket = 2;
 bool Enable_Long_Txn = false; // 是否启用长事务

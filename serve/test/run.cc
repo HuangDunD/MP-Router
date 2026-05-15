@@ -1381,17 +1381,21 @@ void print_usage(const char* program_name) {
     std::cout << "Options:" << std::endl;
     std::cout << "  --system-mode <mode>        System mode (0=random node, 1=account-based, 2=page-based) [default: 0]" << std::endl;
     std::cout << "  --access-pattern <pattern>  Data access pattern (0=uniform, 1=zipfian, 2=hotspot) [default: 0]" << std::endl;
-    std::cout << "  --zipfian-theta <theta>     Zipfian distribution parameter (0.0-1.0) [default: 0.99]" << std::endl;
+    std::cout << "  --zipfian-theta <theta>     Zipfian parameter: legacy theta [0,1), finite exponent >= 0 [default: 0.99]" << std::endl;
+    std::cout << "  --zipfian-generator <mode>  Zipfian generator (legacy, finite) [default: legacy]" << std::endl;
     std::cout << "  --hotspot-fraction <frac>   Fraction of hot accounts (0.0-1.0) [default: 0.1]" << std::endl;
     std::cout << "  --hotspot-prob <prob>       Probability of accessing hot accounts (0.0-1.0) [default: 0.8]" << std::endl;
+    std::cout << "  --ycsb-read-pct <pct>       YCSB read percentage per txn, in 10-key transactions (0-100) [default: 90]" << std::endl;
     std::cout << "  --btree-read-mode <mode>    B-tree read mode (0=conn0, 1=random) [default: 0]" << std::endl;
     std::cout << "  --btree-frequency <seconds> B-tree refresh frequency in seconds [default: 5]" << std::endl;
     std::cout << "  --account-count <number>    Number of accounts to load [default: 300000]" << std::endl;
     std::cout << "  --unlog                     Create UNLOGGED tables (default follows workload)" << std::endl;
+    std::cout << "  --enable-autovacuum         Keep table autovacuum enabled after table creation [default: off]" << std::endl;
     std::cout << "  --help                      Show this help message" << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
     std::cout << "  " << program_name << " --system-mode 1 --access-pattern 1 --zipfian-theta 0.95" << std::endl;
+    std::cout << "  " << program_name << " --system-mode 1 --access-pattern 1 --zipfian-generator finite --zipfian-theta 1.3" << std::endl;
     std::cout << "  " << program_name << " --access-pattern 2 --hotspot-fraction 0.2 --hotspot-prob 0.9" << std::endl;
     std::cout << "  " << program_name << " --system-mode 2 --account-count 100000" << std::endl;
 }
@@ -1476,7 +1480,10 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
             route_cur_count += routed_txn_cnt_per_node_snapshot[i];
         }
         double route_tps = (route_cur_count - route_last_count) / seconds;
-        std::cout << "[Routed TPS] " << std::fixed << std::setprecision(2) << route_tps
+        auto now_ms_point = std::chrono::system_clock::now();
+        auto current_time_t = std::chrono::system_clock::to_time_t(now_ms_point);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_ms_point.time_since_epoch()) % 1000;
+        std::cout << "[" << std::put_time(std::localtime(&current_time_t), "%Y-%m-%d %H:%M:%S") << "." << std::setfill('0') << std::setw(3) << ms.count() << "] [Routed TPS] " << std::fixed << std::setprecision(2) << route_tps
                   << " txn/sec (total: " << exec_cur_count << "). ";
         logger_->info("[Routed TPS] " + std::to_string(route_tps) +
                       " txn/sec (total: " + std::to_string(exec_cur_count) + "). ");
@@ -1498,7 +1505,7 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
         // print exec txn count per node
         for(int i=0; i<ComputeNodeCount; i++) exec_txn_cnt_per_node_snapshot[i] = exec_txn_cnt_per_node[i].load(std::memory_order_relaxed);
         for(int i=0; i<ComputeNodeCount; i++) txn_queue_size_snapshot[i] = txn_queues[i]->size();
-        std::cout << "[Exec TPS] " << std::fixed << std::setprecision(2) << exec_tps
+        std::cout << "[" << std::put_time(std::localtime(&current_time_t), "%Y-%m-%d %H:%M:%S") << "." << std::setfill('0') << std::setw(3) << ms.count() << "] [Exec TPS] " << std::fixed << std::setprecision(2) << exec_tps
                   << " txn/sec (total: " << exec_cur_count << "). ";
         logger_->info("[Exec TPS] " + std::to_string(exec_tps) +
                       " txn/sec (total: " + std::to_string(exec_cur_count) + "). ");
@@ -1891,8 +1898,11 @@ int main(int argc, char *argv[]) {
     int access_pattern = 0; // 0: uniform, 1: zipfian, 2: hotspot
     // default parameters
     double zipfian_theta = 0.99; // Zipfian distribution parameter
+    std::string zipfian_generator = "legacy";
+    bool use_finite_zipfian = false;
     double hotspot_fraction = 0.2; // Fraction of accounts that are hot
     double hotspot_access_prob = 0.8; // Probability of accessing hot accounts
+    int ycsb_read_pct = 90; // YCSB read percentage; write percentage is 100 - read percentage
     // execution mode
     bool use_sp = true; // default: use stored procedures
     
@@ -1962,13 +1972,27 @@ int main(int argc, char *argv[]) {
         else if (arg == "--zipfian-theta") {
             if (i + 1 < argc) {
                 zipfian_theta = std::stod(argv[++i]);
-                if (zipfian_theta < 0.0 || zipfian_theta >= 1.0) {
-                    std::cerr << "Error: Zipfian theta must be between 0.0 and 1.0" << std::endl;
-                    return -1;
-                }
                 std::cout << "Zipfian theta set to: " << zipfian_theta << std::endl;
             } else {
                 std::cerr << "Error: --zipfian-theta requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--zipfian-generator") {
+            if (i + 1 < argc) {
+                zipfian_generator = argv[++i];
+                if (zipfian_generator == "legacy") {
+                    use_finite_zipfian = false;
+                } else if (zipfian_generator == "finite") {
+                    use_finite_zipfian = true;
+                } else {
+                    std::cerr << "Error: --zipfian-generator must be 'legacy' or 'finite'" << std::endl;
+                    return -1;
+                }
+                std::cout << "Zipfian generator set to: " << zipfian_generator << std::endl;
+            } else {
+                std::cerr << "Error: --zipfian-generator requires a value" << std::endl;
                 print_usage(argv[0]);
                 return -1;
             }
@@ -1997,6 +2021,21 @@ int main(int argc, char *argv[]) {
                 std::cout << "Hotspot access probability set to: " << hotspot_access_prob << std::endl;
             } else {
                 std::cerr << "Error: --hotspot-prob requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--ycsb-read-pct") {
+            if (i + 1 < argc) {
+                ycsb_read_pct = std::stoi(argv[++i]);
+                if (ycsb_read_pct < 0 || ycsb_read_pct > 100) {
+                    std::cerr << "Error: --ycsb-read-pct must be between 0 and 100" << std::endl;
+                    return -1;
+                }
+                std::cout << "YCSB read percentage set to: " << ycsb_read_pct
+                          << "% (write percentage: " << (100 - ycsb_read_pct) << "%)" << std::endl;
+            } else {
+                std::cerr << "Error: --ycsb-read-pct requires a value" << std::endl;
                 print_usage(argv[0]);
                 return -1;
             }
@@ -2083,6 +2122,10 @@ int main(int argc, char *argv[]) {
         else if (arg == "--unlog") {
             USE_UNLOGGED_TABLES = true;
             std::cout << "Use UNLOGGED tables: yes" << std::endl;
+        }
+        else if (arg == "--enable-autovacuum") {
+            DISABLE_TABLE_AUTOVACUUM = false;
+            std::cout << "Table autovacuum will remain enabled." << std::endl;
         }
         else if (arg == "--partition-interval") {
             if (i + 1 < argc) {
@@ -2348,6 +2391,18 @@ int main(int argc, char *argv[]) {
         return -1;
     }
     std::cout << "Account count: " << account_num << std::endl;
+
+    if (access_pattern == 1) {
+        if (use_finite_zipfian) {
+            if (zipfian_theta < 0.0) {
+                std::cerr << "Error: finite zipfian generator requires --zipfian-theta >= 0.0" << std::endl;
+                return -1;
+            }
+        } else if (zipfian_theta < 0.0 || zipfian_theta >= 1.0) {
+            std::cerr << "Error: legacy zipfian generator requires --zipfian-theta in [0.0, 1.0)" << std::endl;
+            return -1;
+        }
+    }
     
     std::string access_pattern_name;
     switch (access_pattern) {
@@ -2358,9 +2413,11 @@ int main(int argc, char *argv[]) {
     }
     std::cout << "Access pattern: " << access_pattern << " (" << access_pattern_name << ")" << std::endl;
     std::cout << "Use stored procedures: " << (use_sp ? "yes" : "no") << std::endl;
+    std::cout << "Table autovacuum: " << (DISABLE_TABLE_AUTOVACUUM ? "off" : "on") << std::endl;
     
     if (access_pattern == 1) {
         std::cout << "Zipfian theta: " << zipfian_theta << std::endl;
+        std::cout << "Zipfian generator: " << zipfian_generator << std::endl;
     } else if (access_pattern == 2) {
         std::cout << "Hotspot fraction: " << hotspot_fraction << std::endl;
         std::cout << "Hotspot access probability: " << hotspot_access_prob << std::endl;
@@ -2372,14 +2429,23 @@ int main(int argc, char *argv[]) {
     TPCC* tpcc = nullptr;
     if (Workload_Type == 0) {
         smallbank = new SmallBank(account_num, access_pattern);
-        if(access_pattern == 1) smallbank->set_zipfian_theta(zipfian_theta);
+        if(access_pattern == 1) {
+            smallbank->set_zipfian_theta(zipfian_theta);
+            smallbank->set_zipfian_generator(use_finite_zipfian);
+        }
         if(access_pattern == 2) smallbank->set_hotspot_params(hotspot_fraction, hotspot_access_prob);
         std::cout << "SmallBank benchmark initialized." << std::endl;
     } else if (Workload_Type == 1) {
-        ycsb = new YCSB(account_num, access_pattern); 
-        if(access_pattern == 1) ycsb->set_zipfian_theta(zipfian_theta);
+        ycsb = new YCSB(account_num, access_pattern, ycsb_read_pct, 100 - ycsb_read_pct);
+        if(access_pattern == 1) {
+            ycsb->set_zipfian_theta(zipfian_theta);
+            ycsb->set_zipfian_generator(use_finite_zipfian);
+        }
         if(access_pattern == 2) ycsb->set_hotspot_params(hotspot_fraction, hotspot_access_prob);  
-        std::cout << "YCSB benchmark initialized." << std::endl;
+        std::cout << "YCSB benchmark initialized. read_pct=" << ycsb_read_pct
+                  << " write_pct=" << (100 - ycsb_read_pct)
+                  << " read_ops_per_txn=" << ycsb->get_read_cnt()
+                  << " write_ops_per_txn=" << ycsb->get_write_cnt() << std::endl;
     } else if (Workload_Type == 2) {
         tpcc = new TPCC(warehouse_num, access_pattern); // Use the specified number of warehouses
         if(access_pattern == 2) tpcc->set_hotspot_ratio(hotspot_access_prob); // For TPC-C, we can only set hotspot ratio for warehouses

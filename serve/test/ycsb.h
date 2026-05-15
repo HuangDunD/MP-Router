@@ -10,6 +10,8 @@
 #include <thread>
 #include <random>
 #include <cmath>
+#include <algorithm>
+#include <functional>
 #include <pqxx/pqxx>
 
 #include "common.h"
@@ -28,10 +30,12 @@ class YCSB {
 public:
     // access_pattern: 0=uniform, 1=zipfian
     YCSB(int record_count, int access_pattern, int read_pct = 90, int update_pct = 10, int field_len = 100)
-        : record_count_(record_count), access_pattern_(access_pattern), read_pct_(read_pct), update_pct_(update_pct), field_len_(field_len) {
+        : record_count_(record_count), access_pattern_(access_pattern), read_pct_(read_pct), update_pct_(update_pct),
+          field_len_(field_len), zipfian_theta_(0.99), use_finite_zipfian_(false), hotspot_fraction_(0.2),
+          hotspot_access_prob_(0.8) {
             int total_keys = 10; // 固定每次10个键
             read_ops_per_txn_ = std::max(0, std::min(total_keys, (int)std::round(total_keys * (read_pct / 100.0))));
-            write_ops_per_txn_ = total_keys - read_ops_per_txn_; 
+            write_ops_per_txn_ = total_keys - read_ops_per_txn_;
             // 预构造静态 rw_flags_：0 表示读，1 表示写
             rw_flags_.assign(total_keys, false);
             for (int i = read_ops_per_txn_; i < total_keys; ++i) rw_flags_[i] = true;
@@ -55,7 +59,7 @@ public:
             txn.exec("DROP TABLE IF EXISTS usertable");
             const std::string table_keyword = USE_UNLOGGED_TABLES ? "CREATE UNLOGGED TABLE " : "CREATE TABLE ";
             txn.exec(table_keyword + R"SQL(usertable (
-                id INT, 
+                id INT,
                 FIELD0   VARCHAR(100),
                 FIELD1   VARCHAR(100),
                 FIELD2   VARCHAR(100),
@@ -74,22 +78,15 @@ public:
         } catch (const std::exception& e) {
             std::cerr << "Error creating YCSB table: " << e.what() << std::endl;
         }
-        try {
-            pqxx::work txn(*conn);
-            txn.exec(R"SQL(
-            ALTER TABLE usertable SET ( 
-                autovacuum_enabled = on,
-                autovacuum_vacuum_scale_factor = 0.05,   
-                autovacuum_vacuum_threshold = 500,       
-                autovacuum_analyze_scale_factor = 0.05,
-                autovacuum_analyze_threshold = 500
-            );
-            )SQL");
-            std::cout << "Set usertable table autovacuum parameters." << std::endl;
-            txn.commit();
-        }
-        catch (const std::exception &e) {
-            std::cerr << "Error while setting usertable table autovacuum: " << e.what() << std::endl;
+        if (DISABLE_TABLE_AUTOVACUUM) {
+            try {
+                pqxx::work txn(*conn);
+                txn.exec("ALTER TABLE usertable SET (autovacuum_enabled = off)");
+                txn.commit();
+                std::cout << "Disabled autovacuum for usertable." << std::endl;
+            } catch (const std::exception &e) {
+                std::cerr << "Error while setting usertable autovacuum: " << e.what() << std::endl;
+            }
         }
         std::thread extend_thread1([](){
             pqxx::connection conn_extend(DBConnection[0]);
@@ -118,22 +115,27 @@ public:
     // 装载数据
     void load_data(pqxx::connection* conn0);
 
-    void generate_ten_keys(std::vector<itemkey_t>& keys_vec, ZipfGen* zipfian_gen) {
+    void generate_ten_keys(std::vector<itemkey_t>& keys_vec, ZipfGen* zipfian_gen, FiniteZipfGen* finite_zipfian_gen) {
+        const bool enforce_unique_keys = record_count_ >= static_cast<int>(keys_vec.size());
         for (int i = 0; i < 10; i++) {
             itemkey_t key;
-            if (access_pattern_ == 0) { // uniform
-                key = rand() % record_count_ + 1;
-            } else if (access_pattern_ == 1){ // zipfian
-                key = zipfian_gen->next() + 1;
-            } else assert(false);
+            do {
+                if (access_pattern_ == 0) { // uniform
+                    key = rand() % record_count_ + 1;
+                } else if (access_pattern_ == 1){ // zipfian
+                    key = (use_finite_zipfian_ ? finite_zipfian_gen->next() : zipfian_gen->next()) + 1;
+                } else assert(false);
+            } while (enforce_unique_keys && std::find(keys_vec.begin(), keys_vec.begin() + i, key) != keys_vec.begin() + i);
             keys_vec[i] = key;
         }
+        std::sort(keys_vec.begin(), keys_vec.begin() + read_ops_per_txn_, std::greater<itemkey_t>());
+        std::sort(keys_vec.begin() + read_ops_per_txn_, keys_vec.end(), std::greater<itemkey_t>());
     }
 
     int generate_txn_type() const {
         return 0;
     }
-    
+
     // 获取读写标志（零拷贝），1表示写，0表示读
     const std::vector<bool>& get_rw_flags() const { return rw_flags_; }
 
@@ -147,6 +149,10 @@ public:
 
     void set_zipfian_theta(double theta) {
         zipfian_theta_ = theta;
+    }
+
+    void set_zipfian_generator(bool use_finite_zipfian) {
+        use_finite_zipfian_ = use_finite_zipfian;
     }
 
     void set_hotspot_params(double fraction, double access_prob) {
@@ -195,6 +201,7 @@ private:
     int update_pct_;
     int field_len_;
     double zipfian_theta_;
+    bool use_finite_zipfian_;
     double hotspot_fraction_;
     double hotspot_access_prob_;
 
