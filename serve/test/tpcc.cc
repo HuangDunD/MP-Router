@@ -249,16 +249,15 @@ void TPCC::create_table(pqxx::connection *conn) {
             ) WITH (FILLFACTOR = 50);
         )SQL");
 
-        // Set autovacuum parameters
-        std::vector<std::string> tables = {"warehouse", "district", "customer", "history", "new_order", "orders", "order_line", "item", "stock"};
-        for (const auto& table : tables) {
-            txn.exec("ALTER TABLE " + table + " SET ("
-                "autovacuum_enabled = off, "
-                "autovacuum_vacuum_scale_factor = 0.05, "
-                "autovacuum_vacuum_threshold = 500, "
-                "autovacuum_analyze_scale_factor = 0.05, "
-                "autovacuum_analyze_threshold = 500"
-            ")");
+        if (DISABLE_TABLE_AUTOVACUUM) {
+            std::vector<std::string> tables = {
+                "warehouse", "district", "customer", "history", "new_order",
+                "orders", "order_line", "item", "stock"
+            };
+            for (const auto& table : tables) {
+                txn.exec("ALTER TABLE " + table + " SET (autovacuum_enabled = off)");
+            }
+            std::cout << "Disabled autovacuum for TPC-C tables." << std::endl;
         }
 
         txn.commit();
