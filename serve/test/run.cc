@@ -37,6 +37,8 @@ static std::atomic<bool> warmup_transition_started{false};
 // SmallBank 数据加载时产生的键→页映射（按 id 直接索引），用于初始化 Router
 static SmallBank::TableKeyPageMap g_smallbank_key_page_map;
 
+static std::vector<std::string> cli_db_connections;
+
 // thread parameters structure for DB connector threads
 struct thread_params
 {
@@ -1391,6 +1393,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --account-count <number>    Number of accounts to load [default: 300000]" << std::endl;
     std::cout << "  --unlog                     Create UNLOGGED tables (default follows workload)" << std::endl;
     std::cout << "  --enable-autovacuum         Keep table autovacuum enabled after table creation [default: off]" << std::endl;
+    std::cout << "  --db-connection <conninfo>  Add one PostgreSQL conninfo string; repeat for RAC/multi-node" << std::endl;
     std::cout << "  --help                      Show this help message" << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
@@ -2253,6 +2256,16 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--db-connection") {
+            if (i + 1 < argc) {
+                cli_db_connections.push_back(argv[++i]);
+                std::cout << "Added PostgreSQL connection string. Total explicit connections: "
+                          << cli_db_connections.size() << std::endl;
+            } else {
+                std::cerr << "Error: --db-connection requires an argument." << std::endl;
+                return -1;
+            }
+        }
         else if (arg == "--num-bucket") {
             if (i + 1 < argc) {
                 NumBucket = std::stoi(argv[++i]);
@@ -2506,8 +2519,21 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
 
-        DBConnection.push_back("host=10.47.106.44 port=5432 user=hcy password=123456 dbname=smallbank");
-        DBConnection.push_back("host=10.47.106.44 port=5432 user=hcy password=123456 dbname=smallbank");
+        DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=postgres");
+        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+
+        if (!cli_db_connections.empty()) {
+            std::cout << "Using PostgreSQL connection strings provided via command line:" << std::endl;
+            DBConnection.clear(); // Clear any hardcoded connections
+            for (const auto& conninfo : cli_db_connections) {
+                DBConnection.push_back(conninfo);
+            }
+        }
+
+        if (DBConnection.empty()) {
+            std::cerr << "Error: at least one --db-connection is required for PostgreSQL." << std::endl;
+            return -1;
+        }
 
         ComputeNodeCount = DBConnection.size();
         std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
