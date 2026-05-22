@@ -138,7 +138,7 @@ void generate_perf_kwr_report(int start_snapshot_id, int end_snapshot_id, std::s
 }
 
 static bool warmup_end_supported_mode() {
-    return SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 11 || SYSTEM_MODE == 13 ||
+    return SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 4 || SYSTEM_MODE == 11 || SYSTEM_MODE == 13 ||
            SYSTEM_MODE == 26 || SYSTEM_MODE == 27 || SYSTEM_MODE == 28 || SYSTEM_MODE == 29 ||
            SYSTEM_MODE == 30;
 }
@@ -183,7 +183,7 @@ static void maybe_finish_warmup(Logger* logger_) {
         return;
     }
 
-    reset_pg_runtime_stats_after_warmup(logger_);
+    // reset_pg_runtime_stats_after_warmup(logger_);
     WarmupEnd = true;
 
     std::ostringstream os;
@@ -1393,6 +1393,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --account-count <number>    Number of accounts to load [default: 300000]" << std::endl;
     std::cout << "  --unlog                     Create UNLOGGED tables (default follows workload)" << std::endl;
     std::cout << "  --enable-autovacuum         Keep table autovacuum enabled after table creation [default: off]" << std::endl;
+    std::cout << "  --without-kpmap             Skip key-page map initialization for client-only experiments" << std::endl;
     std::cout << "  --db-connection <conninfo>  Add one PostgreSQL conninfo string; repeat for RAC/multi-node" << std::endl;
     std::cout << "  --help                      Show this help message" << std::endl;
     std::cout << std::endl;
@@ -1899,6 +1900,7 @@ int main(int argc, char *argv[]) {
 
     int system_mode = 0; // Default system mode
     int access_pattern = 0; // 0: uniform, 1: zipfian, 2: hotspot
+    bool without_kpmap = false;
     // default parameters
     double zipfian_theta = 0.99; // Zipfian distribution parameter
     std::string zipfian_generator = "legacy";
@@ -2129,6 +2131,10 @@ int main(int argc, char *argv[]) {
         else if (arg == "--enable-autovacuum") {
             DISABLE_TABLE_AUTOVACUUM = false;
             std::cout << "Table autovacuum will remain enabled." << std::endl;
+        }
+        else if (arg == "--without-kpmap") {
+            without_kpmap = true;
+            std::cout << "Key-page map initialization disabled." << std::endl;
         }
         else if (arg == "--partition-interval") {
             if (i + 1 < argc) {
@@ -2427,6 +2433,7 @@ int main(int argc, char *argv[]) {
     std::cout << "Access pattern: " << access_pattern << " (" << access_pattern_name << ")" << std::endl;
     std::cout << "Use stored procedures: " << (use_sp ? "yes" : "no") << std::endl;
     std::cout << "Table autovacuum: " << (DISABLE_TABLE_AUTOVACUUM ? "off" : "on") << std::endl;
+    std::cout << "Key-page map initialization: " << (without_kpmap ? "off" : "on") << std::endl;
     
     if (access_pattern == 1) {
         std::cout << "Zipfian theta: " << zipfian_theta << std::endl;
@@ -2751,6 +2758,9 @@ int main(int argc, char *argv[]) {
         cfg.hot_hash_entry_limit = 640ULL * 1024ULL * 1024ULL; // 开的尽可能大，对于其他负载我们不做key 不足的实验
     }
     SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, pending_txn_queue, worker_threads, nullptr, metis, logger_, smallbank, ycsb, tpcc);
+    if (without_kpmap) {
+        smart_router->disable_key_page_map();
+    }
     std::cout << "Smart Router initialized." << std::endl;
 
     // TIT: 当后续事务的入度变为0时，立即调度到目标节点
@@ -2759,7 +2769,10 @@ int main(int argc, char *argv[]) {
     });
 
     // Initialize the key-page map
-    if (!SKIP_LOAD_DATA && Workload_Type == 0) {
+    if (without_kpmap) {
+        std::cout << "Skipping key-page map initialization (--without-kpmap)." << std::endl;
+    }
+    else if (!SKIP_LOAD_DATA && Workload_Type == 0) {
         int N = smallbank->get_account_count();
         for (int id = 1; id <= N; ++id) {
             if (id < (int)g_smallbank_key_page_map.checking_page.size()) {

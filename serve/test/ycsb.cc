@@ -56,7 +56,7 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
 // 装载数据
 void YCSB::load_data(pqxx::connection* conn0) {
     std::cout << "Loading YCSB data... count=" << record_count_ << std::endl;
-    int num_threads = 16;
+    int num_threads = 50;
     std::vector<std::thread> threads;
     int chunk = (record_count_ + num_threads - 1) / num_threads;
     auto worker = [&](int start_id, int end_id) {

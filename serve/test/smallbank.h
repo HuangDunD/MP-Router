@@ -255,6 +255,10 @@ public:
     }
 
     void generate_friend_graph() {
+        if (AffinityTxnRatio == 0 && !dynamic_workload) {
+            std::cout << "AffinityTxnRatio is 0, skipping friend graph generation." << std::endl;
+            return;
+        }
         // 生成用户朋友关系
         int num_users = smallbank_account;
     #if WORKLOAD_AFFINITY_MODE == 0

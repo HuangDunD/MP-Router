@@ -198,6 +198,14 @@ public:
         metis_->reset_stats();
     }
 
+    void disable_key_page_map() {
+        key_page_map_enabled_ = false;
+    }
+
+    bool key_page_map_enabled() const {
+        return key_page_map_enabled_;
+    }
+
     // hot hash 层的热键条目
     class HotEntry {
     public:
@@ -503,6 +511,7 @@ public:
     // 如果key不存在, 则不进行任何操作
     inline void update_key_page(TxnQueueEntry* txn, std::vector<table_id_t>& table_ids, std::vector<itemkey_t>& keys, std::vector<bool>& rw, 
             std::vector<page_id_t> ctid_ret_pages, node_id_t routed_node_id) { // txn_type for SYSTEM_MODE 8
+        if (!key_page_map_enabled_) return;
         if (ownership_table_ == nullptr) return;
         // 这个地方可能ctid_ret_pages的数量不等于keys, 因为这个事务可能触发了回滚, 此时需要将table_ids, keys截断一下
         if(txn->accessed_page_ids.size() == 0) return; // 说明没有记录访问的页面，可能是system_mode 4无需维护key-page映射，直接返回
@@ -561,6 +570,7 @@ public:
 
     // init key-page mapping when load data
     inline void initial_key_page(table_id_t table_id, itemkey_t key, page_id_t page) {
+        if (!key_page_map_enabled_) return;
     #if !MLP_PREDICTION
         if(stats_.hot_hash_entries > cfg_.hot_hash_entry_limit) return; // 超预算则不插入新条目
         std::unique_lock<std::shared_mutex> lock(hot_mutex_);
@@ -1578,6 +1588,11 @@ private:
     // 查找 key。若在 hot hash 中找到，立即返回 page。
     // 否则可能查 B+tree 提示（在 .cc 实现），未命中返回 std::nullopt。
     inline HotEntry lookup(TxnQueueEntry* txn, table_id_t table_id, itemkey_t key) {
+        if (!key_page_map_enabled_) {
+            HotEntry empty_entry;
+            txn->accessed_page_ids.push_back(empty_entry.page);
+            return empty_entry;
+        }
     #if !MLP_PREDICTION
         std::shared_lock<std::shared_mutex> lock(hot_mutex_);
         auto it = hot_key_map.find({table_id, key});
@@ -1627,6 +1642,9 @@ private:
     
     // 插入映射。如果存储满了, 会在预算内驱逐。
     inline HotEntry insert_or_victim_hot(table_id_t table_id, itemkey_t key, page_id_t page) {
+        if (!key_page_map_enabled_) {
+            return HotEntry{page, 1, hot_lru_.end()};
+        }
         // 策略1: Try Lock. 如果锁竞争激烈，直接放弃缓存本次插入，避免阻塞主线程，反正只是Cache
         std::unique_lock<std::shared_mutex> lock(hot_mutex_, std::try_to_lock);
         if(!lock.owns_lock()) {
@@ -2070,4 +2088,6 @@ public:
     std::thread chimera_phase_switch_thread_;
     std::atomic<bool> chimera_switch_running_{true};
     void run_chimera_phase_switch();
+
+    bool key_page_map_enabled_ = true;
 };
