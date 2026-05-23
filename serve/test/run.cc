@@ -183,7 +183,7 @@ static void maybe_finish_warmup(Logger* logger_) {
         return;
     }
 
-    // reset_pg_runtime_stats_after_warmup(logger_);
+    reset_pg_runtime_stats_after_warmup(logger_);
     WarmupEnd = true;
 
     std::ostringstream os;
