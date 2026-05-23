@@ -90,3 +90,6 @@ extern int Workload_Type;
 extern bool dynamic_workload; // 是否启用动态workload
 extern bool change_friend; // 是否改变朋友关系
 extern std::atomic<bool> stop_benchmark; // 停止benchmark的标志
+extern bool time_based_run; // 是否按时间窗口运行
+extern int warmup_seconds; // time-based 模式预热秒数
+extern int run_seconds; // time-based 模式正式运行秒数

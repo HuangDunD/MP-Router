@@ -195,6 +195,29 @@ static void maybe_finish_warmup(Logger* logger_) {
     }
 }
 
+static void finish_warmup_now(Logger* logger_, const std::string& reason) {
+    if (WarmupEnd) {
+        return;
+    }
+
+    bool expected = false;
+    if (!warmup_transition_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    reset_pg_runtime_stats_after_warmup(logger_);
+    WarmupEnd = true;
+
+    std::ostringstream os;
+    os << "Warmup Ended for Mode " << SYSTEM_MODE
+       << " (" << reason << ")"
+       << ", exe_count: " << exe_count.load(std::memory_order_relaxed);
+    std::cout << os.str() << std::endl;
+    if (logger_) {
+        logger_->info(os.str());
+    }
+}
+
 void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* ycsb, TPCC* tpcc) {
     int keys_num;
     if(Workload_Type == 0){
@@ -1410,6 +1433,9 @@ void print_usage(const char* program_name) {
     std::cout << "  --unlog                     Create UNLOGGED tables (default follows workload)" << std::endl;
     std::cout << "  --enable-autovacuum         Keep table autovacuum enabled after table creation [default: off]" << std::endl;
     std::cout << "  --without-kpmap             Skip key-page map initialization for client-only experiments" << std::endl;
+    std::cout << "  --time-run                  Run by wall-clock time instead of try-count" << std::endl;
+    std::cout << "  --warmup-seconds <sec>      Warmup duration for --time-run [default: 180]" << std::endl;
+    std::cout << "  --run-seconds <sec>         Measured duration after warmup for --time-run [default: 60]" << std::endl;
     std::cout << "  --db-connection <conninfo>  Add one PostgreSQL conninfo string; repeat for RAC/multi-node" << std::endl;
     std::cout << "  --help                      Show this help message" << std::endl;
     std::cout << std::endl;
@@ -2198,6 +2224,38 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--time-run") {
+            time_based_run = true;
+            std::cout << "Time-based run enabled." << std::endl;
+        }
+        else if (arg == "--warmup-seconds") {
+            if (i + 1 < argc) {
+                warmup_seconds = std::stoi(argv[++i]);
+                if (warmup_seconds < 0) {
+                    std::cerr << "Error: --warmup-seconds must be non-negative" << std::endl;
+                    return -1;
+                }
+                std::cout << "Warmup seconds set to: " << warmup_seconds << std::endl;
+            } else {
+                std::cerr << "Error: --warmup-seconds requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--run-seconds") {
+            if (i + 1 < argc) {
+                run_seconds = std::stoi(argv[++i]);
+                if (run_seconds <= 0) {
+                    std::cerr << "Error: --run-seconds must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Run seconds set to: " << run_seconds << std::endl;
+            } else {
+                std::cerr << "Error: --run-seconds requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else if (arg == "--kwr-name") {
             if (i + 1 < argc) {
                 kwr_report_name = argv[++i];
@@ -2954,10 +3012,19 @@ int main(int argc, char *argv[]) {
     std::thread tps_thread(print_tps_loop, smart_router, txn_pool, logger_, smallbank, &smart_router->get_threadpool());
     tps_thread.detach(); // Detach the thread to run independently
 
-    while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (time_based_run) {
+        std::cout << "Time-based run: warmup_seconds=" << warmup_seconds
+                  << " run_seconds=" << run_seconds << std::endl;
+        if (warmup_seconds > 0) {
+            std::this_thread::sleep_for(std::chrono::seconds(warmup_seconds));
+        }
+        finish_warmup_now(logger_, "time-based warmup");
+    } else {
+        while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        maybe_finish_warmup(logger_);
     }
-    maybe_finish_warmup(logger_);
     std::cout << "\033[31m Warmup rounds completed. Create the smart router snapshot. \033[0m" << std::endl;
     auto warmup_end_time = std::chrono::high_resolution_clock::now();
     long long warmup_exe_count = exe_count;
@@ -2967,6 +3034,16 @@ int main(int argc, char *argv[]) {
     }
     // Create a performance snapshot after warmup
     // int mid_snapshot_id = create_perf_kwr_snapshot();
+
+    if (time_based_run) {
+        std::this_thread::sleep_for(std::chrono::seconds(run_seconds));
+        stop_benchmark.store(true, std::memory_order_relaxed);
+        txn_pool->stop_pool();
+        std::cout << "Time-based run duration ended. Stopping transaction generation." << std::endl;
+        if (logger_) {
+            logger_->info("Time-based run duration ended. Stopping transaction generation.");
+        }
+    }
 
     // Wait for all threads to complete
     for(auto& thread : db_conn_threads) {

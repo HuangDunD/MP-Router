@@ -693,9 +693,15 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
     // Generate transactions
     int total_txn_to_generate = MetisWarmupRound * PARTITION_INTERVAL + try_count * worker_threads * ComputeNodeCount;
     
-    while(generated_txn_count < total_txn_to_generate) {
+    while(time_based_run || generated_txn_count < total_txn_to_generate) {
+        if (time_based_run && stop_benchmark.load(std::memory_order_relaxed)) {
+            break;
+        }
         std::vector<TxnQueueEntry*> txn_batch;
         for (int i = 0; i < 100; i++) {
+            if (time_based_run && stop_benchmark.load(std::memory_order_relaxed)) {
+                break;
+            }
             generated_txn_count++;
             tx_id_t tx_id = tx_id_generator++;
             
@@ -788,6 +794,9 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
             
             TxnQueueEntry* txn_entry = new TxnQueueEntry(tx_id, txn_type_int, routing_keys, {}, tpcc_params, routing_keys);
             txn_batch.push_back(txn_entry);
+        }
+        if (txn_batch.empty()) {
+            break;
         }
         
         // if(SYSTEM_MODE != 11){

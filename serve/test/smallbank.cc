@@ -965,7 +965,7 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
     int multi_update_length = Long_Txn_Length; // 从配置中读取长事务的长度
     
     while(true) {
-        if(dynamic_workload){
+        if(dynamic_workload || time_based_run){
             if(stop_benchmark.load(std::memory_order_relaxed)) break;
         } else {
             if(generated_txn_count >= total_txn_to_generate) break;
@@ -973,6 +973,9 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
 
         std::vector<TxnQueueEntry*> txn_batch;
         for (int i = 0; i < 0.1 * BatchRouterProcessSize; i++){
+            if (time_based_run && stop_benchmark.load(std::memory_order_relaxed)) {
+                break;
+            }
             generated_txn_count++;
             tx_id_t tx_id = tx_id_generator++; // global atomic transaction ID
             
@@ -1005,6 +1008,9 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
                 txn_entry = new TxnQueueEntry(tx_id, txn_type, accounts_vec);
             }
             txn_batch.push_back(txn_entry);
+        }
+        if (txn_batch.empty()) {
+            break;
         }
         // Enqueue the transaction into the global transaction pool
         // txn_pool->receive_txn_from_client(txn_entry);

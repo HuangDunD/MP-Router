@@ -43,3 +43,6 @@ int Workload_Type = 0; // 0: smallbank, 1: ycsb
 bool dynamic_workload = false;
 bool change_friend = false;
 std::atomic<bool> stop_benchmark{false};
+bool time_based_run = false;
+int warmup_seconds = 180;
+int run_seconds = 60;

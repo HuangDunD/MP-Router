@@ -19,9 +19,15 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
 
     // 全局一共进行 MetisWarmupRound * PARTITION_INTERVAL的冷启动事务生成，每个工作节点具有worker_threads个线程，每个线程生成try_count个事务
     int total_txn_to_generate = MetisWarmupRound * PARTITION_INTERVAL + try_count * worker_threads * ComputeNodeCount;
-    while(generated_txn_count < total_txn_to_generate) {
+    while(time_based_run || generated_txn_count < total_txn_to_generate) {
+        if (time_based_run && stop_benchmark.load(std::memory_order_relaxed)) {
+            break;
+        }
         std::vector<TxnQueueEntry*> txn_batch;
         for (int i = 0; i < 100; i++){
+            if (time_based_run && stop_benchmark.load(std::memory_order_relaxed)) {
+                break;
+            }
             generated_txn_count++;
             tx_id_t tx_id = tx_id_generator++; // global atomic transaction ID
             // Simulate some work
@@ -32,6 +38,9 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
             TxnQueueEntry* txn_entry = new TxnQueueEntry(tx_id, txn_type, {}, keys_vec);
             txn_entry->ycsb_rw_flags = rw_flags;
             txn_batch.push_back(txn_entry);
+        }
+        if (txn_batch.empty()) {
+            break;
         }
         // Enqueue the transaction into the global transaction pool
         // txn_pool->receive_txn_from_client(txn_entry);
