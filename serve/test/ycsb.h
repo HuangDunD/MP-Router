@@ -28,11 +28,16 @@ enum class YCSBTableType : uint64_t {
 
 class YCSB {
 public:
+    enum class RwMode {
+        FIXED,
+        RANDOM
+    };
+
     // access_pattern: 0=uniform, 1=zipfian
     YCSB(int record_count, int access_pattern, int read_pct = 90, int update_pct = 10, int field_len = 100)
         : record_count_(record_count), access_pattern_(access_pattern), read_pct_(read_pct), update_pct_(update_pct),
           field_len_(field_len), zipfian_theta_(0.99), use_finite_zipfian_(false), hotspot_fraction_(0.2),
-          hotspot_access_prob_(0.8) {
+          hotspot_access_prob_(0.8), rw_mode_(RwMode::FIXED) {
             int total_keys = 10; // 固定每次10个键
             read_ops_per_txn_ = std::max(0, std::min(total_keys, (int)std::round(total_keys * (read_pct / 100.0))));
             write_ops_per_txn_ = total_keys - read_ops_per_txn_;
@@ -115,7 +120,11 @@ public:
     // 装载数据
     void load_data(pqxx::connection* conn0);
 
-    void generate_ten_keys(std::vector<itemkey_t>& keys_vec, ZipfGen* zipfian_gen, FiniteZipfGen* finite_zipfian_gen) {
+    void generate_ten_keys(std::vector<itemkey_t>& keys_vec,
+                           std::vector<bool>& rw_flags,
+                           ZipfGen* zipfian_gen,
+                           FiniteZipfGen* finite_zipfian_gen,
+                           std::mt19937& rng) {
         const bool enforce_unique_keys = record_count_ >= static_cast<int>(keys_vec.size());
         for (int i = 0; i < 10; i++) {
             itemkey_t key;
@@ -128,8 +137,43 @@ public:
             } while (enforce_unique_keys && std::find(keys_vec.begin(), keys_vec.begin() + i, key) != keys_vec.begin() + i);
             keys_vec[i] = key;
         }
-        std::sort(keys_vec.begin(), keys_vec.begin() + read_ops_per_txn_, std::greater<itemkey_t>());
-        std::sort(keys_vec.begin() + read_ops_per_txn_, keys_vec.end(), std::greater<itemkey_t>());
+
+        if (rw_mode_ == RwMode::FIXED) {
+            rw_flags = rw_flags_;
+        } else {
+            std::bernoulli_distribution write_dist(update_pct_ / 100.0);
+            rw_flags.assign(keys_vec.size(), false);
+            for (size_t i = 0; i < rw_flags.size(); i++) {
+                rw_flags[i] = write_dist(rng);
+            }
+        }
+
+        std::vector<itemkey_t> read_keys;
+        std::vector<itemkey_t> write_keys;
+        read_keys.reserve(keys_vec.size());
+        write_keys.reserve(keys_vec.size());
+        for (size_t i = 0; i < keys_vec.size(); i++) {
+            if (rw_flags[i]) {
+                write_keys.push_back(keys_vec[i]);
+            } else {
+                read_keys.push_back(keys_vec[i]);
+            }
+        }
+
+        std::sort(read_keys.begin(), read_keys.end(), std::greater<itemkey_t>());
+        std::sort(write_keys.begin(), write_keys.end(), std::greater<itemkey_t>());
+
+        size_t pos = 0;
+        for (itemkey_t key : read_keys) {
+            keys_vec[pos] = key;
+            rw_flags[pos] = false;
+            pos++;
+        }
+        for (itemkey_t key : write_keys) {
+            keys_vec[pos] = key;
+            rw_flags[pos] = true;
+            pos++;
+        }
     }
 
     int generate_txn_type() const {
@@ -138,6 +182,10 @@ public:
 
     // 获取读写标志（零拷贝），1表示写，0表示读
     const std::vector<bool>& get_rw_flags() const { return rw_flags_; }
+
+    void set_rw_mode(RwMode mode) { rw_mode_ = mode; }
+
+    bool random_rw_mode_enabled() const { return rw_mode_ == RwMode::RANDOM; }
 
     void create_ycsb_stored_procedures(pqxx::connection* conn);
 
@@ -204,6 +252,7 @@ private:
     bool use_finite_zipfian_;
     double hotspot_fraction_;
     double hotspot_access_prob_;
+    RwMode rw_mode_;
 
     int read_ops_per_txn_;
     int write_ops_per_txn_;

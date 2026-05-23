@@ -957,6 +957,9 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
 
     // 构造数组字符串：array['k1','k2',...]
     auto build_array = [](const std::vector<itemkey_t>& v, size_t start, size_t count) {
+        if (count == 0) {
+            return std::string("ARRAY[]::INT[]");
+        }
         std::string s = "array[";
         for(size_t i = 0; i < count; ++i) {
             if(i > 0) s += ",";
@@ -1028,7 +1031,9 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             std::vector<itemkey_t> keys = txn_entry->ycsb_keys;
             assert(tables.size() == keys.size());
             assert(txn_entry->ycsb_keys.size() == 10);
-            std::vector<bool> rw = ycsb->get_rw_flags();
+            std::vector<bool> rw = txn_entry->ycsb_rw_flags.empty() ?
+                ycsb->get_rw_flags() : txn_entry->ycsb_rw_flags;
+            assert(rw.size() == keys.size());
 
             std::vector<page_id_t> ctid_ret_page_ids;
 
@@ -1042,9 +1047,14 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
                 pqxx::result res;
                 switch(txn_type) {
                     case 0: { 
-                        // 读集合取前 read_cnt 个，写集合取后 write_cnt 个
-                        std::string read_arr = build_array(keys, 0, ycsb->get_read_cnt());
-                        std::string write_arr = build_array(keys, ycsb->get_read_cnt(), ycsb->get_write_cnt());
+                        size_t read_count = 0;
+                        while (read_count < rw.size() && !rw[read_count]) {
+                            read_count++;
+                        }
+                        size_t write_count = rw.size() - read_count;
+
+                        std::string read_arr = build_array(keys, 0, read_count);
+                        std::string write_arr = build_array(keys, read_count, write_count);
 
                         std::string sql = "SELECT id, ctid, txid FROM ycsb_multi_rw(" + read_arr + ", " + write_arr + ")";
                         res = txn.exec(sql);
@@ -1296,6 +1306,9 @@ void run_ycsb_txns_empty(thread_params* params, Logger* logger_) {
 
     // 构造数组字符串：array['k1','k2',...]
     auto build_array = [](const std::vector<itemkey_t>& v, size_t start, size_t count) {
+        if (count == 0) {
+            return std::string("ARRAY[]::INT[]");
+        }
         std::string s = "array[";
         for(size_t i = 0; i < count; ++i) {
             if(i > 0) s += ",";
@@ -1362,7 +1375,9 @@ void run_ycsb_txns_empty(thread_params* params, Logger* logger_) {
             std::vector<itemkey_t> keys = txn_entry->ycsb_keys;
             assert(tables.size() == keys.size());
             assert(txn_entry->ycsb_keys.size() == 10);
-            std::vector<bool> rw = ycsb->get_rw_flags();
+            std::vector<bool> rw = txn_entry->ycsb_rw_flags.empty() ?
+                ycsb->get_rw_flags() : txn_entry->ycsb_rw_flags;
+            assert(rw.size() == keys.size());
 
             std::vector<page_id_t> ctid_ret_page_ids;
             ctid_ret_page_ids = txn_entry->accessed_page_ids;
@@ -1387,7 +1402,8 @@ void print_usage(const char* program_name) {
     std::cout << "  --zipfian-generator <mode>  Zipfian generator (legacy, finite) [default: legacy]" << std::endl;
     std::cout << "  --hotspot-fraction <frac>   Fraction of hot accounts (0.0-1.0) [default: 0.1]" << std::endl;
     std::cout << "  --hotspot-prob <prob>       Probability of accessing hot accounts (0.0-1.0) [default: 0.8]" << std::endl;
-    std::cout << "  --ycsb-read-pct <pct>       YCSB read percentage per txn, in 10-key transactions (0-100) [default: 90]" << std::endl;
+    std::cout << "  --ycsb-read-pct <pct>       YCSB read percentage: per-op probability in random mode, fixed count in fixed mode (0-100) [default: 90]" << std::endl;
+    std::cout << "  --ycsb-rw-mode <mode>       YCSB read/write mode: random per operation or fixed counts (random|fixed) [default: random]" << std::endl;
     std::cout << "  --btree-read-mode <mode>    B-tree read mode (0=conn0, 1=random) [default: 0]" << std::endl;
     std::cout << "  --btree-frequency <seconds> B-tree refresh frequency in seconds [default: 5]" << std::endl;
     std::cout << "  --account-count <number>    Number of accounts to load [default: 300000]" << std::endl;
@@ -1908,6 +1924,7 @@ int main(int argc, char *argv[]) {
     double hotspot_fraction = 0.2; // Fraction of accounts that are hot
     double hotspot_access_prob = 0.8; // Probability of accessing hot accounts
     int ycsb_read_pct = 90; // YCSB read percentage; write percentage is 100 - read percentage
+    std::string ycsb_rw_mode = "random";
     // execution mode
     bool use_sp = true; // default: use stored procedures
     
@@ -2041,6 +2058,20 @@ int main(int argc, char *argv[]) {
                           << "% (write percentage: " << (100 - ycsb_read_pct) << "%)" << std::endl;
             } else {
                 std::cerr << "Error: --ycsb-read-pct requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--ycsb-rw-mode") {
+            if (i + 1 < argc) {
+                ycsb_rw_mode = argv[++i];
+                if (ycsb_rw_mode != "random" && ycsb_rw_mode != "fixed") {
+                    std::cerr << "Error: --ycsb-rw-mode must be 'random' or 'fixed'" << std::endl;
+                    return -1;
+                }
+                std::cout << "YCSB read/write mode set to: " << ycsb_rw_mode << std::endl;
+            } else {
+                std::cerr << "Error: --ycsb-rw-mode requires a value" << std::endl;
                 print_usage(argv[0]);
                 return -1;
             }
@@ -2457,6 +2488,7 @@ int main(int argc, char *argv[]) {
         std::cout << "SmallBank benchmark initialized." << std::endl;
     } else if (Workload_Type == 1) {
         ycsb = new YCSB(account_num, access_pattern, ycsb_read_pct, 100 - ycsb_read_pct);
+        ycsb->set_rw_mode(ycsb_rw_mode == "random" ? YCSB::RwMode::RANDOM : YCSB::RwMode::FIXED);
         if(access_pattern == 1) {
             ycsb->set_zipfian_theta(zipfian_theta);
             ycsb->set_zipfian_generator(use_finite_zipfian);
@@ -2464,8 +2496,14 @@ int main(int argc, char *argv[]) {
         if(access_pattern == 2) ycsb->set_hotspot_params(hotspot_fraction, hotspot_access_prob);  
         std::cout << "YCSB benchmark initialized. read_pct=" << ycsb_read_pct
                   << " write_pct=" << (100 - ycsb_read_pct)
-                  << " read_ops_per_txn=" << ycsb->get_read_cnt()
-                  << " write_ops_per_txn=" << ycsb->get_write_cnt() << std::endl;
+                  << " rw_mode=" << ycsb_rw_mode;
+        if (ycsb_rw_mode == "fixed") {
+            std::cout << " read_ops_per_txn=" << ycsb->get_read_cnt()
+                      << " write_ops_per_txn=" << ycsb->get_write_cnt();
+        } else {
+            std::cout << " read/write selected independently per operation";
+        }
+        std::cout << std::endl;
     } else if (Workload_Type == 2) {
         tpcc = new TPCC(warehouse_num, access_pattern); // Use the specified number of warehouses
         if(access_pattern == 2) tpcc->set_hotspot_ratio(hotspot_access_prob); // For TPC-C, we can only set hotspot ratio for warehouses

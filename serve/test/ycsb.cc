@@ -5,6 +5,8 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
     pthread_setname_np(pthread_self(), ("txn_gen_t_" + std::to_string(thread_id)).c_str());
 
     std::vector<itemkey_t> keys_vec(10);
+    std::vector<bool> rw_flags(10);
+    std::mt19937 rw_rng(static_cast<uint32_t>(GetCPUCycle() ^ (thread_id * 0x9e3779b9U)));
     ZipfGen* zipfian_gen = nullptr;
     FiniteZipfGen* finite_zipfian_gen = nullptr;
     uint64_t zipf_seed = 2 * thread_id * GetCPUCycle();
@@ -25,9 +27,10 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
             // Simulate some work
             // Randomly select a transaction type and accounts
             int txn_type = generate_txn_type();
-            generate_ten_keys(keys_vec, zipfian_gen, finite_zipfian_gen);
+            generate_ten_keys(keys_vec, rw_flags, zipfian_gen, finite_zipfian_gen, rw_rng);
             // Create a new transaction object
             TxnQueueEntry* txn_entry = new TxnQueueEntry(tx_id, txn_type, {}, keys_vec);
+            txn_entry->ycsb_rw_flags = rw_flags;
             txn_batch.push_back(txn_entry);
         }
         // Enqueue the transaction into the global transaction pool

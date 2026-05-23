@@ -31,6 +31,7 @@ struct TxnQueueEntry {
     int txn_type;
     std::vector<uint64_t> accounts; // for smallbank, store involved account ids, the table id is generated based on txn_type
     std::vector<uint64_t> ycsb_keys; // for ycsb, store involved record keys
+    std::vector<bool> ycsb_rw_flags; // for ycsb, false=read and true=write for each key
     std::vector<uint64_t> tpcc_params; // for tpcc, store transaction parameters
     std::vector<uint64_t> tpcc_keys; // for tpcc, store involved record keys
 
