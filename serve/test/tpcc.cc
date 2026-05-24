@@ -813,7 +813,7 @@ int TPCC::generate_txn_type() {
     while(true) {
         int x = random_int(1, 100);
         if (x <= 50) return (int)TPCCTxType::kNewOrder;
-        else if (x <= 50) return (int)TPCCTxType::kPayment;
+        else if (x <= 100) return (int)TPCCTxType::kPayment;
         else {};
     }
 }
