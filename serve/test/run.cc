@@ -169,6 +169,10 @@ static void reset_pg_runtime_stats_after_warmup(Logger* logger_) {
 }
 
 static void maybe_finish_warmup(Logger* logger_) {
+    if (time_based_run) {
+        return;
+    }
+
     if (WarmupEnd || !warmup_end_supported_mode()) {
         return;
     }
@@ -224,7 +228,7 @@ void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* yc
         keys_num = smallbank->get_account_count();
     } else if (Workload_Type == 1){
         keys_num = ycsb->get_record_count();
-    } else if (Workload_Type == 2){
+    } else if (Workload_Type == 2 || Workload_Type == 3){
         // For TPC-C, we iterate over warehouses for simplicity in this init function structure,
         // but actually we need to init all tables.
         // Let's just use num_warehouses as the loop count and handle logic inside.
@@ -257,7 +261,7 @@ void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* yc
                 select_sql1 = "SELECT ctid, id FROM savings WHERE id = " + std::to_string(id) + ";";
             } else if (Workload_Type == 1){
                 select_sql0 = "SELECT ctid, id FROM usertable WHERE id = " + std::to_string(id) + ";";
-            } else if (Workload_Type == 2) {
+            } else if (Workload_Type == 2 || Workload_Type == 3) {
                 // TPC-C initialization logic
                 // We need to init Warehouse, District, Customer, Stock for w_id = id
                 // This is a bit complex to fit into the existing loop structure which assumes 1 key = 1 row.
@@ -282,7 +286,7 @@ void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* yc
                         }
                     }
                     
-                    // Customer (3000 per district)
+                    // Customer rows for this warehouse.
                     res = txn_select.exec("SELECT ctid, c_w_id, c_d_id, c_id FROM customer WHERE c_w_id = " + std::to_string(w_id));
                     for (auto row : res) {
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(row["ctid"].as<std::string>());
@@ -291,7 +295,7 @@ void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* yc
                         smart_router->initial_key_page((table_id_t)TPCCTableType::kCustomer, tpcc->make_customer_key(w_id, d_id, c_id), page_id);
                     }
 
-                    // Stock (100000 per warehouse)
+                    // Stock rows for this warehouse.
                     res = txn_select.exec("SELECT ctid, s_w_id, s_i_id FROM stock WHERE s_w_id = " + std::to_string(w_id));
                     for (auto row : res) {
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(row["ctid"].as<std::string>());
@@ -1237,8 +1241,10 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                         supply_w_ids_str += "}";
                         quantities_str += "}";
 
-                        std::string sql = "SELECT * FROM tpcc_new_order(" + 
-                            std::to_string(w_id) + ", " + 
+                        std::string func_name = tpcc->is_standard_mode() ?
+                            "tpcc_standard_new_order" : "tpcc_new_order";
+                        std::string sql = "SELECT * FROM " + func_name + "(" +
+                            std::to_string(w_id) + ", " +
                             std::to_string(d_id) + ", " + 
                             std::to_string(c_id) + ", " + 
                             std::to_string(o_ol_cnt) + ", '" + 
@@ -1258,8 +1264,10 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                         int c_id = tpcc_params[2];
                         int h_amount = tpcc_params[3];
 
-                        std::string sql = "SELECT * FROM tpcc_payment(" + 
-                            std::to_string(w_id) + ", " + 
+                        std::string func_name = tpcc->is_standard_mode() ?
+                            "tpcc_standard_payment" : "tpcc_payment";
+                        std::string sql = "SELECT * FROM " + func_name + "(" +
+                            std::to_string(w_id) + ", " +
                             std::to_string(d_id) + ", " + 
                             std::to_string(w_id) + ", " + 
                             std::to_string(d_id) + ", " + 
@@ -1269,11 +1277,46 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                         res = txn.exec(sql);
                         break;
                     }
+                    case TPCCTxType::kOrderStatus: {
+                        if (!tpcc->is_standard_mode() || tpcc_params.size() < 3) {
+                            assert(false);
+                        }
+                        std::string sql = "SELECT * FROM tpcc_standard_order_status(" +
+                            std::to_string(tpcc_params[0]) + ", " +
+                            std::to_string(tpcc_params[1]) + ", " +
+                            std::to_string(tpcc_params[2]) + ")";
+                        res = txn.exec(sql);
+                        break;
+                    }
+                    case TPCCTxType::kDelivery: {
+                        if (!tpcc->is_standard_mode() || tpcc_params.size() < 2) {
+                            assert(false);
+                        }
+                        std::string sql = "SELECT * FROM tpcc_standard_delivery(" +
+                            std::to_string(tpcc_params[0]) + ", " +
+                            std::to_string(tpcc_params[1]) + ")";
+                        res = txn.exec(sql);
+                        break;
+                    }
+                    case TPCCTxType::kStockLevel: {
+                        if (!tpcc->is_standard_mode() || tpcc_params.size() < 3) {
+                            assert(false);
+                        }
+                        std::string sql = "SELECT * FROM tpcc_standard_stock_level(" +
+                            std::to_string(tpcc_params[0]) + ", " +
+                            std::to_string(tpcc_params[1]) + ", " +
+                            std::to_string(tpcc_params[2]) + ")";
+                        res = txn.exec(sql);
+                        break;
+                    }
                     default:
                         assert(false);
                 }
 
                 for (const auto& row : res) {
+                    if (row["ctid"].is_null()) {
+                        continue;
+                    }
                     std::string ctid_str = row["ctid"].as<std::string>();
                     auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid_str);
                     ctid_ret_page_ids.push_back(page_id);
@@ -1419,6 +1462,7 @@ void run_ycsb_txns_empty(thread_params* params, Logger* logger_) {
 void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [OPTIONS]" << std::endl;
     std::cout << "Options:" << std::endl;
+    std::cout << "  --workload <name>           Workload (smallbank, ycsb, tpcc, tpcc-standard) [default: smallbank]" << std::endl;
     std::cout << "  --system-mode <mode>        System mode (0=random node, 1=account-based, 2=page-based) [default: 0]" << std::endl;
     std::cout << "  --access-pattern <pattern>  Data access pattern (0=uniform, 1=zipfian, 2=hotspot) [default: 0]" << std::endl;
     std::cout << "  --zipfian-theta <theta>     Zipfian parameter: legacy theta [0,1), finite exponent >= 0 [default: 0.99]" << std::endl;
@@ -1981,14 +2025,16 @@ int main(int argc, char *argv[]) {
                     Workload_Type = 1;
                 } else if (workload_name == "tpcc") {
                     Workload_Type = 2;
+                } else if (workload_name == "tpcc-standard") {
+                    Workload_Type = 3;
                 }
                 else {
-                    std::cerr << "Error: Unknown workload type '" << workload_name << "'. Supported types are 'smallbank', 'ycsb', and 'tpcc'." << std::endl;
+                    std::cerr << "Error: Unknown workload type '" << workload_name << "'. Supported types are 'smallbank', 'ycsb', 'tpcc', and 'tpcc-standard'." << std::endl;
                     return -1;
                 }
                 std::cout << "Workload type set to: " << workload_name << std::endl;
             } else {
-                std::cerr << "Error: --workload requires a value (smallbank|ycsb|tpcc)" << std::endl;
+                std::cerr << "Error: --workload requires a value (smallbank|ycsb|tpcc|tpcc-standard)" << std::endl;
                 return -1;
             }
         }
@@ -2426,6 +2472,7 @@ int main(int argc, char *argv[]) {
     if (Workload_Type == 0) std::cout << "SmallBank";
     else if (Workload_Type == 1) std::cout << "YCSB";
     else if (Workload_Type == 2) std::cout << "TPC-C";
+    else if (Workload_Type == 3) std::cout << "TPC-C Standard";
     else std::cout << "Unknown";
     std::cout << std::endl;
     std::cout << "System mode: " << SYSTEM_MODE << " ----> ";
@@ -2562,10 +2609,13 @@ int main(int argc, char *argv[]) {
             std::cout << " read/write selected independently per operation";
         }
         std::cout << std::endl;
-    } else if (Workload_Type == 2) {
-        tpcc = new TPCC(warehouse_num, access_pattern); // Use the specified number of warehouses
+    } else if (Workload_Type == 2 || Workload_Type == 3) {
+        tpcc = new TPCC(warehouse_num, access_pattern, Workload_Type == 3); // Use the specified number of warehouses
         if(access_pattern == 2) tpcc->set_hotspot_ratio(hotspot_access_prob); // For TPC-C, we can only set hotspot ratio for warehouses
-        std::cout << "TPC-C benchmark initialized with " << warehouse_num << " warehouses." << std::endl;
+        std::cout << (Workload_Type == 3 ? "Standard TPC-C" : "TPC-C")
+                  << " benchmark initialized with " << warehouse_num
+                  << " warehouses, customers_per_district=" << tpcc->customers_per_dist()
+                  << ", items=" << tpcc->item_count() << "." << std::endl;
     }
 
     std::cout << "Worker threads: " << worker_threads << std::endl;
@@ -2683,9 +2733,12 @@ int main(int argc, char *argv[]) {
             } else if (Workload_Type == 1) {
                 ycsb->create_table(conn0);
                 if (use_sp) ycsb->create_ycsb_stored_procedures(conn0);
-            } else if (Workload_Type == 2) {
+            } else if (Workload_Type == 2 || Workload_Type == 3) {
                 tpcc->create_table(conn0);
-                if (use_sp) tpcc->create_tpcc_stored_procedures(conn0);
+                if (use_sp) {
+                    if (Workload_Type == 3) tpcc->create_standard_tpcc_stored_procedures(conn0);
+                    else tpcc->create_tpcc_stored_procedures(conn0);
+                }
             }
             std::cout << "Tables and indexes created successfully." << std::endl;
 
@@ -2703,7 +2756,7 @@ int main(int argc, char *argv[]) {
                 g_smallbank_key_page_map = smallbank->load_data(conn0);
             } else if (Workload_Type == 1) {
                 ycsb->load_data(conn0);
-            } else if (Workload_Type == 2) {
+            } else if (Workload_Type == 2 || Workload_Type == 3) {
                 tpcc->load_data();
             }
             std::cout << "Data loaded successfully." << std::endl;
@@ -2720,7 +2773,7 @@ int main(int argc, char *argv[]) {
                 tables_exist = smallbank->check_table_exists(conn0);
             } else if (Workload_Type == 1) {
                 tables_exist = ycsb->check_table_exists(conn0);
-            } else if (Workload_Type == 2) {
+            } else if (Workload_Type == 2 || Workload_Type == 3) {
                 tables_exist = tpcc->check_table_exists(conn0);
             }
             std::cout << "Table existence check completed." << std::endl;
@@ -2742,7 +2795,7 @@ int main(int argc, char *argv[]) {
                 accounts_num_verify = smallbank->check_account_count(conn0, account_num);
             } else if (Workload_Type == 1) {
                 accounts_num_verify = ycsb->check_record_count(conn0, account_num);
-            } else if (Workload_Type == 2) {
+            } else if (Workload_Type == 2 || Workload_Type == 3) {
                 accounts_num_verify = tpcc->check_warehouse_count(conn0, warehouse_num);
             }
             if (!accounts_num_verify) {
@@ -2831,7 +2884,7 @@ int main(int argc, char *argv[]) {
     if (Workload_Type == 0) index_names = {"idx_checking_id", "idx_savings_id"};
     else if (Workload_Type == 1) index_names = {"idx_usertable_id"};
     // else if (Workload_Type == 2) index_names = {"warehouse_pkey", "district_pkey", "customer_pkey", "stock_pkey"}; // TPC-C indexes
-    else if (Workload_Type == 2) index_names = {}; // TPC-C indexes
+    else if (Workload_Type == 2 || Workload_Type == 3) index_names = {}; // TPC-C indexes
     
     // BtreeIndexService *index_service = new BtreeIndexService(DBConnection, index_names, read_btree_mode, read_frequency); // !not used
 
@@ -2946,7 +2999,7 @@ int main(int argc, char *argv[]) {
             client_gen_txn_threads.emplace_back([i, txn_pool, ycsb]() {
                 ycsb->generate_ycsb_txns_worker(i, txn_pool);
             });
-        } else if (Workload_Type == 2) {
+        } else if (Workload_Type == 2 || Workload_Type == 3) {
             client_gen_txn_threads.emplace_back([i, txn_pool, tpcc]() {
                 tpcc->generate_tpcc_txns_worker(i, txn_pool);
             });
@@ -2995,7 +3048,7 @@ int main(int argc, char *argv[]) {
                     db_conn_threads.emplace_back(run_ycsb_txns_sp, params, logger_);
                 else assert(false && "Only support YCSB with stored procedures!");
             }
-            else if (Workload_Type == 2) {
+            else if (Workload_Type == 2 || Workload_Type == 3) {
                 if (use_sp)
                     db_conn_threads.emplace_back(run_tpcc_txns_sp, params, logger_);
                 else assert(false && "Only support TPC-C with stored procedures!");
@@ -3091,7 +3144,7 @@ int main(int argc, char *argv[]) {
         std::cout << "Total accounts loaded: " << account_num << std::endl;
         std::cout << "Access pattern used: " << access_pattern_name << std::endl;
     }
-    else if (Workload_Type == 2) {
+    else if (Workload_Type == 2 || Workload_Type == 3) {
         std::cout << "Warehouse count: " << warehouse_num << std::endl;
         std::cout << "Access pattern used: " << access_pattern_name << std::endl;
     }

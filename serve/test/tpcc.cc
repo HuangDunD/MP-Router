@@ -32,9 +32,20 @@ const std::vector<bool> TPCC::RW_FLAGS_ARR[5] = {
     {false, false}
 };
 
-TPCC::TPCC(int num_warehouses, int access_pattern_type) : num_warehouses_(num_warehouses), access_pattern(access_pattern_type) {
+TPCC::TPCC(int num_warehouses, int access_pattern_type, bool standard_mode)
+    : num_warehouses_(num_warehouses),
+      access_pattern(access_pattern_type),
+      standard_mode_(standard_mode) {
     assert(num_warehouses > 0);
     assert(access_pattern_type == 0 || access_pattern_type == 2); // For now we only support uniform and hotspot access patterns
+}
+
+int TPCC::customers_per_dist() const {
+    return standard_mode_ ? STANDARD_CUST_PER_DIST : CUST_PER_DIST;
+}
+
+int TPCC::item_count() const {
+    return standard_mode_ ? STANDARD_ITEM_COUNT : ITEM_COUNT;
 }
 
 std::vector<table_id_t> TPCC::get_table_ids_by_txn_type(int txn_type, int key_size) {
@@ -72,19 +83,19 @@ itemkey_t TPCC::make_district_key(int w_id, int d_id) {
 }
 
 itemkey_t TPCC::make_customer_key(int w_id, int d_id, int c_id) {
-    return (itemkey_t)(w_id - 1) * DIST_PER_WARE * CUST_PER_DIST + (d_id - 1) * CUST_PER_DIST + c_id;
+    return (itemkey_t)(w_id - 1) * DIST_PER_WARE * STANDARD_CUST_PER_DIST + (d_id - 1) * STANDARD_CUST_PER_DIST + c_id;
 }
 
 itemkey_t TPCC::make_stock_key(int w_id, int i_id) {
-    return (itemkey_t)(w_id - 1) * ITEM_COUNT + i_id;
+    return (itemkey_t)(w_id - 1) * STANDARD_ITEM_COUNT + i_id;
 }
 
 int TPCC::get_total_keys(TPCCTableType table_type) const {
     switch (table_type) {
         case TPCCTableType::kWarehouse: return num_warehouses_;
         case TPCCTableType::kDistrict: return num_warehouses_ * DIST_PER_WARE;
-        case TPCCTableType::kCustomer: return num_warehouses_ * DIST_PER_WARE * CUST_PER_DIST;
-        case TPCCTableType::kStock: return num_warehouses_ * ITEM_COUNT;
+        case TPCCTableType::kCustomer: return num_warehouses_ * DIST_PER_WARE * customers_per_dist();
+        case TPCCTableType::kStock: return num_warehouses_ * item_count();
         default: return 0;
     }
 }
@@ -304,7 +315,7 @@ void TPCC::load_data() {
         std::cout << "Loading Items in parallel..." << std::endl;
         int item_threads_count = 10; 
         std::vector<std::thread> item_threads;
-        int items_per_thread = ITEM_COUNT / item_threads_count;
+        int items_per_thread = item_count() / item_threads_count;
         
         for (int i = 0; i < item_threads_count; ++i) {
             item_threads.emplace_back([i, items_per_thread, item_threads_count, this]() {
@@ -315,7 +326,7 @@ void TPCC::load_data() {
                 }
                 try {
                     int start = i * items_per_thread + 1;
-                    int end = (i == item_threads_count - 1) ? ITEM_COUNT : (i + 1) * items_per_thread;
+                    int end = (i == item_threads_count - 1) ? item_count() : (i + 1) * items_per_thread;
                     
                     // Use transaction for batching
                     pqxx::work txn(c);
@@ -428,7 +439,7 @@ void TPCC::load_stock(pqxx::transaction_base &txn, int w_id) {
     values_batch.reserve(1000);
     std::vector<std::string> columns = {"s_i_id", "s_w_id", "s_quantity", "s_dist_01", "s_dist_02", "s_dist_03", "s_dist_04", "s_dist_05", "s_dist_06", "s_dist_07", "s_dist_08", "s_dist_09", "s_dist_10", "s_ytd", "s_order_cnt", "s_remote_cnt", "s_data"};
 
-    for (int i = 1; i <= ITEM_COUNT; ++i) {
+    for (int i = 1; i <= item_count(); ++i) {
         std::string val = 
             std::to_string(i) + ", " +
             std::to_string(w_id) + ", " +
@@ -462,7 +473,7 @@ void TPCC::load_district(pqxx::transaction_base &txn, int w_id) {
             random_string(10, 20) + "', '" +
             random_string(2, 2) + "', '" +
             random_nstring(9, 9) + "', " +
-            std::to_string(random_int(0, 2000) / 10000.0) + ", 30000.00, " + std::to_string(CUST_PER_DIST + 1);
+            std::to_string(random_int(0, 2000) / 10000.0) + ", 30000.00, " + std::to_string(customers_per_dist() + 1);
         values_batch.push_back(val);
     }
     exec_batch_insert(txn, "district", columns, values_batch);
@@ -477,7 +488,7 @@ void TPCC::load_customer(pqxx::transaction_base &txn, int w_id, int d_id) {
     std::vector<std::string> cust_cols = {"c_id", "c_d_id", "c_w_id", "c_first", "c_middle", "c_last", "c_street_1", "c_street_2", "c_city", "c_state", "c_zip", "c_phone", "c_since", "c_credit", "c_credit_lim", "c_discount", "c_balance", "c_ytd_payment", "c_payment_cnt", "c_delivery_cnt", "c_data"};
     std::vector<std::string> hist_cols = {"h_c_id", "h_c_d_id", "h_c_w_id", "h_d_id", "h_w_id", "h_date", "h_amount", "h_data"};
 
-    for (int c = 1; c <= CUST_PER_DIST; ++c) {
+    for (int c = 1; c <= customers_per_dist(); ++c) {
         std::string val = 
             std::to_string(c) + ", " +
             std::to_string(d_id) + ", " +
@@ -527,13 +538,13 @@ void TPCC::load_orders(pqxx::transaction_base &txn, int w_id, int d_id) {
     std::vector<std::string> ol_cols = {"ol_o_id", "ol_d_id", "ol_w_id", "ol_number", "ol_i_id", "ol_supply_w_id", "ol_delivery_d", "ol_quantity", "ol_amount", "ol_dist_info"};
     std::vector<std::string> no_cols = {"no_o_id", "no_d_id", "no_w_id"};
 
-    for (int o = 1; o <= CUST_PER_DIST; ++o) {
+    for (int o = 1; o <= customers_per_dist(); ++o) {
         std::string ord_val = 
             std::to_string(o) + ", " +
             std::to_string(d_id) + ", " +
             std::to_string(w_id) + ", " +
-            std::to_string(random_int(1, CUST_PER_DIST)) + ", NOW(), " +
-            (o < CUST_PER_DIST - 900 + 1 ? std::to_string(random_int(1, DIST_PER_WARE)) : "NULL") + ", " +
+            std::to_string(random_int(1, customers_per_dist())) + ", NOW(), " +
+            (o < customers_per_dist() - 900 + 1 ? std::to_string(random_int(1, DIST_PER_WARE)) : "NULL") + ", " +
             std::to_string(random_int(5, 15)) + ", 1";
         ord_batch.push_back(ord_val);
         
@@ -545,16 +556,16 @@ void TPCC::load_orders(pqxx::transaction_base &txn, int w_id, int d_id) {
                 std::to_string(d_id) + ", " +
                 std::to_string(w_id) + ", " +
                 std::to_string(ol) + ", " +
-                std::to_string(random_int(1, ITEM_COUNT)) + ", " +
+                std::to_string(random_int(1, item_count())) + ", " +
                 std::to_string(w_id) + ", " +
-                (o < CUST_PER_DIST - 900 + 1 ? "NOW()" : "NULL") + ", 5, " +
-                (o < CUST_PER_DIST - 900 + 1 ? "0.00" : std::to_string(random_int(10, 10000) / 100.0)) + ", '" +
+                (o < customers_per_dist() - 900 + 1 ? "NOW()" : "NULL") + ", 5, " +
+                (o < customers_per_dist() - 900 + 1 ? "0.00" : std::to_string(random_int(10, 10000) / 100.0)) + ", '" +
                 random_string(24, 24) + "'";
             ol_batch.push_back(ol_val);
         }
         
         // NewOrder (last 900 orders)
-        if (o >= CUST_PER_DIST - 900 + 1) {
+        if (o >= customers_per_dist() - 900 + 1) {
             std::string no_val = 
                 std::to_string(o) + ", " +
                 std::to_string(d_id) + ", " +
@@ -662,7 +673,7 @@ void TPCC::create_tpcc_stored_procedures(pqxx::connection *conn) {
                 WHERE c.c_w_id = p_c_w_id AND c.c_d_id = p_c_d_id AND c.c_id = p_c_id
                 RETURNING c.ctid INTO c_ctid;
 
-                RETURN QUERY SELECT 'customer'::text, p_c_w_id, p_c_id, c_ctid;
+                RETURN QUERY SELECT 'customer'::text, p_c_w_id, p_c_d_id, c_ctid;
 
                 -- INSERT INTO history (h_c_d_id, h_c_w_id, h_c_id, h_d_id, h_w_id, h_date, h_amount, h_data)
                 -- VALUES (p_c_d_id, p_c_w_id, p_c_id, p_d_id, p_w_id, NOW(), p_h_amount, 'payment');
@@ -674,6 +685,238 @@ void TPCC::create_tpcc_stored_procedures(pqxx::connection *conn) {
         std::cout << "TPC-C stored procedures created." << std::endl;
     } catch (const std::exception &e) {
         std::cerr << "Error creating TPC-C stored procedures: " << e.what() << std::endl;
+    }
+}
+
+void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
+    std::cout << "Creating standard TPC-C stored procedures..." << std::endl;
+    try {
+        pqxx::work txn(*conn);
+
+        txn.exec(R"SQL(
+            CREATE OR REPLACE FUNCTION tpcc_standard_new_order(
+                p_w_id INT, p_d_id INT, p_c_id INT, p_o_ol_cnt INT,
+                p_i_ids INT[], p_i_w_ids INT[], p_quantities INT[]
+            )
+            RETURNS TABLE(rel TEXT, ret_w_id INT, ret_d_id INT, ret_i_id INT, ctid TID)
+            LANGUAGE plpgsql AS $$
+            DECLARE
+                o_id INT;
+                i INT;
+                d_ctid TID;
+                s_ctid TID;
+                all_local INT := 1;
+                stock_qty INT;
+                item_price DECIMAL(5,2);
+                line_amount DECIMAL(6,2);
+            BEGIN
+                UPDATE district AS d
+                SET d_next_o_id = d.d_next_o_id + 1
+                WHERE d.d_w_id = p_w_id AND d.d_id = p_d_id
+                RETURNING (d.d_next_o_id - 1), d.ctid INTO o_id, d_ctid;
+
+                RETURN QUERY SELECT 'district'::text, p_w_id, p_d_id, NULL::INT, d_ctid;
+
+                FOR i IN 1..p_o_ol_cnt LOOP
+                    IF p_i_w_ids[i] <> p_w_id THEN
+                        all_local := 0;
+                    END IF;
+                END LOOP;
+
+                INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_carrier_id, o_ol_cnt, o_all_local)
+                VALUES (o_id, p_d_id, p_w_id, p_c_id, NOW(), NULL, p_o_ol_cnt, all_local);
+
+                INSERT INTO new_order (no_o_id, no_d_id, no_w_id)
+                VALUES (o_id, p_d_id, p_w_id);
+
+                FOR i IN 1..p_o_ol_cnt LOOP
+                    SELECT it.i_price INTO item_price
+                    FROM item AS it
+                    WHERE it.i_id = p_i_ids[i];
+
+                    UPDATE stock AS s
+                    SET s_quantity = CASE
+                            WHEN s.s_quantity - p_quantities[i] >= 10
+                            THEN s.s_quantity - p_quantities[i]
+                            ELSE s.s_quantity - p_quantities[i] + 91
+                        END,
+                        s_ytd = s.s_ytd + p_quantities[i],
+                        s_order_cnt = s.s_order_cnt + 1,
+                        s_remote_cnt = s.s_remote_cnt + CASE WHEN p_i_w_ids[i] <> p_w_id THEN 1 ELSE 0 END
+                    WHERE s.s_w_id = p_i_w_ids[i] AND s.s_i_id = p_i_ids[i]
+                    RETURNING s.s_quantity, s.ctid INTO stock_qty, s_ctid;
+
+                    RETURN QUERY SELECT 'stock'::text, p_i_w_ids[i], NULL::INT, p_i_ids[i], s_ctid;
+
+                    line_amount := COALESCE(item_price, 0) * p_quantities[i];
+                    INSERT INTO order_line (
+                        ol_o_id, ol_d_id, ol_w_id, ol_number, ol_i_id, ol_supply_w_id,
+                        ol_delivery_d, ol_quantity, ol_amount, ol_dist_info
+                    )
+                    VALUES (
+                        o_id, p_d_id, p_w_id, i, p_i_ids[i], p_i_w_ids[i],
+                        NULL, p_quantities[i], line_amount, 'standard-dist-info'
+                    );
+                END LOOP;
+            END;
+            $$;
+        )SQL");
+
+        txn.exec(R"SQL(
+            CREATE OR REPLACE FUNCTION tpcc_standard_payment(
+                p_w_id INT, p_d_id INT, p_c_w_id INT, p_c_d_id INT, p_c_id INT, p_h_amount DECIMAL(6,2)
+            )
+            RETURNS TABLE(rel TEXT, ret_w_id INT, ret_d_id INT, ctid TID)
+            LANGUAGE plpgsql AS $$
+            DECLARE
+                w_ctid TID;
+                d_ctid TID;
+                c_ctid TID;
+            BEGIN
+                UPDATE warehouse AS w
+                SET w_ytd = w.w_ytd + p_h_amount
+                WHERE w.w_id = p_w_id
+                RETURNING w.ctid INTO w_ctid;
+                RETURN QUERY SELECT 'warehouse'::text, p_w_id, NULL::INT, w_ctid;
+
+                UPDATE district AS d
+                SET d_ytd = d.d_ytd + p_h_amount
+                WHERE d.d_w_id = p_w_id AND d.d_id = p_d_id
+                RETURNING d.ctid INTO d_ctid;
+                RETURN QUERY SELECT 'district'::text, p_w_id, p_d_id, d_ctid;
+
+                UPDATE customer AS c
+                SET c_balance = c.c_balance - p_h_amount,
+                    c_ytd_payment = c.c_ytd_payment + p_h_amount,
+                    c_payment_cnt = c.c_payment_cnt + 1
+                WHERE c.c_w_id = p_c_w_id AND c.c_d_id = p_c_d_id AND c.c_id = p_c_id
+                RETURNING c.ctid INTO c_ctid;
+                RETURN QUERY SELECT 'customer'::text, p_c_w_id, p_c_d_id, c_ctid;
+
+                INSERT INTO history (h_c_d_id, h_c_w_id, h_c_id, h_d_id, h_w_id, h_date, h_amount, h_data)
+                VALUES (p_c_d_id, p_c_w_id, p_c_id, p_d_id, p_w_id, NOW(), p_h_amount, 'standard payment');
+            END;
+            $$;
+        )SQL");
+
+        txn.exec(R"SQL(
+            CREATE OR REPLACE FUNCTION tpcc_standard_order_status(
+                p_w_id INT, p_d_id INT, p_c_id INT
+            )
+            RETURNS TABLE(rel TEXT, ret_w_id INT, ret_d_id INT, ctid TID)
+            LANGUAGE plpgsql AS $$
+            DECLARE
+                c_ctid TID;
+                o_id INT;
+                o_ctid TID;
+            BEGIN
+                SELECT c.ctid INTO c_ctid
+                FROM customer AS c
+                WHERE c.c_w_id = p_w_id AND c.c_d_id = p_d_id AND c.c_id = p_c_id;
+                RETURN QUERY SELECT 'customer'::text, p_w_id, p_d_id, c_ctid;
+
+                SELECT o.o_id, o.ctid INTO o_id, o_ctid
+                FROM orders AS o
+                WHERE o.o_w_id = p_w_id AND o.o_d_id = p_d_id AND o.o_c_id = p_c_id
+                ORDER BY o.o_id DESC
+                LIMIT 1;
+
+                RETURN QUERY SELECT 'orders'::text, p_w_id, p_d_id, o_ctid;
+
+                PERFORM 1
+                FROM order_line AS ol
+                WHERE ol.ol_w_id = p_w_id AND ol.ol_d_id = p_d_id AND ol.ol_o_id = o_id;
+            END;
+            $$;
+        )SQL");
+
+        txn.exec(R"SQL(
+            CREATE OR REPLACE FUNCTION tpcc_standard_delivery(
+                p_w_id INT, p_carrier_id INT
+            )
+            RETURNS TABLE(rel TEXT, ret_w_id INT, ret_d_id INT, ctid TID)
+            LANGUAGE plpgsql AS $$
+            DECLARE
+                d INT;
+                oldest_o_id INT;
+                order_c_id INT;
+                no_ctid TID;
+                o_ctid TID;
+                c_ctid TID;
+                total_amount DECIMAL(12,2);
+            BEGIN
+                FOR d IN 1..10 LOOP
+                    SELECT no.no_o_id, no.ctid INTO oldest_o_id, no_ctid
+                    FROM new_order AS no
+                    WHERE no.no_w_id = p_w_id AND no.no_d_id = d
+                    ORDER BY no.no_o_id
+                    LIMIT 1;
+
+                    IF oldest_o_id IS NULL THEN
+                        CONTINUE;
+                    END IF;
+
+                    DELETE FROM new_order
+                    WHERE no_w_id = p_w_id AND no_d_id = d AND no_o_id = oldest_o_id;
+                    RETURN QUERY SELECT 'new_order'::text, p_w_id, d, no_ctid;
+
+                    UPDATE orders AS o
+                    SET o_carrier_id = p_carrier_id
+                    WHERE o.o_w_id = p_w_id AND o.o_d_id = d AND o.o_id = oldest_o_id
+                    RETURNING o.o_c_id, o.ctid INTO order_c_id, o_ctid;
+                    RETURN QUERY SELECT 'orders'::text, p_w_id, d, o_ctid;
+
+                    UPDATE order_line AS ol
+                    SET ol_delivery_d = NOW()
+                    WHERE ol.ol_w_id = p_w_id AND ol.ol_d_id = d AND ol.ol_o_id = oldest_o_id;
+
+                    SELECT COALESCE(SUM(ol_amount), 0) INTO total_amount
+                    FROM order_line
+                    WHERE ol_w_id = p_w_id AND ol_d_id = d AND ol_o_id = oldest_o_id;
+
+                    UPDATE customer AS c
+                    SET c_balance = c.c_balance + total_amount,
+                        c_delivery_cnt = c.c_delivery_cnt + 1
+                    WHERE c.c_w_id = p_w_id AND c.c_d_id = d AND c.c_id = order_c_id
+                    RETURNING c.ctid INTO c_ctid;
+                    RETURN QUERY SELECT 'customer'::text, p_w_id, d, c_ctid;
+                END LOOP;
+            END;
+            $$;
+        )SQL");
+
+        txn.exec(R"SQL(
+            CREATE OR REPLACE FUNCTION tpcc_standard_stock_level(
+                p_w_id INT, p_d_id INT, p_threshold INT
+            )
+            RETURNS TABLE(rel TEXT, ret_w_id INT, ret_d_id INT, ctid TID)
+            LANGUAGE plpgsql AS $$
+            DECLARE
+                next_o_id INT;
+                d_ctid TID;
+            BEGIN
+                SELECT d.d_next_o_id, d.ctid INTO next_o_id, d_ctid
+                FROM district AS d
+                WHERE d.d_w_id = p_w_id AND d.d_id = p_d_id;
+                RETURN QUERY SELECT 'district'::text, p_w_id, p_d_id, d_ctid;
+
+                PERFORM COUNT(DISTINCT s.s_i_id)
+                FROM order_line AS ol
+                JOIN stock AS s
+                  ON s.s_w_id = p_w_id AND s.s_i_id = ol.ol_i_id
+                WHERE ol.ol_w_id = p_w_id
+                  AND ol.ol_d_id = p_d_id
+                  AND ol.ol_o_id >= next_o_id - 20
+                  AND ol.ol_o_id < next_o_id
+                  AND s.s_quantity < p_threshold;
+            END;
+            $$;
+        )SQL");
+
+        txn.commit();
+        std::cout << "Standard TPC-C stored procedures created." << std::endl;
+    } catch (const std::exception &e) {
+        std::cerr << "Error creating standard TPC-C stored procedures: " << e.what() << std::endl;
     }
 }
 
@@ -705,7 +948,7 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
             generated_txn_count++;
             tx_id_t tx_id = tx_id_generator++;
             
-            int txn_type_int = generate_txn_type();
+            int txn_type_int = standard_mode_ ? generate_standard_txn_type() : generate_txn_type();
             TPCCTxType txn_type = static_cast<TPCCTxType>(txn_type_int);
             
             std::vector<itemkey_t> routing_keys;
@@ -730,7 +973,7 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
                 w_id = random_int(1, num_warehouses_);
             }
             int d_id = random_int(1, DIST_PER_WARE);
-            int c_id = nurand(1023, 1, CUST_PER_DIST);
+            int c_id = nurand(1023, 1, customers_per_dist());
             
             switch(txn_type) {
                 case TPCCTxType::kNewOrder: {
@@ -748,7 +991,7 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
                     order_lines.reserve(o_ol_cnt);
 
                     for (int i = 0; i < o_ol_cnt; ++i) {
-                        int i_id = nurand(8191, 1, ITEM_COUNT);
+                        int i_id = nurand(8191, 1, item_count());
                         // todo 添加远程仓库逻辑
                         int supply_w_id = w_id; // !Simplified: home warehouse
                         if (num_warehouses_ > 1 && random_int(1, 100) == 1) {
@@ -786,6 +1029,29 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
                     tpcc_params.push_back(h_amount);
                     break;
                 }
+                case TPCCTxType::kOrderStatus: {
+                    routing_keys.push_back(make_customer_key(w_id, d_id, c_id));
+
+                    tpcc_params.push_back(w_id);
+                    tpcc_params.push_back(d_id);
+                    tpcc_params.push_back(c_id);
+                    break;
+                }
+                case TPCCTxType::kDelivery: {
+                    routing_keys.push_back(make_warehouse_key(w_id));
+
+                    tpcc_params.push_back(w_id);
+                    tpcc_params.push_back(random_int(1, 10));
+                    break;
+                }
+                case TPCCTxType::kStockLevel: {
+                    routing_keys.push_back(make_district_key(w_id, d_id));
+
+                    tpcc_params.push_back(w_id);
+                    tpcc_params.push_back(d_id);
+                    tpcc_params.push_back(random_int(10, 20));
+                    break;
+                }
                 default:
                     // Simplified: just warehouse for others
                     routing_keys.push_back(make_warehouse_key(w_id));
@@ -816,6 +1082,15 @@ int TPCC::generate_txn_type() {
         else if (x <= 100) return (int)TPCCTxType::kPayment;
         else {};
     }
+}
+
+int TPCC::generate_standard_txn_type() {
+    int x = random_int(1, 100);
+    if (x <= 45) return (int)TPCCTxType::kNewOrder;
+    if (x <= 88) return (int)TPCCTxType::kPayment;
+    if (x <= 92) return (int)TPCCTxType::kOrderStatus;
+    if (x <= 96) return (int)TPCCTxType::kDelivery;
+    return (int)TPCCTxType::kStockLevel;
 }
 
 // Random helpers implementation

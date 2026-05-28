@@ -42,11 +42,12 @@ enum class TPCCTableType : uint64_t {
 
 class TPCC {
 public:
-    TPCC(int num_warehouses, int access_pattern_type);
+    TPCC(int num_warehouses, int access_pattern_type, bool standard_mode = false);
 
     void create_table(pqxx::connection *conn);
     void load_data();
     void create_tpcc_stored_procedures(pqxx::connection *conn);
+    void create_standard_tpcc_stored_procedures(pqxx::connection *conn);
     void generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool);
     void set_hotspot_ratio(double ratio) { hotspot_ratio = ratio; }
     
@@ -76,14 +77,16 @@ public:
     }
 
     int get_num_warehouses() const { return num_warehouses_; }
+    bool is_standard_mode() const { return standard_mode_; }
+    int customers_per_dist() const;
+    int item_count() const;
 
     // Constants for TPC-C
-    // static const int DIST_PER_WARE = 10;
-    // static const int CUST_PER_DIST = 3000;
-    // static const int ITEM_COUNT = 100000;
     static const int DIST_PER_WARE = 10;
     static const int CUST_PER_DIST = 300;
     static const int ITEM_COUNT = 1000;
+    static const int STANDARD_CUST_PER_DIST = 3000;
+    static const int STANDARD_ITEM_COUNT = 100000;
 
     // Key encoding helpers
     static itemkey_t make_warehouse_key(int w_id);
@@ -108,6 +111,7 @@ private:
     int num_warehouses_;
     int access_pattern; // 0: uniform, 1: zipfian, 2: hotspot
     double hotspot_ratio; // For hotspot access pattern, the ratio of accesses to hotspot warehouses
+    bool standard_mode_;
 
     // Helper functions for data loading
     void load_item(pqxx::transaction_base &txn, int start_id, int end_id);
@@ -119,6 +123,7 @@ private:
 
     // Helper functions for transaction generation
     int generate_txn_type();
+    int generate_standard_txn_type();
     
     // Random helpers
     static std::string random_string(int min_len, int max_len);
