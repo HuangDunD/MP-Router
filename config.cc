@@ -2,9 +2,10 @@
 
 int SYSTEM_MODE = 0;
 // ! pay attention: need modify this when use different database
-int DB_TYPE = 0; // 0: PostgreSQL, 1: YashanDB
+int DB_TYPE = 0; // 0: PostgreSQL, 1: YashanDB, 2: MySQL
 std::vector<std::string> DBConnection;
 std::vector<YashanConnInfo> YashanDBConnections;
+std::vector<MySQLConnInfo> MySQLConnections;
 int worker_threads = 16; 
 int ComputeNodeCount = 2;
 uint64_t ATTEMPTED_NUM = 10000000;

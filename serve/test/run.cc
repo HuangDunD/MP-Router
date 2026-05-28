@@ -29,6 +29,9 @@
 #include "tit.h"
 #include "config.h"
 #include "yacli.h"
+#ifdef WITH_MYSQL_CLIENT
+#include "mysql_client.h"
+#endif
 
 std::vector<TxnQueue*> txn_queues; // one queue per compute node
 std::vector<std::atomic<int>> exec_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
@@ -1127,6 +1130,203 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
     std::cout << "Finished running smallbank transactions via stored procedures." << std::endl;
 }
 
+#ifdef WITH_MYSQL_CLIENT
+void run_mysql_ycsb_txns_sp(thread_params* params, Logger* logger_) {
+    pthread_setname_np(pthread_self(), ("dbconmy_n" + std::to_string(params->compute_node_id_connecter)
+                                                + "_t_" + std::to_string(params->thread_id)).c_str());
+
+    std::cout << "Running YCSB transactions via MySQL stored procedures..." << std::endl;
+
+    node_id_t compute_node_id = params->compute_node_id_connecter;
+    TxnQueue* txn_queue = txn_queues[compute_node_id];
+    SmartRouter* smart_router = params->smart_router;
+    SlidingTransactionInforTable *tit = params->tit;
+    YCSB* ycsb = params->ycsb;
+    assert(txn_queue != nullptr && smart_router != nullptr && tit != nullptr && ycsb != nullptr);
+
+    MySQLClient client(MySQLConnections[compute_node_id]);
+    int con_batch_id = 0;
+    while (true) {
+        timespec pop_start_time, pop_end_time;
+        clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
+        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
+        double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
+                          (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
+        smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+
+        if (txn_entries.empty()) {
+            if(txn_queue->is_finished()) {
+                break;
+            } else if(txn_queue->is_batch_finished()) {
+                smart_router->notify_batch_finished(compute_node_id, params->thread_id, con_batch_id);
+                timespec wait_start_time, wait_end_time;
+                clock_gettime(CLOCK_MONOTONIC, &wait_start_time);
+                smart_router->wait_for_next_batch(compute_node_id, params->thread_id, con_batch_id);
+                clock_gettime(CLOCK_MONOTONIC, &wait_end_time);
+                double wait_time = (wait_end_time.tv_sec - wait_start_time.tv_sec) * 1000.0 +
+                                   (wait_end_time.tv_nsec - wait_start_time.tv_nsec) / 1000000.0;
+                smart_router->add_worker_thread_wait_next_batch_time(params->compute_node_id_connecter, params->thread_id, wait_time);
+                con_batch_id++;
+                continue;
+            } else continue;
+        }
+
+        for (auto& txn_entry : txn_entries) {
+            timespec start_time, end_time;
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+            exe_count++;
+            maybe_finish_warmup(logger_);
+            exec_txn_cnt_per_node[compute_node_id]++;
+
+            std::vector<itemkey_t> keys = txn_entry->ycsb_keys;
+            std::vector<bool> rw = txn_entry->ycsb_rw_flags.empty() ?
+                ycsb->get_rw_flags() : txn_entry->ycsb_rw_flags;
+            assert(keys.size() == 10 && rw.size() == 10);
+
+            size_t read_count = 0;
+            while (read_count < rw.size() && !rw[read_count]) read_count++;
+
+            std::ostringstream sql;
+            sql << "CALL ell_ycsb(";
+            for (size_t i = 0; i < keys.size(); i++) {
+                if (i > 0) sql << ",";
+                sql << keys[i];
+            }
+            sql << "," << read_count << ")";
+
+            try {
+                client.exec(sql.str());
+            } catch (const std::exception& e) {
+                std::cerr << "MySQL YCSB transaction failed: " << e.what() << std::endl;
+                logger_->info("MySQL YCSB transaction failed: " + std::string(e.what()));
+            }
+
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                               (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
+
+            double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
+            if (WarmupEnd) {
+                if(params->latency_record) params->latency_record->push_back(exec_time);
+                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                }
+            }
+
+            tit->mark_done(txn_entry);
+        }
+    }
+    std::cout << "Finished running MySQL YCSB transactions via stored procedures." << std::endl;
+}
+
+void run_mysql_smallbank_txns_sp(thread_params* params, Logger* logger_) {
+    pthread_setname_np(pthread_self(), ("dbconmy_n" + std::to_string(params->compute_node_id_connecter)
+                                                + "_t_" + std::to_string(params->thread_id)).c_str());
+
+    std::cout << "Running SmallBank transactions via MySQL stored procedures..." << std::endl;
+
+    node_id_t compute_node_id = params->compute_node_id_connecter;
+    TxnQueue* txn_queue = txn_queues[compute_node_id];
+    SmartRouter* smart_router = params->smart_router;
+    SlidingTransactionInforTable *tit = params->tit;
+    SmallBank* smallbank = params->smallbank;
+    assert(txn_queue != nullptr && smart_router != nullptr && tit != nullptr && smallbank != nullptr);
+
+    MySQLClient client(MySQLConnections[compute_node_id]);
+    int con_batch_id = 0;
+    while (true) {
+        timespec pop_start_time, pop_end_time;
+        clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
+        int call_id;
+        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
+        clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
+        double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
+                          (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
+        smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+
+        if (txn_entries.empty()) {
+            if(txn_queue->is_finished()) {
+                break;
+            } else if(txn_queue->is_batch_finished()) {
+                smart_router->notify_batch_finished(compute_node_id, params->thread_id, con_batch_id);
+                timespec wait_start_time, wait_end_time;
+                clock_gettime(CLOCK_MONOTONIC, &wait_start_time);
+                smart_router->wait_for_next_batch(compute_node_id, params->thread_id, con_batch_id);
+                clock_gettime(CLOCK_MONOTONIC, &wait_end_time);
+                double wait_time = (wait_end_time.tv_sec - wait_start_time.tv_sec) * 1000.0 +
+                                   (wait_end_time.tv_nsec - wait_start_time.tv_nsec) / 1000000.0;
+                smart_router->add_worker_thread_wait_next_batch_time(params->compute_node_id_connecter, params->thread_id, wait_time);
+                con_batch_id++;
+                continue;
+            } else continue;
+        }
+
+        for (auto& txn_entry : txn_entries) {
+            timespec start_time, end_time;
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+            exe_count++;
+            maybe_finish_warmup(logger_);
+            exec_txn_cnt_per_node[compute_node_id]++;
+
+            int txn_type = txn_entry->txn_type;
+            itemkey_t account1 = txn_entry->accounts[0];
+            itemkey_t account2 = txn_entry->accounts[1];
+
+            std::ostringstream sql;
+            switch(txn_type) {
+                case 0:
+                    sql << "CALL sp_amalgamate(" << account1 << "," << account2 << ")";
+                    break;
+                case 1:
+                    sql << "CALL sp_send_payment(" << account1 << "," << account2 << ")";
+                    break;
+                case 2:
+                    sql << "CALL sp_deposit_checking(" << account1 << ")";
+                    break;
+                case 3:
+                    sql << "CALL sp_write_check(" << account1 << ")";
+                    break;
+                case 4:
+                    sql << "CALL sp_balance(" << account1 << ")";
+                    break;
+                case 5:
+                    sql << "CALL sp_transact_savings(" << account1 << ")";
+                    break;
+                default:
+                    assert(false && "Unsupported SmallBank transaction type for MySQL");
+            }
+
+            try {
+                client.exec(sql.str());
+            } catch (const std::exception& e) {
+                std::cerr << "MySQL SmallBank transaction failed: " << e.what() << std::endl;
+                logger_->info("MySQL SmallBank transaction failed: " + std::string(e.what()));
+            }
+
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                               (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
+
+            double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
+            if (WarmupEnd) {
+                if(params->latency_record) params->latency_record->push_back(exec_time);
+                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                }
+            }
+
+            tit->mark_done(txn_entry, call_id);
+        }
+    }
+    std::cout << "Finished running MySQL SmallBank transactions via stored procedures." << std::endl;
+}
+#endif
+
 void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
     pthread_setname_np(pthread_self(), ("dbconsp_n" + std::to_string(params->compute_node_id_connecter)
                                                 + "_t_" + std::to_string(params->thread_id)).c_str());
@@ -1480,7 +1680,8 @@ void print_usage(const char* program_name) {
     std::cout << "  --time-run                  Run by wall-clock time instead of try-count" << std::endl;
     std::cout << "  --warmup-seconds <sec>      Warmup duration for --time-run [default: 180]" << std::endl;
     std::cout << "  --run-seconds <sec>         Measured duration after warmup for --time-run [default: 60]" << std::endl;
-    std::cout << "  --db-connection <conninfo>  Add one PostgreSQL conninfo string; repeat for RAC/multi-node" << std::endl;
+    std::cout << "  --db-connection <conninfo>  Add one database conninfo string; repeat for multi-node" << std::endl;
+    std::cout << "                               MySQL format: host=127.0.0.1 port=3306 user=root password=... dbname=test [socket=...]" << std::endl;
     std::cout << "  --help                      Show this help message" << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
@@ -2386,11 +2587,13 @@ int main(int argc, char *argv[]) {
         else if (arg == "--db-type") {
              if (i + 1 < argc) {
                 DB_TYPE = std::stoi(argv[++i]);
-                if (DB_TYPE != 0 && DB_TYPE != 1) {
-                    std::cerr << "Error: db-type must be 0 (PostgreSQL) or 1 (YashanDB)" << std::endl;
+                if (DB_TYPE != 0 && DB_TYPE != 1 && DB_TYPE != 2) {
+                    std::cerr << "Error: db-type must be 0 (PostgreSQL), 1 (YashanDB), or 2 (MySQL)" << std::endl;
                     return -1;
                 }
-                std::cout << "DB Type set to: " << (DB_TYPE == 0 ? "PostgreSQL" : "YashanDB") << std::endl;
+                std::cout << "DB Type set to: "
+                          << (DB_TYPE == 0 ? "PostgreSQL" : (DB_TYPE == 1 ? "YashanDB" : "MySQL"))
+                          << std::endl;
             } else {
                 std::cerr << "Error: --db-type requires a value" << std::endl;
                 print_usage(argv[0]);
@@ -2400,7 +2603,7 @@ int main(int argc, char *argv[]) {
         else if (arg == "--db-connection") {
             if (i + 1 < argc) {
                 cli_db_connections.push_back(argv[++i]);
-                std::cout << "Added PostgreSQL connection string. Total explicit connections: "
+                std::cout << "Added database connection string. Total explicit connections: "
                           << cli_db_connections.size() << std::endl;
             } else {
                 std::cerr << "Error: --db-connection requires an argument." << std::endl;
@@ -2700,6 +2903,24 @@ int main(int argc, char *argv[]) {
         YashanDBConnections.push_back({"10.10.2.40:1688", "sys", "Rdjc#2025"});
         ComputeNodeCount = YashanDBConnections.size();
         std::cout << "YashanDB connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
+    } else if (DB_TYPE == 2) {
+#ifndef WITH_MYSQL_CLIENT
+        std::cerr << "Error: this build was not compiled with MySQL client support." << std::endl;
+        return -1;
+#else
+        std::cout << "Database Type: MySQL" << std::endl;
+        MySQLConnections.clear();
+        if (cli_db_connections.empty()) {
+            MySQLConnections.push_back(parse_mysql_conninfo(
+                "host=127.0.0.1 port=3306 user=root password= dbname=test"));
+        } else {
+            for (const auto& conninfo : cli_db_connections) {
+                MySQLConnections.push_back(parse_mysql_conninfo(conninfo));
+            }
+        }
+        ComputeNodeCount = MySQLConnections.size();
+        std::cout << "MySQL connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
+#endif
     }
 
     if (DB_TYPE == 0) {
@@ -2875,6 +3096,73 @@ int main(int argc, char *argv[]) {
             return 0;
         }
     }
+#ifdef WITH_MYSQL_CLIENT
+    else if (DB_TYPE == 2) {
+        assert(MySQLConnections.size() > 0);
+        MySQLConnInfo conn0 = MySQLConnections[0];
+        if (!SKIP_LOAD_DATA) {
+            std::cout << "Starting MySQL initialization..." << std::endl;
+            if (Workload_Type == 0) {
+                smallbank->create_table_mysql(conn0);
+                if (use_sp) smallbank->create_smallbank_stored_procedures_mysql(conn0);
+            } else if (Workload_Type == 1) {
+                ycsb->create_table_mysql(conn0);
+                if (use_sp) ycsb->create_ycsb_stored_procedures_mysql(conn0);
+            } else {
+                std::cerr << "Error: MySQL path currently supports SmallBank and YCSB only." << std::endl;
+                return -1;
+            }
+
+            std::cout << "Generating friend graph in a separate thread..." << std::endl;
+            auto start_friend_gen = std::chrono::high_resolution_clock::now();
+            std::thread friend_thread([&]() {
+                if(Workload_Type == 0) smallbank->generate_friend_graph();
+            });
+
+            std::cout << "Loading data into MySQL..." << std::endl;
+            if (Workload_Type == 0) smallbank->load_data_mysql(conn0);
+            else if (Workload_Type == 1) ycsb->load_data_mysql(conn0);
+            std::cout << "Data loaded into MySQL successfully." << std::endl;
+
+            friend_thread.join();
+            auto end_friend_gen = std::chrono::high_resolution_clock::now();
+            double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
+            std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
+        } else {
+            std::cout << "Skipping MySQL data loading. Checking tables..." << std::endl;
+            bool tables_exist = false;
+            bool count_ok = false;
+            if (Workload_Type == 0) {
+                tables_exist = smallbank->check_table_exists_mysql(conn0);
+                count_ok = smallbank->check_account_count_mysql(conn0, account_num);
+            } else if (Workload_Type == 1) {
+                tables_exist = ycsb->check_table_exists_mysql(conn0);
+                count_ok = ycsb->check_record_count_mysql(conn0, account_num);
+            } else {
+                std::cerr << "Error: MySQL path currently supports SmallBank and YCSB only." << std::endl;
+                return -1;
+            }
+            if (!tables_exist || !count_ok) {
+                std::cerr << "Error: MySQL tables do not match the requested workload configuration." << std::endl;
+                return -1;
+            }
+
+            std::cout << "Generating friend graph in a separate thread..." << std::endl;
+            auto start_friend_gen = std::chrono::high_resolution_clock::now();
+            std::thread friend_thread([&]() {
+                if(Workload_Type == 0) smallbank->generate_friend_graph();
+            });
+            friend_thread.join();
+            auto end_friend_gen = std::chrono::high_resolution_clock::now();
+            double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
+            std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
+        }
+        if(LOAD_DATA_ONLY) {
+            std::cout << "Load data only mode enabled. Exiting after data load." << std::endl;
+            return 0;
+        }
+    }
+#endif
     else assert(false);
 
     // Initialize Smart Router anyway
@@ -2968,6 +3256,23 @@ int main(int argc, char *argv[]) {
         // 走原有从数据库扫描初始化的路径
         init_key_page_map(smart_router, smallbank, ycsb, tpcc);
     }
+    else if (DB_TYPE == 2) {
+        std::cout << "Initializing synthetic key-page map for MySQL client experiments." << std::endl;
+        if (Workload_Type == 0) {
+            int N = smallbank->get_account_count();
+            for (int id = 1; id <= N; ++id) {
+                int page = id / GroupPageAffinitySize;
+                smart_router->initial_key_page((table_id_t)SmallBankTableType::kCheckingTable, id, page);
+                smart_router->initial_key_page((table_id_t)SmallBankTableType::kSavingsTable, id, page);
+            }
+        } else if (Workload_Type == 1) {
+            int N = ycsb->get_record_count();
+            for (int id = 1; id <= N; ++id) {
+                int page = id / GroupPageAffinitySize;
+                smart_router->initial_key_page((table_id_t)YCSBTableType::kYCSBTable, id, page);
+            }
+        }
+    }
     else assert(false);
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -3032,6 +3337,13 @@ int main(int argc, char *argv[]) {
                 if (use_sp) {
                     if (DB_TYPE == 1) { // YashanDB
                         db_conn_threads.emplace_back(run_yashan_smallbank_txns_sp, params, logger_);
+                    } else if (DB_TYPE == 2) { // MySQL
+#ifdef WITH_MYSQL_CLIENT
+                        db_conn_threads.emplace_back(run_mysql_smallbank_txns_sp, params, logger_);
+#else
+                        std::cerr << "Error: MySQL client support is not compiled in." << std::endl;
+                        exit(-1);
+#endif
                     } else { // PostgreSQL
                         db_conn_threads.emplace_back(run_smallbank_txns_sp, params, logger_);
                     }
@@ -3044,8 +3356,18 @@ int main(int argc, char *argv[]) {
                 }
             }
             else if (Workload_Type == 1) {
-                if (use_sp) 
-                    db_conn_threads.emplace_back(run_ycsb_txns_sp, params, logger_);
+                if (use_sp) {
+                    if (DB_TYPE == 2) {
+#ifdef WITH_MYSQL_CLIENT
+                        db_conn_threads.emplace_back(run_mysql_ycsb_txns_sp, params, logger_);
+#else
+                        std::cerr << "Error: MySQL client support is not compiled in." << std::endl;
+                        exit(-1);
+#endif
+                    } else {
+                        db_conn_threads.emplace_back(run_ycsb_txns_sp, params, logger_);
+                    }
+                }
                 else assert(false && "Only support YCSB with stored procedures!");
             }
             else if (Workload_Type == 2 || Workload_Type == 3) {

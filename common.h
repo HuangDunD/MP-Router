@@ -38,3 +38,14 @@ struct YashanConnInfo {
     std::string user;
     std::string password;
 };
+
+// MySQL compatible methods. The fields are intentionally close to libmysqlclient
+// so that --db-connection strings can be parsed without adding another config file.
+struct MySQLConnInfo {
+    std::string host = "127.0.0.1";
+    unsigned int port = 3306;
+    std::string user = "root";
+    std::string password;
+    std::string database = "test";
+    std::string socket;
+};

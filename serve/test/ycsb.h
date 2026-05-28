@@ -50,6 +50,17 @@ public:
     int get_access_pattern() const { return access_pattern_; }
     int get_read_cnt() const { return read_ops_per_txn_; }
     int get_write_cnt() const { return write_ops_per_txn_; }
+    int get_field_len() const { return field_len_; }
+
+    static std::string random_field_string(int len) {
+        static thread_local std::mt19937 rng{std::random_device{}()};
+        static const char alphanum[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        std::uniform_int_distribution<int> dist(0, (int)sizeof(alphanum) - 2);
+        std::string s;
+        s.reserve(len);
+        for (int i = 0; i < len; ++i) s.push_back(alphanum[dist(rng)]);
+        return s;
+    }
 
     inline static const std::vector<table_id_t> TABLE_IDS_ARR[] = {
         // txn_type == 0 -> 10 zeros
@@ -188,6 +199,11 @@ public:
     bool random_rw_mode_enabled() const { return rw_mode_ == RwMode::RANDOM; }
 
     void create_ycsb_stored_procedures(pqxx::connection* conn);
+    void create_table_mysql(const MySQLConnInfo& info);
+    void load_data_mysql(const MySQLConnInfo& info);
+    void create_ycsb_stored_procedures_mysql(const MySQLConnInfo& info);
+    bool check_table_exists_mysql(const MySQLConnInfo& info);
+    bool check_record_count_mysql(const MySQLConnInfo& info, int expected_count);
 
     void generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool);
 
@@ -259,12 +275,6 @@ private:
     std::vector<bool> rw_flags_; // 大小固定为10：前 read_ops_per_txn_ 为0(读)，其余为1(写)
 
     static std::string random_string(int len) {
-        static thread_local std::mt19937 rng{std::random_device{}()};
-        static const char alphanum[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-        std::uniform_int_distribution<int> dist(0, (int)sizeof(alphanum) - 2);
-        std::string s;
-        s.reserve(len);
-        for (int i = 0; i < len; ++i) s.push_back(alphanum[dist(rng)]);
-        return s;
+        return random_field_string(len);
     }
 };

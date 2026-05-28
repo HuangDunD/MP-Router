@@ -349,6 +349,14 @@ public:
     TableKeyPageMap fetch_row_id_yashan();
     // ------ End of YashanDB compatible methods ------
 
+    // ------ MySQL compatible methods ------
+    void create_table_mysql(const MySQLConnInfo& info);
+    void load_data_mysql(const MySQLConnInfo& info);
+    void create_smallbank_stored_procedures_mysql(const MySQLConnInfo& info);
+    bool check_table_exists_mysql(const MySQLConnInfo& info);
+    bool check_account_count_mysql(const MySQLConnInfo& info, int expected_count);
+    // ------ End of MySQL compatible methods ------
+
     void generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool);
 
     void create_smallbank_stored_procedures(pqxx::connection* conn);

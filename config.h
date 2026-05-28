@@ -24,7 +24,7 @@
 // 定义算法版本 0: random 1: affinity 2: single 3: perfect
 extern int SYSTEM_MODE; 
 
-// 定义数据库类型 0: PostgreSQL 1: YashanDB
+// 定义数据库类型 0: PostgreSQL 1: YashanDB 2: MySQL
 extern int DB_TYPE;
 
 // 定义所跑的workload 0:smallbank 1:tpcc
@@ -52,6 +52,7 @@ extern std::string partition_log_file_;
 extern int worker_threads; // 工作线程数量, 路由和RAC节点建立的连接数
 extern std::vector<std::string> DBConnection; // for PostgreSQL
 extern std::vector<YashanConnInfo> YashanDBConnections; // for YashanDB
+extern std::vector<MySQLConnInfo> MySQLConnections; // for MySQL
 extern int ComputeNodeCount; // 计算节点数量
 extern uint64_t ATTEMPTED_NUM;
 extern int REGION_SIZE;

@@ -15,8 +15,16 @@ include_directories(./)
 add_executable(yashan_test yashan_test.cc)
 target_link_libraries(yashan_test ${YS_LIBRARY} )
 
-add_executable(run run.cc smallbank.cc ycsb.cc tpcc.cc smart_router.cc friend_simulate.cc parse.cc)
+set(RUN_SOURCES run.cc smallbank.cc ycsb.cc tpcc.cc smart_router.cc friend_simulate.cc parse.cc)
+if (MYSQL_INCLUDE_DIR AND MYSQLCLIENT_LIBRARY)
+    list(APPEND RUN_SOURCES mysql_workload.cc)
+endif()
+
+add_executable(run ${RUN_SOURCES})
 target_link_libraries(run global mlp metis logger ${METIS_LIBRARY} ${GKLIB_LIBRARY} ${PQXX_LIBRARY} ${PQ_LIBRARY} ${YS_LIBRARY} pgcommon pgport)
+if (MYSQL_INCLUDE_DIR AND MYSQLCLIENT_LIBRARY)
+    target_link_libraries(run ${MYSQLCLIENT_LIBRARY})
+endif()
 
 add_executable(indexed_priority_queue_test indexed_priority_queue_test.cc)
 target_link_libraries(indexed_priority_queue_test)

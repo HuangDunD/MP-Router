@@ -24,6 +24,69 @@ link_directories(/usr/lib/postgresql/14/lib)
 
 include_directories(/root/yashandb-client/include)
 
+find_program(MYSQL_CONFIG_EXECUTABLE mysql_config
+    PATHS
+    /usr/bin
+    /usr/local/bin
+    /opt/homebrew/bin
+)
+if (MYSQL_CONFIG_EXECUTABLE)
+    execute_process(
+        COMMAND ${MYSQL_CONFIG_EXECUTABLE} --include
+        OUTPUT_VARIABLE MYSQL_CONFIG_INCLUDE_FLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    execute_process(
+        COMMAND ${MYSQL_CONFIG_EXECUTABLE} --libs
+        OUTPUT_VARIABLE MYSQL_CONFIG_LIB_FLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    separate_arguments(MYSQL_CONFIG_INCLUDE_FLAGS)
+    separate_arguments(MYSQL_CONFIG_LIB_FLAGS)
+    foreach(flag ${MYSQL_CONFIG_INCLUDE_FLAGS})
+        if (flag MATCHES "^-I(.+)")
+            list(APPEND MYSQL_CONFIG_INCLUDE_DIRS "${CMAKE_MATCH_1}")
+        endif()
+    endforeach()
+endif()
+
+set(MYSQL_ROOT "" CACHE PATH "Optional MySQL source/install root")
+find_path(MYSQL_INCLUDE_DIR mysql.h
+    PATHS
+    ${MYSQL_CONFIG_INCLUDE_DIRS}
+    ${MYSQL_ROOT}/include
+    ${MYSQL_ROOT}/include/mysql
+    /usr/include/mysql
+    /usr/local/include
+    /usr/local/include/mysql
+    /opt/homebrew/include
+    /opt/homebrew/include/mysql
+)
+find_library(MYSQLCLIENT_LIBRARY
+    NAMES mysqlclient libmysqlclient
+    PATHS
+    ${MYSQL_ROOT}/lib
+    ${MYSQL_ROOT}/lib64
+    /usr/lib
+    /usr/lib64
+    /usr/local/lib
+    /opt/homebrew/lib
+    PATH_SUFFIXES mysql
+)
+if (MYSQL_INCLUDE_DIR AND MYSQLCLIENT_LIBRARY)
+    message(STATUS "Found MySQL client include: ${MYSQL_INCLUDE_DIR}")
+    message(STATUS "Found MySQL client library: ${MYSQLCLIENT_LIBRARY}")
+    include_directories(${MYSQL_INCLUDE_DIR})
+    add_compile_definitions(WITH_MYSQL_CLIENT=1)
+elseif (MYSQL_CONFIG_EXECUTABLE AND MYSQL_CONFIG_INCLUDE_DIRS AND MYSQL_CONFIG_LIB_FLAGS)
+    message(STATUS "Using MySQL client flags from mysql_config: ${MYSQL_CONFIG_EXECUTABLE}")
+    include_directories(${MYSQL_CONFIG_INCLUDE_DIRS})
+    set(MYSQLCLIENT_LIBRARY ${MYSQL_CONFIG_LIB_FLAGS})
+    add_compile_definitions(WITH_MYSQL_CLIENT=1)
+else()
+    message(WARNING "MySQL client library/header not found; DB_TYPE=2 will not be available.")
+endif()
+
 # 查找 libpq
 find_library(YS_LIBRARY 
     yascli PATHS 

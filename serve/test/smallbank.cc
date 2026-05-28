@@ -3,9 +3,8 @@
 #include <sstream>
 #include <vector>
 #include <iostream>
+#include <stdexcept>
 
-// Try to include yacli.h if available, otherwise we might need to mock or ensure path is correct
-// Assuming it is in the same directory or include path
 #include "yacli.h" 
 
 #define YAC_CALL_VOID(proc)                      \
