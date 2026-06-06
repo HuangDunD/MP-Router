@@ -10,12 +10,12 @@ const std::vector<table_id_t> TPCC::TABLE_IDS_ARR[5] = {
     {(table_id_t)TPCCTableType::kDistrict, (table_id_t)TPCCTableType::kStock},
     // Payment: Warehouse, District, Customer, History
     {(table_id_t)TPCCTableType::kWarehouse, (table_id_t)TPCCTableType::kDistrict, (table_id_t)TPCCTableType::kCustomer},
-    // OrderStatus: Customer, Orders, OrderLine
-    {(table_id_t)TPCCTableType::kCustomer, (table_id_t)TPCCTableType::kOrders},
-    // Delivery: NewOrder, Orders, OrderLine, Customer
-    {(table_id_t)TPCCTableType::kNewOrder, (table_id_t)TPCCTableType::kOrders, (table_id_t)TPCCTableType::kCustomer},
-    // StockLevel: District, OrderLine, Stock
-    {(table_id_t)TPCCTableType::kDistrict, (table_id_t)TPCCTableType::kStock}
+    // OrderStatus: router tracks the generated customer key.
+    {(table_id_t)TPCCTableType::kCustomer},
+    // Delivery: router tracks the generated warehouse key for this district-wide transaction.
+    {(table_id_t)TPCCTableType::kWarehouse},
+    // StockLevel: router tracks the generated district key.
+    {(table_id_t)TPCCTableType::kDistrict}
 };
 
 // RW Flags (Simplified)
@@ -24,12 +24,12 @@ const std::vector<bool> TPCC::RW_FLAGS_ARR[5] = {
     {true, true},
     // Payment: W(W), D(W), C(W)
     {true, true, true},
-    // OrderStatus: C(R), O(R)
-    {false, false},
-    // Delivery: NO(R/W), O(W), C(W)
-    {true, true, true},
-    // StockLevel: D(R), S(R)
-    {false, false}
+    // OrderStatus: C(R)
+    {false},
+    // Delivery: W(W) as a conservative single-key routing proxy.
+    {true},
+    // StockLevel: D(R)
+    {false}
 };
 
 TPCC::TPCC(int num_warehouses, int access_pattern_type, bool standard_mode)
@@ -724,7 +724,7 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                 END LOOP;
 
                 INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_carrier_id, o_ol_cnt, o_all_local)
-                VALUES (o_id, p_d_id, p_w_id, p_c_id, NOW(), NULL, p_o_ol_cnt, all_local);
+                VALUES (o_id, p_d_id, p_w_id, p_c_id, TIMESTAMP '2000-01-01 00:00:00', NULL, p_o_ol_cnt, all_local);
 
                 INSERT INTO new_order (no_o_id, no_d_id, no_w_id)
                 VALUES (o_id, p_d_id, p_w_id);
@@ -794,7 +794,7 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                 RETURN QUERY SELECT 'customer'::text, p_c_w_id, p_c_d_id, c_ctid;
 
                 INSERT INTO history (h_c_d_id, h_c_w_id, h_c_id, h_d_id, h_w_id, h_date, h_amount, h_data)
-                VALUES (p_c_d_id, p_c_w_id, p_c_id, p_d_id, p_w_id, NOW(), p_h_amount, 'standard payment');
+                VALUES (p_c_d_id, p_c_w_id, p_c_id, p_d_id, p_w_id, TIMESTAMP '2000-01-01 00:00:00', p_h_amount, 'standard payment');
             END;
             $$;
         )SQL");
@@ -867,7 +867,7 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                     RETURN QUERY SELECT 'orders'::text, p_w_id, d, o_ctid;
 
                     UPDATE order_line AS ol
-                    SET ol_delivery_d = NOW()
+                    SET ol_delivery_d = TIMESTAMP '2000-01-01 00:00:00'
                     WHERE ol.ol_w_id = p_w_id AND ol.ol_d_id = d AND ol.ol_o_id = oldest_o_id;
 
                     SELECT COALESCE(SUM(ol_amount), 0) INTO total_amount

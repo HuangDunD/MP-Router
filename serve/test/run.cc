@@ -2295,8 +2295,8 @@ int main(int argc, char *argv[]) {
         else if (arg == "--hotspot-fraction") {
             if (i + 1 < argc) {
                 hotspot_fraction = std::stod(argv[++i]);
-                if (hotspot_fraction <= 0.0 || hotspot_fraction >= 1.0) {
-                    std::cerr << "Error: Hotspot fraction must be between 0.0 and 1.0" << std::endl;
+                if (hotspot_fraction <= 0.0 || hotspot_fraction > 1.0) {
+                    std::cerr << "Error: Hotspot fraction must be in (0.0, 1.0]" << std::endl;
                     return -1;
                 }
                 std::cout << "Hotspot fraction set to: " << hotspot_fraction << std::endl;
@@ -2667,6 +2667,11 @@ int main(int argc, char *argv[]) {
             print_usage(argv[0]);
             return -1;
         }
+    }
+
+    if (access_pattern == 2 && hotspot_fraction >= 1.0) {
+        std::cout << "Hotspot fraction is 1.0; using effective access pattern 0 (uniform)." << std::endl;
+        access_pattern = 0;
     }
 
     // Display current configuration
