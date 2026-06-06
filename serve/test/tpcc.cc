@@ -1,6 +1,7 @@
 #include "tpcc.h"
 #include <iostream>
 #include <algorithm>
+#include <chrono>
 #include <set>
 
 // Initialize static members
@@ -31,6 +32,12 @@ const std::vector<bool> TPCC::RW_FLAGS_ARR[5] = {
     // StockLevel: D(R)
     {false}
 };
+
+static itemkey_t current_epoch_ms() {
+    return static_cast<itemkey_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+}
 
 TPCC::TPCC(int num_warehouses, int access_pattern_type, bool standard_mode)
     : num_warehouses_(num_warehouses),
@@ -643,7 +650,7 @@ void TPCC::create_tpcc_stored_procedures(pqxx::connection *conn) {
                 p_c_w_id INT,
                 p_c_d_id INT,
                 p_c_id   INT,
-                p_h_amount DECIMAL(6,2)
+                p_h_amount INT
             )
             RETURNS TABLE(rel TEXT, ret_w_id INT, ret_d_id INT, ctid TID)
             LANGUAGE plpgsql AS $$
@@ -696,7 +703,8 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
         txn.exec(R"SQL(
             CREATE OR REPLACE FUNCTION tpcc_standard_new_order(
                 p_w_id INT, p_d_id INT, p_c_id INT, p_o_ol_cnt INT,
-                p_i_ids INT[], p_i_w_ids INT[], p_quantities INT[]
+                p_i_ids INT[], p_i_w_ids INT[], p_quantities INT[],
+                p_txn_time_ms BIGINT
             )
             RETURNS TABLE(rel TEXT, ret_w_id INT, ret_d_id INT, ret_i_id INT, ctid TID)
             LANGUAGE plpgsql AS $$
@@ -724,7 +732,11 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                 END LOOP;
 
                 INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_carrier_id, o_ol_cnt, o_all_local)
-                VALUES (o_id, p_d_id, p_w_id, p_c_id, TIMESTAMP '2000-01-01 00:00:00', NULL, p_o_ol_cnt, all_local);
+                VALUES (
+                    o_id, p_d_id, p_w_id, p_c_id,
+                    TIMESTAMP 'epoch' + p_txn_time_ms * INTERVAL '1 millisecond',
+                    NULL, p_o_ol_cnt, all_local
+                );
 
                 INSERT INTO new_order (no_o_id, no_d_id, no_w_id)
                 VALUES (o_id, p_d_id, p_w_id);
@@ -764,7 +776,8 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
 
         txn.exec(R"SQL(
             CREATE OR REPLACE FUNCTION tpcc_standard_payment(
-                p_w_id INT, p_d_id INT, p_c_w_id INT, p_c_d_id INT, p_c_id INT, p_h_amount DECIMAL(6,2)
+                p_w_id INT, p_d_id INT, p_c_w_id INT, p_c_d_id INT, p_c_id INT,
+                p_h_amount INT, p_txn_time_ms BIGINT
             )
             RETURNS TABLE(rel TEXT, ret_w_id INT, ret_d_id INT, ctid TID)
             LANGUAGE plpgsql AS $$
@@ -794,7 +807,11 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                 RETURN QUERY SELECT 'customer'::text, p_c_w_id, p_c_d_id, c_ctid;
 
                 INSERT INTO history (h_c_d_id, h_c_w_id, h_c_id, h_d_id, h_w_id, h_date, h_amount, h_data)
-                VALUES (p_c_d_id, p_c_w_id, p_c_id, p_d_id, p_w_id, TIMESTAMP '2000-01-01 00:00:00', p_h_amount, 'standard payment');
+                VALUES (
+                    p_c_d_id, p_c_w_id, p_c_id, p_d_id, p_w_id,
+                    TIMESTAMP 'epoch' + p_txn_time_ms * INTERVAL '1 millisecond',
+                    p_h_amount, 'standard payment'
+                );
             END;
             $$;
         )SQL");
@@ -832,7 +849,7 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
 
         txn.exec(R"SQL(
             CREATE OR REPLACE FUNCTION tpcc_standard_delivery(
-                p_w_id INT, p_carrier_id INT
+                p_w_id INT, p_carrier_id INT, p_txn_time_ms BIGINT
             )
             RETURNS TABLE(rel TEXT, ret_w_id INT, ret_d_id INT, ctid TID)
             LANGUAGE plpgsql AS $$
@@ -867,7 +884,7 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                     RETURN QUERY SELECT 'orders'::text, p_w_id, d, o_ctid;
 
                     UPDATE order_line AS ol
-                    SET ol_delivery_d = TIMESTAMP '2000-01-01 00:00:00'
+                    SET ol_delivery_d = TIMESTAMP 'epoch' + p_txn_time_ms * INTERVAL '1 millisecond'
                     WHERE ol.ol_w_id = p_w_id AND ol.ol_d_id = d AND ol.ol_o_id = oldest_o_id;
 
                     SELECT COALESCE(SUM(ol_amount), 0) INTO total_amount
@@ -1015,6 +1032,9 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
                         tpcc_params.push_back(ol.supply_w_id);
                         tpcc_params.push_back(ol.quantity);
                     }
+                    if (standard_mode_) {
+                        tpcc_params.push_back(current_epoch_ms());
+                    }
                     break;
                 }
                 case TPCCTxType::kPayment: {
@@ -1027,6 +1047,9 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
                     tpcc_params.push_back(c_id);
                     int h_amount = random_int(1, 5000);
                     tpcc_params.push_back(h_amount);
+                    if (standard_mode_) {
+                        tpcc_params.push_back(current_epoch_ms());
+                    }
                     break;
                 }
                 case TPCCTxType::kOrderStatus: {
@@ -1042,6 +1065,9 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
 
                     tpcc_params.push_back(w_id);
                     tpcc_params.push_back(random_int(1, 10));
+                    if (standard_mode_) {
+                        tpcc_params.push_back(current_epoch_ms());
+                    }
                     break;
                 }
                 case TPCCTxType::kStockLevel: {

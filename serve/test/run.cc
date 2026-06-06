@@ -16,6 +16,7 @@
 #include <streambuf>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 
 #include "smallbank.h"
 #include "ycsb.h"
@@ -41,6 +42,30 @@ static std::atomic<bool> warmup_transition_started{false};
 static SmallBank::TableKeyPageMap g_smallbank_key_page_map;
 
 static std::vector<std::string> cli_db_connections;
+
+static bool is_concurrency_rollback(const std::exception& e) {
+    const auto* sql_error = dynamic_cast<const pqxx::sql_error*>(&e);
+    if (sql_error == nullptr) {
+        return false;
+    }
+
+    const std::string& sqlstate = sql_error->sqlstate();
+    return sqlstate.size() >= 2 && sqlstate[0] == '4' && sqlstate[1] == '0';
+}
+
+static void report_sp_failure(const std::exception& e, Logger* logger_, bool database_committed) {
+    if (!database_committed && is_concurrency_rollback(e)) {
+        return;
+    }
+
+    const std::string prefix = database_committed ?
+        "Transaction (SP) post-processing failed after commit: " :
+        "Transaction (SP) failed: ";
+    std::cerr << prefix << e.what() << std::endl;
+    if (logger_) {
+        logger_->info(prefix + std::string(e.what()));
+    }
+}
 
 // thread parameters structure for DB connector threads
 struct thread_params
@@ -789,6 +814,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
 
             // !不需要外层事务
             pqxx::nontransaction txn(*con);
+            bool database_committed = false;
 
             try {
                 pqxx::result res;
@@ -845,6 +871,9 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                     }
                 }
 
+                database_committed = true;
+                committed_xact_count.fetch_add(1, std::memory_order_relaxed);
+
                 for (const auto& row : res) {
                     std::string ctid_str = row["ctid"].as<std::string>();
                     auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid_str);
@@ -866,8 +895,10 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                 smart_router->add_worker_thread_update_time(params->compute_node_id_connecter, params->thread_id, update_time);
                 
             } catch (const std::exception &e) {
-                std::cerr << "Transaction (SP) failed: " << e.what() << std::endl;
-                logger_->info("Transaction (SP) failed: " + std::string(e.what()));
+                if (!database_committed) {
+                    aborted_xact_count.fetch_add(1, std::memory_order_relaxed);
+                }
+                report_sp_failure(e, logger_, database_committed);
             }
 
             // // 模拟执行时间, 再sleep 1 ms
@@ -880,7 +911,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
-            if (WarmupEnd) {
+            if (WarmupEnd && database_committed) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
@@ -1073,6 +1104,7 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
 
             // !不需要外层事务
             pqxx::nontransaction txn(*con);
+            bool database_committed = false;
             try {
                 pqxx::result res;
                 switch(txn_type) {
@@ -1095,6 +1127,9 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
                     }
                 }
 
+                database_committed = true;
+                committed_xact_count.fetch_add(1, std::memory_order_relaxed);
+
                 for (const auto& row : res) {
                     std::string ctid_str = row["ctid"].as<std::string>();
                     auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid_str);
@@ -1106,8 +1141,10 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
                                                   keys, rw, ctid_ret_page_ids, compute_node_id);
                 }
             } catch (const std::exception &e) {
-                std::cerr << "Transaction (SP) failed: " << e.what() << std::endl;
-                logger_->info("Transaction (SP) failed: " + std::string(e.what()));
+                if (!database_committed) {
+                    aborted_xact_count.fetch_add(1, std::memory_order_relaxed);
+                }
+                report_sp_failure(e, logger_, database_committed);
             }
 
             // 计时结束
@@ -1117,7 +1154,7 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
-            if (WarmupEnd) {
+            if (WarmupEnd && database_committed) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
@@ -1407,6 +1444,7 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
 
             // !不需要外层事务
             pqxx::nontransaction txn(*con);
+            bool database_committed = false;
             
             try{
                 pqxx::result res;
@@ -1441,22 +1479,30 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                         supply_w_ids_str += "}";
                         quantities_str += "}";
 
-                        std::string func_name = tpcc->is_standard_mode() ?
-                            "tpcc_standard_new_order" : "tpcc_new_order";
-                        std::string sql = "SELECT * FROM " + func_name + "(" +
+                        std::string sql = "SELECT * FROM " +
+                            std::string(tpcc->is_standard_mode() ?
+                                "tpcc_standard_new_order" : "tpcc_new_order") + "(" +
                             std::to_string(w_id) + ", " +
                             std::to_string(d_id) + ", " + 
                             std::to_string(c_id) + ", " + 
                             std::to_string(o_ol_cnt) + ", '" + 
                             i_ids_str + "', '" + 
                             supply_w_ids_str + "', '" + 
-                            quantities_str + "')";
+                            quantities_str + "'";
+                        if (tpcc->is_standard_mode()) {
+                            const size_t txn_time_index = 4 + static_cast<size_t>(o_ol_cnt) * 3;
+                            if (txn_time_index >= tpcc_params.size()) {
+                                throw std::runtime_error("TPC-C NewOrder is missing client transaction time");
+                            }
+                            sql += ", " + std::to_string(tpcc_params[txn_time_index]);
+                        }
+                        sql += ")";
                         
                         res = txn.exec(sql);
                         break;
                     }
                     case TPCCTxType::kPayment: {
-                        if (tpcc_params.size() < 4) {
+                        if (tpcc_params.size() < (tpcc->is_standard_mode() ? 5U : 4U)) {
                             assert(false);
                         }
                         int w_id = tpcc_params[0];
@@ -1472,7 +1518,11 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                             std::to_string(w_id) + ", " + 
                             std::to_string(d_id) + ", " + 
                             std::to_string(c_id) + ", " + 
-                            std::to_string(h_amount) + ")";
+                            std::to_string(h_amount);
+                        if (tpcc->is_standard_mode()) {
+                            sql += ", " + std::to_string(tpcc_params[4]);
+                        }
+                        sql += ")";
                         
                         res = txn.exec(sql);
                         break;
@@ -1489,12 +1539,13 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                         break;
                     }
                     case TPCCTxType::kDelivery: {
-                        if (!tpcc->is_standard_mode() || tpcc_params.size() < 2) {
+                        if (!tpcc->is_standard_mode() || tpcc_params.size() < 3) {
                             assert(false);
                         }
                         std::string sql = "SELECT * FROM tpcc_standard_delivery(" +
                             std::to_string(tpcc_params[0]) + ", " +
-                            std::to_string(tpcc_params[1]) + ")";
+                            std::to_string(tpcc_params[1]) + ", " +
+                            std::to_string(tpcc_params[2]) + ")";
                         res = txn.exec(sql);
                         break;
                     }
@@ -1513,6 +1564,9 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                         assert(false);
                 }
 
+                database_committed = true;
+                committed_xact_count.fetch_add(1, std::memory_order_relaxed);
+
                 for (const auto& row : res) {
                     if (row["ctid"].is_null()) {
                         continue;
@@ -1527,8 +1581,10 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                                                     tpcc_keys, rw, ctid_ret_page_ids, compute_node_id);
                 }
             } catch (const std::exception &e) {
-                std::cerr << "Transaction (SP) failed: " << e.what() << std::endl;
-                logger_->info("Transaction (SP) failed: " + std::string(e.what()));
+                if (!database_committed) {
+                    aborted_xact_count.fetch_add(1, std::memory_order_relaxed);
+                }
+                report_sp_failure(e, logger_, database_committed);
             }
             // 计时结束
             clock_gettime(CLOCK_MONOTONIC, &end_time);
@@ -1537,7 +1593,7 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
-            if (WarmupEnd) {
+            if (WarmupEnd && database_committed) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
@@ -3408,6 +3464,8 @@ int main(int argc, char *argv[]) {
     std::cout << "\033[31m Warmup rounds completed. Create the smart router snapshot. \033[0m" << std::endl;
     auto warmup_end_time = std::chrono::high_resolution_clock::now();
     long long warmup_exe_count = exe_count;
+    uint64_t warmup_committed_xact_count = committed_xact_count.load(std::memory_order_relaxed);
+    uint64_t warmup_aborted_xact_count = aborted_xact_count.load(std::memory_order_relaxed);
     if(smart_router) { 
         snapshot1 = take_router_snapshot(smart_router);
         print_diff_snapshot(snapshot0, snapshot1);
@@ -3476,15 +3534,41 @@ int main(int argc, char *argv[]) {
         std::cout << "Access pattern used: " << access_pattern_name << std::endl;
     }
 
-    std::cout << "Total transactions executed: " << exe_count << std::endl;
+    const uint64_t total_attempts = static_cast<uint64_t>(exe_count.load(std::memory_order_relaxed));
+    const uint64_t total_committed = committed_xact_count.load(std::memory_order_relaxed);
+    const uint64_t total_aborted = aborted_xact_count.load(std::memory_order_relaxed);
+    const bool outcome_stats_enabled = DB_TYPE == 0 && use_sp;
+    const uint64_t throughput_transactions = outcome_stats_enabled ? total_committed : total_attempts;
+
+    std::cout << "Total transaction attempts: " << total_attempts << std::endl;
+    std::cout << "Committed transactions: " << total_committed << std::endl;
+    std::cout << "Aborted transactions: " << total_aborted << std::endl;
+    std::cout << "Total transactions executed: " << throughput_transactions << std::endl;
     std::cout << "Elapsed time: " << ms << " milliseconds" << std::endl;
     double s = ms / 1000.0; // Convert milliseconds to seconds
-    std::cout << "Throughput: " << exe_count / s << " transactions per second" << std::endl;
+    std::cout << "Throughput: " << throughput_transactions / s << " transactions per second" << std::endl;
 
     double ms_after_warmup = std::chrono::duration_cast<std::chrono::milliseconds>(end - warmup_end_time).count();
     double s_after_warmup = ms_after_warmup / 1000.0;
-    long long txn_after_warmup = exe_count - warmup_exe_count;
-    std::cout << "Throughput (after warmup): " << txn_after_warmup / s_after_warmup << " transactions per second" << std::endl;
+    const uint64_t started_attempts_after_warmup =
+        total_attempts - static_cast<uint64_t>(warmup_exe_count);
+    const uint64_t committed_after_warmup = total_committed - warmup_committed_xact_count;
+    const uint64_t aborted_after_warmup = total_aborted - warmup_aborted_xact_count;
+    const uint64_t completed_after_warmup = committed_after_warmup + aborted_after_warmup;
+    const uint64_t attempts_after_warmup =
+        outcome_stats_enabled ? completed_after_warmup : started_attempts_after_warmup;
+    const uint64_t throughput_transactions_after_warmup =
+        outcome_stats_enabled ? committed_after_warmup : attempts_after_warmup;
+    const double abort_ratio_after_warmup = completed_after_warmup > 0 ?
+        static_cast<double>(aborted_after_warmup) / completed_after_warmup : 0.0;
+
+    std::cout << "Transaction attempts (after warmup): " << attempts_after_warmup << std::endl;
+    std::cout << "Committed transactions (after warmup): " << committed_after_warmup << std::endl;
+    std::cout << "Aborted transactions (after warmup): " << aborted_after_warmup << std::endl;
+    std::cout << "Abort ratio (after warmup): " << abort_ratio_after_warmup << std::endl;
+    std::cout << "Throughput (after warmup): "
+              << throughput_transactions_after_warmup / s_after_warmup
+              << " transactions per second" << std::endl;
 
     // --- Latency Statistics (After Warmup) ---
     std::vector<double> all_latencies;

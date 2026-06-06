@@ -37,6 +37,8 @@ double Key_Page_Map_Cache_Ratio = 1.1; // 默认情况可以存的下
 // global variables
 int try_count = 10000;
 std::atomic<int> exe_count{0}; // 这个是所有线程的总事务数
+std::atomic<uint64_t> committed_xact_count{0};
+std::atomic<uint64_t> aborted_xact_count{0};
 std::atomic<int> generated_txn_count{0}; // 这个是所有线程生成的总事务数
 std::atomic<uint64_t> tx_id_generator{0}; // 全局事务ID生成器
 int Workload_Type = 0; // 0: smallbank, 1: ycsb

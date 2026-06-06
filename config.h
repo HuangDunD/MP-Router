@@ -83,6 +83,8 @@ extern int TPCC_WAREHOUSE_NUM;
 // global variables
 extern int try_count;
 extern std::atomic<int> exe_count;
+extern std::atomic<uint64_t> committed_xact_count;
+extern std::atomic<uint64_t> aborted_xact_count;
 extern std::atomic<int> generated_txn_count;
 extern std::atomic<uint64_t> tx_id_generator;
 extern int Workload_Type;
