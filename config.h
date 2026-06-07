@@ -85,6 +85,8 @@ extern int try_count;
 extern std::atomic<int> exe_count;
 extern std::atomic<uint64_t> committed_xact_count;
 extern std::atomic<uint64_t> aborted_xact_count;
+extern std::atomic<uint64_t> concurrency_retry_count;
+extern std::atomic<uint64_t> concurrency_retry_exhausted_count;
 extern std::atomic<int> generated_txn_count;
 extern std::atomic<uint64_t> tx_id_generator;
 extern int Workload_Type;
@@ -96,3 +98,4 @@ extern std::atomic<bool> stop_benchmark; // 停止benchmark的标志
 extern bool time_based_run; // 是否按时间窗口运行
 extern int warmup_seconds; // time-based 模式预热秒数
 extern int run_seconds; // time-based 模式正式运行秒数
+extern int concurrency_retry_limit; // 并发回滚后，除初始执行外最多重试次数

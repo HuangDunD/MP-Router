@@ -90,6 +90,27 @@ static void report_sp_failure(const std::exception& e, Logger* logger_, bool dat
     }
 }
 
+static bool should_retry_concurrency_rollback(const std::exception& e,
+                                              bool database_committed,
+                                              int retries_used) {
+    return !database_committed &&
+           concurrency_retry_limit > 0 &&
+           retries_used < concurrency_retry_limit &&
+           measurement_window_open() &&
+           is_concurrency_rollback(e);
+}
+
+static void record_retry_exhausted_if_needed(const std::exception& e,
+                                             bool database_committed,
+                                             int retries_used) {
+    if (!database_committed &&
+        concurrency_retry_limit > 0 &&
+        retries_used >= concurrency_retry_limit &&
+        is_concurrency_rollback(e)) {
+        concurrency_retry_exhausted_count.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 // thread parameters structure for DB connector threads
 struct thread_params
 {
@@ -847,93 +868,109 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
 
             std::vector<page_id_t> ctid_ret_page_ids;
 
-            // !不需要外层事务
-            pqxx::nontransaction txn(*con);
             bool database_committed = false;
+            int retries_used = 0;
+            while (true) {
+                ctid_ret_page_ids.clear();
+                while (con->is_open() == false) {
+                    std::cerr << "Connection is broken, reconnecting..." << std::endl;
+                    delete con;
+                    con = new pqxx::connection(con_str);
+                }
+                // !不需要外层事务
+                pqxx::nontransaction txn(*con);
 
-            try {
-                pqxx::result res;
-                switch(txn_type) {
-                    case 0: { // Amalgamate
-                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_amalgamate(" +
-                                          std::to_string(account1) + "," + std::to_string(account2) + ")";
-                        res = txn.exec(sql);
-                        break;
-                    }
-                    case 1: { // SendPayment
-                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_send_payment(" +
-                                          std::to_string(account1) + "," + std::to_string(account2) + ")";
-                        res = txn.exec(sql);
-                        break;
-                    }
-                    case 2: { // DepositChecking
-                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_deposit_checking(" +
-                                          std::to_string(account1) + ")";
-                        res = txn.exec(sql);
-                        break;
-                    }
-                    case 3: { // WriteCheck
-                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_write_check(" +
-                                          std::to_string(account1) + ")";
-                        res = txn.exec(sql);
-                        break;
-                    }
-                    case 4: { // Balance
-                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_balance(" +
-                                          std::to_string(account1) + ")";
-                        res = txn.exec(sql);
-                        break;
-                    }
-                    case 5: { // TransactSavings
-                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_transact_savings(" +
-                                          std::to_string(account1) + ")";
-                        res = txn.exec(sql);
-                        break;
-                    }
-                    case 6: { // MultiUpdate
-                        // 构造 SQL 数组字符串 array[1,2,3]
-                        std::string ids_str = "array[";
-                        for(size_t i = 0; i < keys.size(); ++i) {
-                            ids_str += std::to_string(keys[i]);
-                            if (i < keys.size() - 1) ids_str += ",";
+                try {
+                    pqxx::result res;
+                    switch(txn_type) {
+                        case 0: { // Amalgamate
+                            std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_amalgamate(" +
+                                              std::to_string(account1) + "," + std::to_string(account2) + ")";
+                            res = txn.exec(sql);
+                            break;
                         }
-                        ids_str += "]";
+                        case 1: { // SendPayment
+                            std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_send_payment(" +
+                                              std::to_string(account1) + "," + std::to_string(account2) + ")";
+                            res = txn.exec(sql);
+                            break;
+                        }
+                        case 2: { // DepositChecking
+                            std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_deposit_checking(" +
+                                              std::to_string(account1) + ")";
+                            res = txn.exec(sql);
+                            break;
+                        }
+                        case 3: { // WriteCheck
+                            std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_write_check(" +
+                                              std::to_string(account1) + ")";
+                            res = txn.exec(sql);
+                            break;
+                        }
+                        case 4: { // Balance
+                            std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_balance(" +
+                                              std::to_string(account1) + ")";
+                            res = txn.exec(sql);
+                            break;
+                        }
+                        case 5: { // TransactSavings
+                            std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_transact_savings(" +
+                                              std::to_string(account1) + ")";
+                            res = txn.exec(sql);
+                            break;
+                        }
+                        case 6: { // MultiUpdate
+                            // 构造 SQL 数组字符串 array[1,2,3]
+                            std::string ids_str = "array[";
+                            for(size_t i = 0; i < keys.size(); ++i) {
+                                ids_str += std::to_string(keys[i]);
+                                if (i < keys.size() - 1) ids_str += ",";
+                            }
+                            ids_str += "]";
 
-                        std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_multi_update(" +
-                                          ids_str + ", 1)";
-                        res = txn.exec(sql);
-                        break;
+                            std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_multi_update(" +
+                                              ids_str + ", 1)";
+                            res = txn.exec(sql);
+                            break;
+                        }
                     }
-                }
 
-                database_committed = true;
-                committed_xact_count.fetch_add(1, std::memory_order_relaxed);
+                    database_committed = true;
+                    committed_xact_count.fetch_add(1, std::memory_order_relaxed);
 
-                for (const auto& row : res) {
-                    std::string ctid_str = row["ctid"].as<std::string>();
-                    auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid_str);
-                    ctid_ret_page_ids.push_back(page_id);
-                }
+                    for (const auto& row : res) {
+                        std::string ctid_str = row["ctid"].as<std::string>();
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid_str);
+                        ctid_ret_page_ids.push_back(page_id);
+                    }
 
-                // ! 无需commit 外层事务
-                // txn->commit();
+                    // ! 无需commit 外层事务
+                    // txn->commit();
 
-                struct timespec update_start_time, update_end_time;
-                clock_gettime(CLOCK_MONOTONIC, &update_start_time);
-                if(smart_router) {
-                    smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
-                                                  keys, rw, ctid_ret_page_ids, compute_node_id);
+                    struct timespec update_start_time, update_end_time;
+                    clock_gettime(CLOCK_MONOTONIC, &update_start_time);
+                    if(smart_router) {
+                        smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
+                                                      keys, rw, ctid_ret_page_ids, compute_node_id);
+                    }
+                    clock_gettime(CLOCK_MONOTONIC, &update_end_time);
+                    double update_time = (update_end_time.tv_sec - update_start_time.tv_sec) * 1000.0 +
+                                         (update_end_time.tv_nsec - update_start_time.tv_nsec) / 1000000.0;
+                    smart_router->add_worker_thread_update_time(params->compute_node_id_connecter, params->thread_id, update_time);
+                    break;
+                } catch (const std::exception &e) {
+                    if (!database_committed) {
+                        aborted_xact_count.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    if (should_retry_concurrency_rollback(e, database_committed, retries_used)) {
+                        retries_used++;
+                        concurrency_retry_count.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+                    record_retry_exhausted_if_needed(e, database_committed, retries_used);
+                    report_sp_failure(e, logger_, database_committed);
+                    break;
                 }
-                clock_gettime(CLOCK_MONOTONIC, &update_end_time);
-                double update_time = (update_end_time.tv_sec - update_start_time.tv_sec) * 1000.0 +
-                                     (update_end_time.tv_nsec - update_start_time.tv_nsec) / 1000000.0;
-                smart_router->add_worker_thread_update_time(params->compute_node_id_connecter, params->thread_id, update_time);
-                
-            } catch (const std::exception &e) {
-                if (!database_committed) {
-                    aborted_xact_count.fetch_add(1, std::memory_order_relaxed);
-                }
-                report_sp_failure(e, logger_, database_committed);
             }
 
             // // 模拟执行时间, 再sleep 1 ms
@@ -1141,49 +1178,66 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             timespec start_time, end_time;
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-            // !不需要外层事务
-            pqxx::nontransaction txn(*con);
             bool database_committed = false;
-            try {
-                pqxx::result res;
-                switch(txn_type) {
-                    case 0: { 
-                        size_t read_count = 0;
-                        while (read_count < rw.size() && !rw[read_count]) {
-                            read_count++;
+            int retries_used = 0;
+            while (true) {
+                ctid_ret_page_ids.clear();
+                while (con->is_open() == false) {
+                    std::cerr << "Connection is broken, reconnecting..." << std::endl;
+                    delete con;
+                    con = new pqxx::connection(con_str);
+                }
+                // !不需要外层事务
+                pqxx::nontransaction txn(*con);
+                try {
+                    pqxx::result res;
+                    switch(txn_type) {
+                        case 0: {
+                            size_t read_count = 0;
+                            while (read_count < rw.size() && !rw[read_count]) {
+                                read_count++;
+                            }
+                            size_t write_count = rw.size() - read_count;
+
+                            std::string read_arr = build_array(keys, 0, read_count);
+                            std::string write_arr = build_array(keys, read_count, write_count);
+
+                            std::string sql = "SELECT id, ctid, txid FROM ycsb_multi_rw(" + read_arr + ", " + write_arr + ")";
+                            res = txn.exec(sql);
+                            break;
                         }
-                        size_t write_count = rw.size() - read_count;
-
-                        std::string read_arr = build_array(keys, 0, read_count);
-                        std::string write_arr = build_array(keys, read_count, write_count);
-
-                        std::string sql = "SELECT id, ctid, txid FROM ycsb_multi_rw(" + read_arr + ", " + write_arr + ")";
-                        res = txn.exec(sql);
-                        break;
+                        default: {
+                            assert(false);
+                        }
                     }
-                    default: {
-                        assert(false);
+
+                    database_committed = true;
+                    committed_xact_count.fetch_add(1, std::memory_order_relaxed);
+
+                    for (const auto& row : res) {
+                        std::string ctid_str = row["ctid"].as<std::string>();
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid_str);
+                        ctid_ret_page_ids.push_back(page_id);
                     }
-                }
 
-                database_committed = true;
-                committed_xact_count.fetch_add(1, std::memory_order_relaxed);
-
-                for (const auto& row : res) {
-                    std::string ctid_str = row["ctid"].as<std::string>();
-                    auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid_str);
-                    ctid_ret_page_ids.push_back(page_id);
+                    if(smart_router) {
+                        smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
+                                                      keys, rw, ctid_ret_page_ids, compute_node_id);
+                    }
+                    break;
+                } catch (const std::exception &e) {
+                    if (!database_committed) {
+                        aborted_xact_count.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    if (should_retry_concurrency_rollback(e, database_committed, retries_used)) {
+                        retries_used++;
+                        concurrency_retry_count.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+                    record_retry_exhausted_if_needed(e, database_committed, retries_used);
+                    report_sp_failure(e, logger_, database_committed);
+                    break;
                 }
-
-                if(smart_router) {
-                    smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
-                                                  keys, rw, ctid_ret_page_ids, compute_node_id);
-                }
-            } catch (const std::exception &e) {
-                if (!database_committed) {
-                    aborted_xact_count.fetch_add(1, std::memory_order_relaxed);
-                }
-                report_sp_failure(e, logger_, database_committed);
             }
 
             // 计时结束
@@ -1493,149 +1547,166 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
             std::vector<bool> rw = tpcc->get_rw_flags_by_txn_type(txn_type, tpcc_keys.size());
             std::vector<page_id_t> ctid_ret_page_ids; // Dummy for now as we didn't get ctids from SP
 
-            // !不需要外层事务
-            pqxx::nontransaction txn(*con);
             bool database_committed = false;
-            
-            try{
-                pqxx::result res;
-                switch(type) {
-                    case TPCCTxType::kNewOrder: {
-                        if (tpcc_params.size() < 4) {
-                            assert(false);
-                        }
-                        int w_id = tpcc_params[0];
-                        int d_id = tpcc_params[1];
-                        int c_id = tpcc_params[2];
-                        int o_ol_cnt = tpcc_params[3];
-                        
-                        std::string i_ids_str = "{";
-                        std::string supply_w_ids_str = "{";
-                        std::string quantities_str = "{";
-                        
-                        for (int i = 0; i < o_ol_cnt; ++i) {
-                            int base = 4 + i * 3;
-                            if (base + 2 >= (int)tpcc_params.size()) break;
-                            
-                            if (i > 0) {
-                                i_ids_str += ",";
-                                supply_w_ids_str += ",";
-                                quantities_str += ",";
-                            }
-                            i_ids_str += std::to_string(tpcc_params[base]);
-                            supply_w_ids_str += std::to_string(tpcc_params[base+1]);
-                            quantities_str += std::to_string(tpcc_params[base+2]);
-                        }
-                        i_ids_str += "}";
-                        supply_w_ids_str += "}";
-                        quantities_str += "}";
-
-                        std::string sql = "SELECT * FROM " +
-                            std::string(tpcc->is_standard_mode() ?
-                                "tpcc_standard_new_order" : "tpcc_new_order") + "(" +
-                            std::to_string(w_id) + ", " +
-                            std::to_string(d_id) + ", " + 
-                            std::to_string(c_id) + ", " + 
-                            std::to_string(o_ol_cnt) + ", '" + 
-                            i_ids_str + "', '" + 
-                            supply_w_ids_str + "', '" + 
-                            quantities_str + "'";
-                        if (tpcc->is_standard_mode()) {
-                            const size_t txn_time_index = 4 + static_cast<size_t>(o_ol_cnt) * 3;
-                            if (txn_time_index >= tpcc_params.size()) {
-                                throw std::runtime_error("TPC-C NewOrder is missing client transaction time");
-                            }
-                            sql += ", " + std::to_string(tpcc_params[txn_time_index]);
-                        }
-                        sql += ")";
-                        
-                        res = txn.exec(sql);
-                        break;
-                    }
-                    case TPCCTxType::kPayment: {
-                        if (tpcc_params.size() < (tpcc->is_standard_mode() ? 5U : 4U)) {
-                            assert(false);
-                        }
-                        int w_id = tpcc_params[0];
-                        int d_id = tpcc_params[1];
-                        int c_id = tpcc_params[2];
-                        int h_amount = tpcc_params[3];
-
-                        std::string func_name = tpcc->is_standard_mode() ?
-                            "tpcc_standard_payment" : "tpcc_payment";
-                        std::string sql = "SELECT * FROM " + func_name + "(" +
-                            std::to_string(w_id) + ", " +
-                            std::to_string(d_id) + ", " + 
-                            std::to_string(w_id) + ", " + 
-                            std::to_string(d_id) + ", " + 
-                            std::to_string(c_id) + ", " + 
-                            std::to_string(h_amount);
-                        if (tpcc->is_standard_mode()) {
-                            sql += ", " + std::to_string(tpcc_params[4]);
-                        }
-                        sql += ")";
-                        
-                        res = txn.exec(sql);
-                        break;
-                    }
-                    case TPCCTxType::kOrderStatus: {
-                        if (!tpcc->is_standard_mode() || tpcc_params.size() < 3) {
-                            assert(false);
-                        }
-                        std::string sql = "SELECT * FROM tpcc_standard_order_status(" +
-                            std::to_string(tpcc_params[0]) + ", " +
-                            std::to_string(tpcc_params[1]) + ", " +
-                            std::to_string(tpcc_params[2]) + ")";
-                        res = txn.exec(sql);
-                        break;
-                    }
-                    case TPCCTxType::kDelivery: {
-                        if (!tpcc->is_standard_mode() || tpcc_params.size() < 3) {
-                            assert(false);
-                        }
-                        std::string sql = "SELECT * FROM tpcc_standard_delivery(" +
-                            std::to_string(tpcc_params[0]) + ", " +
-                            std::to_string(tpcc_params[1]) + ", " +
-                            std::to_string(tpcc_params[2]) + ")";
-                        res = txn.exec(sql);
-                        break;
-                    }
-                    case TPCCTxType::kStockLevel: {
-                        if (!tpcc->is_standard_mode() || tpcc_params.size() < 3) {
-                            assert(false);
-                        }
-                        std::string sql = "SELECT * FROM tpcc_standard_stock_level(" +
-                            std::to_string(tpcc_params[0]) + ", " +
-                            std::to_string(tpcc_params[1]) + ", " +
-                            std::to_string(tpcc_params[2]) + ")";
-                        res = txn.exec(sql);
-                        break;
-                    }
-                    default:
-                        assert(false);
+            int retries_used = 0;
+            while (true) {
+                ctid_ret_page_ids.clear();
+                while (con->is_open() == false) {
+                    std::cerr << "Connection is broken, reconnecting..." << std::endl;
+                    delete con;
+                    con = new pqxx::connection(con_str);
                 }
+                // !不需要外层事务
+                pqxx::nontransaction txn(*con);
 
-                database_committed = true;
-                committed_xact_count.fetch_add(1, std::memory_order_relaxed);
+                try {
+                    pqxx::result res;
+                    switch(type) {
+                        case TPCCTxType::kNewOrder: {
+                            if (tpcc_params.size() < 4) {
+                                assert(false);
+                            }
+                            int w_id = tpcc_params[0];
+                            int d_id = tpcc_params[1];
+                            int c_id = tpcc_params[2];
+                            int o_ol_cnt = tpcc_params[3];
 
-                for (const auto& row : res) {
-                    if (row["ctid"].is_null()) {
+                            std::string i_ids_str = "{";
+                            std::string supply_w_ids_str = "{";
+                            std::string quantities_str = "{";
+
+                            for (int i = 0; i < o_ol_cnt; ++i) {
+                                int base = 4 + i * 3;
+                                if (base + 2 >= (int)tpcc_params.size()) break;
+
+                                if (i > 0) {
+                                    i_ids_str += ",";
+                                    supply_w_ids_str += ",";
+                                    quantities_str += ",";
+                                }
+                                i_ids_str += std::to_string(tpcc_params[base]);
+                                supply_w_ids_str += std::to_string(tpcc_params[base+1]);
+                                quantities_str += std::to_string(tpcc_params[base+2]);
+                            }
+                            i_ids_str += "}";
+                            supply_w_ids_str += "}";
+                            quantities_str += "}";
+
+                            std::string sql = "SELECT * FROM " +
+                                std::string(tpcc->is_standard_mode() ?
+                                    "tpcc_standard_new_order" : "tpcc_new_order") + "(" +
+                                std::to_string(w_id) + ", " +
+                                std::to_string(d_id) + ", " +
+                                std::to_string(c_id) + ", " +
+                                std::to_string(o_ol_cnt) + ", '" +
+                                i_ids_str + "', '" +
+                                supply_w_ids_str + "', '" +
+                                quantities_str + "'";
+                            if (tpcc->is_standard_mode()) {
+                                const size_t txn_time_index = 4 + static_cast<size_t>(o_ol_cnt) * 3;
+                                if (txn_time_index >= tpcc_params.size()) {
+                                    throw std::runtime_error("TPC-C NewOrder is missing client transaction time");
+                                }
+                                sql += ", " + std::to_string(tpcc_params[txn_time_index]);
+                            }
+                            sql += ")";
+
+                            res = txn.exec(sql);
+                            break;
+                        }
+                        case TPCCTxType::kPayment: {
+                            if (tpcc_params.size() < (tpcc->is_standard_mode() ? 5U : 4U)) {
+                                assert(false);
+                            }
+                            int w_id = tpcc_params[0];
+                            int d_id = tpcc_params[1];
+                            int c_id = tpcc_params[2];
+                            int h_amount = tpcc_params[3];
+
+                            std::string func_name = tpcc->is_standard_mode() ?
+                                "tpcc_standard_payment" : "tpcc_payment";
+                            std::string sql = "SELECT * FROM " + func_name + "(" +
+                                std::to_string(w_id) + ", " +
+                                std::to_string(d_id) + ", " +
+                                std::to_string(w_id) + ", " +
+                                std::to_string(d_id) + ", " +
+                                std::to_string(c_id) + ", " +
+                                std::to_string(h_amount);
+                            if (tpcc->is_standard_mode()) {
+                                sql += ", " + std::to_string(tpcc_params[4]);
+                            }
+                            sql += ")";
+
+                            res = txn.exec(sql);
+                            break;
+                        }
+                        case TPCCTxType::kOrderStatus: {
+                            if (!tpcc->is_standard_mode() || tpcc_params.size() < 3) {
+                                assert(false);
+                            }
+                            std::string sql = "SELECT * FROM tpcc_standard_order_status(" +
+                                std::to_string(tpcc_params[0]) + ", " +
+                                std::to_string(tpcc_params[1]) + ", " +
+                                std::to_string(tpcc_params[2]) + ")";
+                            res = txn.exec(sql);
+                            break;
+                        }
+                        case TPCCTxType::kDelivery: {
+                            if (!tpcc->is_standard_mode() || tpcc_params.size() < 3) {
+                                assert(false);
+                            }
+                            std::string sql = "SELECT * FROM tpcc_standard_delivery(" +
+                                std::to_string(tpcc_params[0]) + ", " +
+                                std::to_string(tpcc_params[1]) + ", " +
+                                std::to_string(tpcc_params[2]) + ")";
+                            res = txn.exec(sql);
+                            break;
+                        }
+                        case TPCCTxType::kStockLevel: {
+                            if (!tpcc->is_standard_mode() || tpcc_params.size() < 3) {
+                                assert(false);
+                            }
+                            std::string sql = "SELECT * FROM tpcc_standard_stock_level(" +
+                                std::to_string(tpcc_params[0]) + ", " +
+                                std::to_string(tpcc_params[1]) + ", " +
+                                std::to_string(tpcc_params[2]) + ")";
+                            res = txn.exec(sql);
+                            break;
+                        }
+                        default:
+                            assert(false);
+                    }
+
+                    database_committed = true;
+                    committed_xact_count.fetch_add(1, std::memory_order_relaxed);
+
+                    for (const auto& row : res) {
+                        if (row["ctid"].is_null()) {
+                            continue;
+                        }
+                        std::string ctid_str = row["ctid"].as<std::string>();
+                        auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid_str);
+                        ctid_ret_page_ids.push_back(page_id);
+                    }
+
+                    if(smart_router) {
+                        smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
+                                                      tpcc_keys, rw, ctid_ret_page_ids, compute_node_id);
+                    }
+                    break;
+                } catch (const std::exception &e) {
+                    if (!database_committed) {
+                        aborted_xact_count.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    if (should_retry_concurrency_rollback(e, database_committed, retries_used)) {
+                        retries_used++;
+                        concurrency_retry_count.fetch_add(1, std::memory_order_relaxed);
                         continue;
                     }
-                    std::string ctid_str = row["ctid"].as<std::string>();
-                    auto [page_id, tuple_index] = parse_page_id_from_ctid(ctid_str);
-                    ctid_ret_page_ids.push_back(page_id);
+                    record_retry_exhausted_if_needed(e, database_committed, retries_used);
+                    report_sp_failure(e, logger_, database_committed);
+                    break;
                 }
-
-                if(smart_router) {
-                    smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables),
-                                                    tpcc_keys, rw, ctid_ret_page_ids, compute_node_id);
-                }
-            } catch (const std::exception &e) {
-                if (!database_committed) {
-                    aborted_xact_count.fetch_add(1, std::memory_order_relaxed);
-                }
-                report_sp_failure(e, logger_, database_committed);
             }
             // 计时结束
             clock_gettime(CLOCK_MONOTONIC, &end_time);
@@ -1791,6 +1862,8 @@ void print_usage(const char* program_name) {
     std::cout << "  --time-run                  Run by wall-clock time instead of try-count" << std::endl;
     std::cout << "  --warmup-seconds <sec>      Warmup duration for --time-run [default: 180]" << std::endl;
     std::cout << "  --run-seconds <sec>         Measured duration after warmup for --time-run [default: 60]" << std::endl;
+    std::cout << "  --retry-limit <n>           Retry SQLSTATE 40xxx rollback errors up to n times per txn [default: 0]" << std::endl;
+    std::cout << "  --retry-to-commit <n>       Alias for --retry-limit" << std::endl;
     std::cout << "  --db-connection <conninfo>  Add one database conninfo string; repeat for multi-node" << std::endl;
     std::cout << "                               MySQL format: host=127.0.0.1 port=3306 user=root password=... dbname=test [socket=...]" << std::endl;
     std::cout << "  --help                      Show this help message" << std::endl;
@@ -2614,6 +2687,21 @@ int main(int argc, char *argv[]) {
                 std::cout << "Run seconds set to: " << run_seconds << std::endl;
             } else {
                 std::cerr << "Error: --run-seconds requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--retry-limit" || arg == "--retry-to-commit") {
+            if (i + 1 < argc) {
+                concurrency_retry_limit = std::stoi(argv[++i]);
+                if (concurrency_retry_limit < 0) {
+                    std::cerr << "Error: " << arg << " must be non-negative" << std::endl;
+                    return -1;
+                }
+                std::cout << "Concurrency rollback retry limit set to: "
+                          << concurrency_retry_limit << std::endl;
+            } else {
+                std::cerr << "Error: " << arg << " requires a value" << std::endl;
                 print_usage(argv[0]);
                 return -1;
             }
@@ -3525,6 +3613,9 @@ int main(int argc, char *argv[]) {
     long long warmup_exe_count = exe_count;
     uint64_t warmup_committed_xact_count = committed_xact_count.load(std::memory_order_relaxed);
     uint64_t warmup_aborted_xact_count = aborted_xact_count.load(std::memory_order_relaxed);
+    uint64_t warmup_concurrency_retry_count = concurrency_retry_count.load(std::memory_order_relaxed);
+    uint64_t warmup_concurrency_retry_exhausted_count =
+        concurrency_retry_exhausted_count.load(std::memory_order_relaxed);
     if(smart_router) { 
         snapshot1 = take_router_snapshot(smart_router);
         print_diff_snapshot(snapshot0, snapshot1);
@@ -3536,6 +3627,8 @@ int main(int argc, char *argv[]) {
     uint64_t measurement_attempt_count = 0;
     uint64_t measurement_committed_count = 0;
     uint64_t measurement_aborted_count = 0;
+    uint64_t measurement_concurrency_retry_count = 0;
+    uint64_t measurement_concurrency_retry_exhausted_count = 0;
     if (time_based_run) {
         std::this_thread::sleep_for(std::chrono::seconds(run_seconds));
         measurement_end_time = std::chrono::high_resolution_clock::now();
@@ -3543,6 +3636,9 @@ int main(int argc, char *argv[]) {
         measurement_attempt_count = static_cast<uint64_t>(exe_count.load(std::memory_order_relaxed));
         measurement_committed_count = committed_xact_count.load(std::memory_order_relaxed);
         measurement_aborted_count = aborted_xact_count.load(std::memory_order_relaxed);
+        measurement_concurrency_retry_count = concurrency_retry_count.load(std::memory_order_relaxed);
+        measurement_concurrency_retry_exhausted_count =
+            concurrency_retry_exhausted_count.load(std::memory_order_relaxed);
         txn_pool->stop_pool();
         force_stop_txn_queues();
         std::cout << "Time-based run duration ended. Stopping transaction generation and worker queues." << std::endl;
@@ -3606,15 +3702,26 @@ int main(int argc, char *argv[]) {
     const uint64_t final_attempts = static_cast<uint64_t>(exe_count.load(std::memory_order_relaxed));
     const uint64_t final_committed = committed_xact_count.load(std::memory_order_relaxed);
     const uint64_t final_aborted = aborted_xact_count.load(std::memory_order_relaxed);
+    const uint64_t final_concurrency_retries = concurrency_retry_count.load(std::memory_order_relaxed);
+    const uint64_t final_concurrency_retry_exhausted =
+        concurrency_retry_exhausted_count.load(std::memory_order_relaxed);
     const uint64_t total_attempts = time_based_run ? measurement_attempt_count : final_attempts;
     const uint64_t total_committed = time_based_run ? measurement_committed_count : final_committed;
     const uint64_t total_aborted = time_based_run ? measurement_aborted_count : final_aborted;
+    const uint64_t total_concurrency_retries =
+        time_based_run ? measurement_concurrency_retry_count : final_concurrency_retries;
+    const uint64_t total_concurrency_retry_exhausted =
+        time_based_run ? measurement_concurrency_retry_exhausted_count : final_concurrency_retry_exhausted;
     const bool outcome_stats_enabled = DB_TYPE == 0 && use_sp;
     const uint64_t throughput_transactions = outcome_stats_enabled ? total_committed : total_attempts;
 
     std::cout << "Total transaction attempts: " << total_attempts << std::endl;
     std::cout << "Committed transactions: " << total_committed << std::endl;
     std::cout << "Aborted transactions: " << total_aborted << std::endl;
+    std::cout << "Concurrency retry limit: " << concurrency_retry_limit << std::endl;
+    std::cout << "Concurrency rollback retries: " << total_concurrency_retries << std::endl;
+    std::cout << "Concurrency retry exhausted transactions: "
+              << total_concurrency_retry_exhausted << std::endl;
     std::cout << "Total transactions executed: " << throughput_transactions << std::endl;
     std::cout << "Elapsed time: " << ms << " milliseconds" << std::endl;
     double s = ms / 1000.0; // Convert milliseconds to seconds
@@ -3626,6 +3733,10 @@ int main(int argc, char *argv[]) {
         std::cout << "Ignored transaction attempts after time limit: " << (final_attempts - total_attempts) << std::endl;
         std::cout << "Ignored committed transactions after time limit: " << (final_committed - total_committed) << std::endl;
         std::cout << "Ignored aborted transactions after time limit: " << (final_aborted - total_aborted) << std::endl;
+        std::cout << "Ignored concurrency retries after time limit: "
+                  << (final_concurrency_retries - total_concurrency_retries) << std::endl;
+        std::cout << "Ignored concurrency retry exhausted transactions after time limit: "
+                  << (final_concurrency_retry_exhausted - total_concurrency_retry_exhausted) << std::endl;
     }
 
     double ms_after_warmup = std::chrono::duration_cast<std::chrono::milliseconds>(metrics_end - warmup_end_time).count();
@@ -3634,6 +3745,10 @@ int main(int argc, char *argv[]) {
         total_attempts - static_cast<uint64_t>(warmup_exe_count);
     const uint64_t committed_after_warmup = total_committed - warmup_committed_xact_count;
     const uint64_t aborted_after_warmup = total_aborted - warmup_aborted_xact_count;
+    const uint64_t concurrency_retries_after_warmup =
+        total_concurrency_retries - warmup_concurrency_retry_count;
+    const uint64_t concurrency_retry_exhausted_after_warmup =
+        total_concurrency_retry_exhausted - warmup_concurrency_retry_exhausted_count;
     const uint64_t completed_after_warmup = committed_after_warmup + aborted_after_warmup;
     const uint64_t attempts_after_warmup =
         outcome_stats_enabled ? completed_after_warmup : started_attempts_after_warmup;
@@ -3645,6 +3760,10 @@ int main(int argc, char *argv[]) {
     std::cout << "Transaction attempts (after warmup): " << attempts_after_warmup << std::endl;
     std::cout << "Committed transactions (after warmup): " << committed_after_warmup << std::endl;
     std::cout << "Aborted transactions (after warmup): " << aborted_after_warmup << std::endl;
+    std::cout << "Concurrency rollback retries (after warmup): "
+              << concurrency_retries_after_warmup << std::endl;
+    std::cout << "Concurrency retry exhausted transactions (after warmup): "
+              << concurrency_retry_exhausted_after_warmup << std::endl;
     std::cout << "Abort ratio (after warmup): " << abort_ratio_after_warmup << std::endl;
     std::cout << "Throughput (after warmup): "
               << throughput_transactions_after_warmup / s_after_warmup
