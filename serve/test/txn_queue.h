@@ -413,6 +413,10 @@ public:
         bool is_phase2_pop = false;
 
         while(true) {
+            if (force_stopped_) {
+                if(ret_type != nullptr) *ret_type = 0;
+                return {};
+            }
             bool all_queues_empty = txn_queue_.empty() && dag_txn_queue_->empty() && phase2_txn_queue_.empty();
             bool can_exit_completely = all_queues_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
 
@@ -427,6 +431,7 @@ public:
                     return batch_entries;
                 } else {
                     queue_cv_.wait(lock, [this]() { 
+                        if (force_stopped_) return true;
                         bool has_txn = !phase2_txn_queue_.empty();
                         bool all_empty = txn_queue_.empty() && dag_txn_queue_->empty() && phase2_txn_queue_.empty();
                         bool can_exit = all_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
@@ -445,6 +450,7 @@ public:
                 }
                 else { 
                     queue_cv_.wait(lock, [this]() { 
+                        if (force_stopped_) return true;
                         bool has_txn = !txn_queue_.empty() || !dag_txn_queue_->empty();
                         bool all_empty = txn_queue_.empty() && dag_txn_queue_->empty() && phase2_txn_queue_.empty();
                         bool can_exit = all_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
@@ -522,6 +528,10 @@ public:
 
         // check if the input of txn of this batch for this node is finished
         while(true){
+            if (force_stopped_) {
+                if(ret_type != nullptr) *ret_type = 0;
+                return {};
+            }
             if(!txn_queue_.empty() || !dag_txn_queue_->empty()) {
                 break; // 有事务可弹出
             }
@@ -540,6 +550,7 @@ public:
             else { 
                 // 目前无事务, 等待
                 queue_cv_.wait(lock, [this]() { 
+                    if (force_stopped_) return true;
                     bool has_txn = !txn_queue_.empty() || !dag_txn_queue_->empty();
                     bool can_exit = (finished_ || batch_finished_) && pending_txn_queue_->empty_node(node_id_);
                     return has_txn || can_exit;
@@ -723,8 +734,11 @@ public:
     void push_txn(TxnQueueEntry* entry) {
         std::unique_lock<std::mutex> lock(queue_mutex_);
         queue_cv_.wait(lock, [this]() {
-            return current_queue_size_ < max_queue_size_;
+            return force_stopped_ || current_queue_size_ < max_queue_size_;
         });
+        if (force_stopped_) {
+            return;
+        }
         if (txn_queue_.empty()) {
             txn_queue_.emplace_back(1, entry);
         } 
@@ -743,6 +757,9 @@ public:
     // push 绑定到单线程的事务到队列前端
     void push_txn_dag_ready(std::vector<TxnQueueEntry*> entries, int type = 0) {
         std::unique_lock<std::mutex> lock(queue_mutex_);
+        if (force_stopped_) {
+            return;
+        }
         assert(!entries.empty());
         int size = static_cast<int>(entries.size());
         current_queue_size_ += size;
@@ -792,8 +809,11 @@ public:
         if(entries.empty()) return;
         std::unique_lock<std::mutex> lock(queue_mutex_);
         queue_cv_.wait(lock, [this, &entries]() {
-            return current_queue_size_ + entries.size() < max_queue_size_;
+            return force_stopped_ || current_queue_size_ + entries.size() < max_queue_size_;
         });
+        if (force_stopped_) {
+            return;
+        }
         
         assert(entries.size() <= BatchExecutorPOPTxnSize);
         current_queue_size_ += static_cast<int>(entries.size());
@@ -808,8 +828,11 @@ public:
         if(entries.empty()) return;
         std::unique_lock<std::mutex> lock(queue_mutex_);
         queue_cv_.wait(lock, [this, &entries]() {
-            return current_queue_size_ + entries.size() < max_queue_size_;
+            return force_stopped_ || current_queue_size_ + entries.size() < max_queue_size_;
         });
+        if (force_stopped_) {
+            return;
+        }
         
         int i = 0;
         // 1. Try to fill the last batch first
@@ -843,8 +866,11 @@ public:
         if(entries.empty()) return;
         std::unique_lock<std::mutex> lock(queue_mutex_);
         queue_cv_.wait(lock, [this, &entries]() {
-            return current_phase2_queue_size_ + entries.size() < max_queue_size_;
+            return force_stopped_ || current_phase2_queue_size_ + entries.size() < max_queue_size_;
         });
+        if (force_stopped_) {
+            return;
+        }
         
         int i = 0;
         // 1. Try to fill the last batch first
@@ -873,8 +899,11 @@ public:
         if(entries.empty()) return;
         std::unique_lock<std::mutex> lock(queue_mutex_);
         queue_cv_.wait(lock, [this, &entries]() {
-            return current_phase2_queue_size_ + entries.size() < max_queue_size_;
+            return force_stopped_ || current_phase2_queue_size_ + entries.size() < max_queue_size_;
         });
+        if (force_stopped_) {
+            return;
+        }
         
         current_phase2_queue_size_ += static_cast<int>(entries.size());
         phase2_txn_queue_.emplace_back(std::move(entries));
@@ -962,6 +991,17 @@ public:
         queue_cv_.notify_all();
     }
 
+    void force_stop() {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        force_stopped_ = true;
+        finished_ = true;
+        batch_finished_ = true;
+        queue_cv_.notify_all();
+        if (batch_cv_ != nullptr) {
+            batch_cv_->notify_all();
+        }
+    }
+
     void set_process_batch_id(int batch_id) {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         // assert(current_queue_size_ == 0); // only set new batch id when queue is empty
@@ -982,7 +1022,7 @@ public:
 
     bool is_finished() {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        return finished_;
+        return finished_ || force_stopped_;
     }
 
     bool is_shared_queue_empty() {
@@ -994,7 +1034,7 @@ private:
     std::deque<std::list<TxnQueueEntry*>> phase2_txn_queue_; // 用于 Phase 2 跨区事务的独立积压队列
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
-    std::condition_variable* batch_cv_;
+    std::condition_variable* batch_cv_ = nullptr;
 
     SharedTxnQueue* shared_txn_queue_;
     DAGTxnQueue* dag_txn_queue_;
@@ -1006,6 +1046,7 @@ private:
     std::atomic<int> current_phase2_queue_size_ = 0;
     int max_queue_size_; // max queue size
     bool finished_ = false;
+    bool force_stopped_ = false;
 
     int process_batch_id_ = -1; // the batch id this queue is processing
     bool batch_finished_ = false;

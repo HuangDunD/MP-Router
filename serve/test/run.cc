@@ -38,12 +38,35 @@ std::vector<TxnQueue*> txn_queues; // one queue per compute node
 std::vector<std::atomic<int>> exec_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
 static std::atomic<bool> warmup_transition_started{false};
 
+static bool measurement_window_open() {
+    return !time_based_run || !stop_benchmark.load(std::memory_order_relaxed);
+}
+
+static bool should_record_after_warmup_latency(bool database_committed = true) {
+    return WarmupEnd && database_committed && measurement_window_open();
+}
+
+static void force_stop_txn_queues() {
+    for (auto* txn_queue : txn_queues) {
+        if (txn_queue != nullptr) {
+            txn_queue->force_stop();
+        }
+    }
+}
+
 // SmallBank 数据加载时产生的键→页映射（按 id 直接索引），用于初始化 Router
 static SmallBank::TableKeyPageMap g_smallbank_key_page_map;
 
 static std::vector<std::string> cli_db_connections;
 
 static bool is_concurrency_rollback(const std::exception& e) {
+    // libpqxx 6.x maps these SQLSTATE class 40 errors to transaction_rollback
+    // subclasses rather than sql_error.
+    if (dynamic_cast<const pqxx::serialization_failure*>(&e) != nullptr ||
+        dynamic_cast<const pqxx::deadlock_detected*>(&e) != nullptr) {
+        return true;
+    }
+
     const auto* sql_error = dynamic_cast<const pqxx::sql_error*>(&e);
     if (sql_error == nullptr) {
         return false;
@@ -425,6 +448,10 @@ void run_smallbank_empty(thread_params* params, Logger* logger_){
             else assert(false);
         }
         for(auto& txn_entry : txn_entries) {
+            if (!measurement_window_open()) {
+                tit->mark_done(txn_entry);
+                continue;
+            }
             // just for statistics
             exe_count++;
             maybe_finish_warmup(logger_);
@@ -506,6 +533,10 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
 
         // 执行std::list<TxnQueueEntry*> txn_entries中的每个事务
         for (auto& txn_entry : txn_entries) {
+            if (!measurement_window_open()) {
+                tit->mark_done(txn_entry);
+                continue;
+            }
             exe_count++;
             maybe_finish_warmup(logger_);
             exec_txn_cnt_per_node[compute_node_id]++;
@@ -676,7 +707,7 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
             double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
-            if (WarmupEnd) {
+            if (should_record_after_warmup_latency()) {
                 if (params->latency_record) params->latency_record->push_back(exec_time);
                 if (params->fetch_latency_record && txn_entry->fetch_time > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
@@ -772,6 +803,10 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         }
 
         for (auto& txn_entry : txn_entries) {
+            if (!measurement_window_open()) {
+                tit->mark_done(txn_entry, call_id);
+                continue;
+            }
             // 计时
             timespec start_time, end_time;
             clock_gettime(CLOCK_MONOTONIC, &start_time);
@@ -911,7 +946,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
-            if (WarmupEnd && database_committed) {
+            if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
@@ -1076,6 +1111,10 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
         }
 
         for (auto& txn_entry : txn_entries) {
+            if (!measurement_window_open()) {
+                tit->mark_done(txn_entry);
+                continue;
+            }
             exe_count++;
             maybe_finish_warmup(logger_);
             exec_txn_cnt_per_node[compute_node_id]++;
@@ -1154,7 +1193,7 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
-            if (WarmupEnd && database_committed) {
+            if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
@@ -1210,6 +1249,10 @@ void run_mysql_ycsb_txns_sp(thread_params* params, Logger* logger_) {
         }
 
         for (auto& txn_entry : txn_entries) {
+            if (!measurement_window_open()) {
+                tit->mark_done(txn_entry);
+                continue;
+            }
             timespec start_time, end_time;
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
@@ -1246,7 +1289,7 @@ void run_mysql_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
-            if (WarmupEnd) {
+            if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
@@ -1302,6 +1345,10 @@ void run_mysql_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         }
 
         for (auto& txn_entry : txn_entries) {
+            if (!measurement_window_open()) {
+                tit->mark_done(txn_entry, call_id);
+                continue;
+            }
             timespec start_time, end_time;
             clock_gettime(CLOCK_MONOTONIC, &start_time);
 
@@ -1350,7 +1397,7 @@ void run_mysql_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
-            if (WarmupEnd) {
+            if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
@@ -1416,6 +1463,10 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
         }
 
         for (auto& txn_entry : txn_entries) {
+            if (!measurement_window_open()) {
+                tit->mark_done(txn_entry, call_id);
+                continue;
+            }
             // 计时
             timespec start_time, end_time;
             clock_gettime(CLOCK_MONOTONIC, &start_time);
@@ -1593,7 +1644,7 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
-            if (WarmupEnd && database_committed) {
+            if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
@@ -1686,6 +1737,10 @@ void run_ycsb_txns_empty(thread_params* params, Logger* logger_) {
         }
 
         for (auto& txn_entry : txn_entries) {
+            if (!measurement_window_open()) {
+                tit->mark_done(txn_entry);
+                continue;
+            }
             exe_count++;
             maybe_finish_warmup(logger_);
             exec_txn_cnt_per_node[compute_node_id]++;
@@ -1975,6 +2030,10 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
 
         // 3. Execute Txns
         for (auto& txn_entry : txn_entries) {
+            if (!measurement_window_open()) {
+                tit->mark_done(txn_entry, call_id);
+                continue;
+            }
             // Check connection health
             // YacInt32 dummy_attr;
             // if (yacGetConnAttr(conn, YAC_ATTR_AUTOCOMMIT, &dummy_attr, 0, NULL) != YAC_SUCCESS) {
@@ -2128,7 +2187,7 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
-            if (WarmupEnd) {
+            if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
@@ -3473,13 +3532,22 @@ int main(int argc, char *argv[]) {
     // Create a performance snapshot after warmup
     // int mid_snapshot_id = create_perf_kwr_snapshot();
 
+    auto measurement_end_time = std::chrono::high_resolution_clock::time_point{};
+    uint64_t measurement_attempt_count = 0;
+    uint64_t measurement_committed_count = 0;
+    uint64_t measurement_aborted_count = 0;
     if (time_based_run) {
         std::this_thread::sleep_for(std::chrono::seconds(run_seconds));
+        measurement_end_time = std::chrono::high_resolution_clock::now();
         stop_benchmark.store(true, std::memory_order_relaxed);
+        measurement_attempt_count = static_cast<uint64_t>(exe_count.load(std::memory_order_relaxed));
+        measurement_committed_count = committed_xact_count.load(std::memory_order_relaxed);
+        measurement_aborted_count = aborted_xact_count.load(std::memory_order_relaxed);
         txn_pool->stop_pool();
-        std::cout << "Time-based run duration ended. Stopping transaction generation." << std::endl;
+        force_stop_txn_queues();
+        std::cout << "Time-based run duration ended. Stopping transaction generation and worker queues." << std::endl;
         if (logger_) {
-            logger_->info("Time-based run duration ended. Stopping transaction generation.");
+            logger_->info("Time-based run duration ended. Stopping transaction generation and worker queues.");
         }
     }
 
@@ -3495,7 +3563,8 @@ int main(int argc, char *argv[]) {
     }
 
     auto end = std::chrono::high_resolution_clock::now();
-    double ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    auto metrics_end = time_based_run ? measurement_end_time : end;
+    double ms = std::chrono::duration_cast<std::chrono::milliseconds>(metrics_end - start).count();
 
     // Create a performance snapshot after running transactions
     std::this_thread::sleep_for(std::chrono::seconds(2)); // sleep for a while to ensure all operations are completed
@@ -3534,9 +3603,12 @@ int main(int argc, char *argv[]) {
         std::cout << "Access pattern used: " << access_pattern_name << std::endl;
     }
 
-    const uint64_t total_attempts = static_cast<uint64_t>(exe_count.load(std::memory_order_relaxed));
-    const uint64_t total_committed = committed_xact_count.load(std::memory_order_relaxed);
-    const uint64_t total_aborted = aborted_xact_count.load(std::memory_order_relaxed);
+    const uint64_t final_attempts = static_cast<uint64_t>(exe_count.load(std::memory_order_relaxed));
+    const uint64_t final_committed = committed_xact_count.load(std::memory_order_relaxed);
+    const uint64_t final_aborted = aborted_xact_count.load(std::memory_order_relaxed);
+    const uint64_t total_attempts = time_based_run ? measurement_attempt_count : final_attempts;
+    const uint64_t total_committed = time_based_run ? measurement_committed_count : final_committed;
+    const uint64_t total_aborted = time_based_run ? measurement_aborted_count : final_aborted;
     const bool outcome_stats_enabled = DB_TYPE == 0 && use_sp;
     const uint64_t throughput_transactions = outcome_stats_enabled ? total_committed : total_attempts;
 
@@ -3547,8 +3619,16 @@ int main(int argc, char *argv[]) {
     std::cout << "Elapsed time: " << ms << " milliseconds" << std::endl;
     double s = ms / 1000.0; // Convert milliseconds to seconds
     std::cout << "Throughput: " << throughput_transactions / s << " transactions per second" << std::endl;
+    if (time_based_run) {
+        std::cout << "Final transaction attempts after shutdown: " << final_attempts << std::endl;
+        std::cout << "Final committed transactions after shutdown: " << final_committed << std::endl;
+        std::cout << "Final aborted transactions after shutdown: " << final_aborted << std::endl;
+        std::cout << "Ignored transaction attempts after time limit: " << (final_attempts - total_attempts) << std::endl;
+        std::cout << "Ignored committed transactions after time limit: " << (final_committed - total_committed) << std::endl;
+        std::cout << "Ignored aborted transactions after time limit: " << (final_aborted - total_aborted) << std::endl;
+    }
 
-    double ms_after_warmup = std::chrono::duration_cast<std::chrono::milliseconds>(end - warmup_end_time).count();
+    double ms_after_warmup = std::chrono::duration_cast<std::chrono::milliseconds>(metrics_end - warmup_end_time).count();
     double s_after_warmup = ms_after_warmup / 1000.0;
     const uint64_t started_attempts_after_warmup =
         total_attempts - static_cast<uint64_t>(warmup_exe_count);

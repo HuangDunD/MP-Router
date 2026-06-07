@@ -1047,6 +1047,9 @@ public:
             {
                 std::unique_lock<std::mutex> lock(batch_mutex); 
                 batch_cv.wait(lock, [this]() { 
+                    if (time_based_run && stop_benchmark.load(std::memory_order_relaxed)) {
+                        return true;
+                    }
                     for(int i=0; i<ComputeNodeCount; i++) {
                         // 宽松 check if the queue is empty
                         if(txn_queues_[i]->size() == 0 && txn_queues_[i]->is_shared_queue_empty()) {
