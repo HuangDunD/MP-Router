@@ -16,3 +16,8 @@ result/*
 draw/figs/*
 figs/*
 draw/timeline/*
+*.bin
+build*
+*.txt
+*.data
+fsync_bench*
