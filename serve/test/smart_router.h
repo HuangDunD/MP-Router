@@ -17,6 +17,8 @@
 #include <limits>
 #include <thread>
 #include <cmath>
+#include <array>
+#include <future>
 
 #include "common.h"
 #include "btree_search.h"
@@ -101,12 +103,16 @@ public:
 
         // 时间开销细分
         double fetch_txn_from_pool_ms = 0.0;
+        double wait_prepared_batch_ms = 0.0;
         double schedule_total_ms = 0.0;
         double push_txn_to_queue_ms = 0.0;
+        double push_txn_to_queue_wall_ms = 0.0;
             // for batch scheduling
-            double preprocess_txn_ms, wait_pending_txn_push_ms, wait_last_batch_finish_ms = 0.0;
+            double preprocess_txn_ms = 0.0;
+            double wait_pending_txn_push_ms = 0.0;
+            double wait_last_batch_finish_ms = 0.0;
             double preprocess_lookup_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
-            double get_page_ownership_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
+            double get_page_ownership_ms = 0.0;
             double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double compute_union_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
@@ -254,7 +260,8 @@ public:
           logger(logger_ptr),
           btree_service_(btree_service),
           metis_(metis),
-          threadpool(4 * worker_threads, *logger), 
+          threadpool(4 * worker_threads, *logger),
+          preprocess_threadpool(static_cast<size_t>(std::max(1, std::min(worker_threads, 8))), *logger),
           routed_txn_cnt_per_node(MaxComputeNodeCount), 
           batch_finished_flags(MaxComputeNodeCount, 0),
           workload_balance_penalty_weights_(MaxComputeNodeCount, 0),
@@ -743,6 +750,18 @@ public:
         int valid_page_count = 0; // 有效页面数量
     };
 
+    struct PreparedBatch {
+        std::unique_ptr<std::vector<TxnQueueEntry*>> txn_batch;
+        std::vector<SchedulingCandidateTxn> candidates;
+        std::unordered_map<tx_id_t, SchedulingCandidateTxn*> txid_to_txn_map;
+        std::unordered_set<tx_id_t> conflicted_txns;
+        std::vector<tx_id_t> global_conflicted_txids;
+        std::vector<std::pair<uint64_t, tx_id_t>> global_page_pairs;
+        std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> page_to_txn_range_map;
+        std::vector<uint64_t> unique_conflict_pages;
+        std::vector<std::vector<tx_id_t>> conflicted_txn_partitions;
+    };
+
     void compute_benefit_for_node(SchedulingCandidateTxn* sc, std::vector<int>& ownership_node_count, std::vector<double>& compute_node_workload_benefit,
         double metis_benefit_weight, double ownership_benefit_weight, double load_balance_benefit_weight); 
      
@@ -751,6 +770,9 @@ public:
     void get_route_primary_batch_schedule_v2(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch);
 
     void get_route_primary_batch_schedule_v3(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch);
+    std::unique_ptr<PreparedBatch> preprocess_route_batch_v3(
+        std::unique_ptr<std::vector<TxnQueueEntry*>> txn_batch);
+    void schedule_prepared_batch_v3(PreparedBatch& prepared);
 
     void get_route_chimera_batch_schedule(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch);
 
@@ -1311,6 +1333,50 @@ public:
         start_router_lock.unlock();
 
         batch_id = -1; // 对于流水线模式，初始batch_id为-1，因为同步点get_route_primary_batch_schedule_v2中会先+1
+        if (SYSTEM_MODE == 11) {
+            auto fetch_and_preprocess = [this]() -> std::unique_ptr<PreparedBatch> {
+                struct timespec fetch_start, fetch_end;
+                clock_gettime(CLOCK_MONOTONIC, &fetch_start);
+                auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(
+                    BatchRouterProcessSize, 0, false);
+                clock_gettime(CLOCK_MONOTONIC, &fetch_end);
+                time_stats_.fetch_txn_from_pool_ms +=
+                    (fetch_end.tv_sec - fetch_start.tv_sec) * 1000.0 +
+                    (fetch_end.tv_nsec - fetch_start.tv_nsec) / 1000000.0;
+                return preprocess_route_batch_v3(std::move(txn_batch));
+            };
+
+            auto next_prepared = std::async(std::launch::async, fetch_and_preprocess);
+            while (true) {
+                struct timespec wait_prepared_start, wait_prepared_end;
+                clock_gettime(CLOCK_MONOTONIC, &wait_prepared_start);
+                auto prepared = next_prepared.get();
+                clock_gettime(CLOCK_MONOTONIC, &wait_prepared_end);
+                time_stats_.wait_prepared_batch_ms +=
+                    (wait_prepared_end.tv_sec - wait_prepared_start.tv_sec) * 1000.0 +
+                    (wait_prepared_end.tv_nsec - wait_prepared_start.tv_nsec) / 1000000.0;
+                if (prepared == nullptr) {
+                    for (auto txn_queue : txn_queues_) txn_queue->set_finished();
+                    batch_cv.notify_all();
+                    break;
+                }
+
+                // Keep at most one batch ahead. Its preprocessing overlaps this batch's scheduling.
+                next_prepared = std::async(std::launch::async, fetch_and_preprocess);
+                txn_pool_->register_batch_with_tit(*prepared->txn_batch);
+
+                struct timespec schedule_start, schedule_end;
+                clock_gettime(CLOCK_MONOTONIC, &schedule_start);
+                schedule_prepared_batch_v3(*prepared);
+                clock_gettime(CLOCK_MONOTONIC, &schedule_end);
+                time_stats_.schedule_total_ms +=
+                    (schedule_end.tv_sec - schedule_start.tv_sec) * 1000.0 +
+                    (schedule_end.tv_nsec - schedule_start.tv_nsec) / 1000000.0;
+            }
+            std::cout << "Router worker thread finished." << std::endl;
+            return;
+        }
+
         while (true) {
             // 计时
             struct timespec start_time, end_time;
@@ -1475,8 +1541,10 @@ public:
         if(c) {
             // push time
             time_stats_.push_txn_to_queue_ms = 0.0; // 重置
+            time_stats_.push_txn_to_queue_wall_ms = 0.0;
             for (const auto& t : time_stats_.push_txn_to_queue_ms_per_thread) {
                 time_stats_.push_txn_to_queue_ms += t;
+                time_stats_.push_txn_to_queue_wall_ms = std::max(time_stats_.push_txn_to_queue_wall_ms, t);
             }
             time_stats_.push_txn_to_queue_ms /= router_worker_threads_; // 取平均
         }
@@ -2010,6 +2078,7 @@ private:
 
     //for metis
     ThreadPool threadpool;
+    ThreadPool preprocess_threadpool;
     NewMetis* metis_;
 
     // 统计数据
