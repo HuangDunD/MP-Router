@@ -246,36 +246,50 @@ database_data_path = "/sharedata/kingbase/data-hot/"
 # dynamic
 # RunModeType = [0, 3, 8, 11, 4, 13]
 # RunModeType = [0, 3, 11, 13]
-# RunModeType = [0, 2, 11, 13, 23, 24, 25]
-# RunModeType = [0, 2, 11, 13, 23, 24, 25]
-# ! system: 0 随机路由, 2 page hash 3 MP-Router 13 MP-Router without scheduling 23 metis 24 ownership + load 25 load
-RunModeType = [11, 13]
+# RunModeType = [0, 2, 11, 13, 23, 25]
+# RunModeType = [11, 13, 2]
+RunModeType = [28]
+# ! system: 0 随机路由, 2 page hash 11 MP-Router 13 MP-Router without scheduling 23 metis 24 ownership + load 25 load
+# RunModeType = [13]
 # RunModeType = [1]
-AccessPattern = [1]
-# AccessPattern = [0]
-# ZipfianTheta = [0.95, 0.9, 0.8, 0.7, 0.6]
-# ZipfianTheta = [0.95, 0.9, 0.8, 0.7, 0.6]
-ZipfianTheta = [0.8, 0.95, 0.9]
-HotspotFraction = [0.001]
+AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
+# AccessPattern = [1]
+# ZipfianTheta = [0.4]
+# ZipfianTheta = [0.8]
+ZipfianTheta = [0.8, 0.9, 0.95, 0.7, 0.6]
+HotspotFraction = [0.1, 0.01, 0.001]
 HotspotProb = [0.8]
+# HotspotProb = [0.8, 0.9, 0.95]
 # account = 100W, 单个表大概14W个页面, 每个页面8KB, 大小约1.1GB
 AccountCount = [5000000]
+# WorkerThreadCount = [16]
 WorkerThreadCount = [16]
 try_count = 35000
 workload = "smallbank"
 sys_extend_size = 300000
 sys_index_extend_size = 30000
-AffinityTxnRatio = [0.8, 0.5, 0.2]
+AffinityTxnRatio = [0.8]
+# AffinityTxnRatio = [1, 0.8, 0.6, 0.4, 0.2, 0]
 BatchSize = [10000] # default 10000
-# BatchSize = [10, 100, 1000, 5000, 10000, 50000, 100000]
+# BatchSize = [1000]
 NumBucket = [4]
+EnableLongTxn = 0 # 0:disable, 1:enable
+LongTxnSize = [4, 8, 12, 14, 16, 20] # only valid when EnableLongTxn=1
+EnableKeyPageRatio = 0 # 0:disable, 1:enable
+KeyPageRatio = [0.2, 0.4, 0.6, 0.8, 1.0] # only valid when EnableKeyPageRatio=1
 
 # -------------------------------------------- # main test logic -------------------------------------------- #
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--force-reload", action="store_true", help="Force reload data even if backup exists")
+    parser.add_argument("--enable-long-txn", action="store_true", help="Enable long transactions")
+    parser.add_argument("--long-txn-length", type=int, default=None, help="Length of long transactions")
     args = parser.parse_args()
+
+    # Handle LongTxnSize override
+    if args.long_txn_length is not None:
+        LongTxnSize = [args.long_txn_length]
 
     # 删除之前的结果
     if os.path.exists(result):
@@ -344,122 +358,144 @@ if __name__ == "__main__":
                 backup_path = f"/sharedata/kingbase/{workload}_{account_count}"
                 
                 # 判断是否需要执行 prepare (Load & Backup)
-                need_prepare = False
+                # need_prepare = False
                 
-                if args.force_reload:
-                    need_prepare = True
-                elif not check_remote_exists(backup_path):
-                    need_prepare = True
+                # if args.force_reload:
+                #     need_prepare = True
+                # elif not check_remote_exists(backup_path):
+                #     need_prepare = True
                 
                 # 避免在当前脚本运行期间重复 prepare 同一个 backup_path
                 # current_backup_key 记录的是上一次成功 prepare 或 确认存在的 backup_path
-                if backup_path != current_backup_key:
-                    if need_prepare:
-                        prepare_backup_data(RunModeType[0], access_pattern, account_count, WorkerThreadCount[0], extra_arg_load, backup_path)
-                    else:
-                        logging.info(f"Using existing backup at {backup_path}")
+                # if backup_path != current_backup_key:
+                #     if need_prepare:
+                #         prepare_backup_data(RunModeType[0], access_pattern, account_count, WorkerThreadCount[0], extra_arg_load, backup_path)
+                #     else:
+                #         logging.info(f"Using existing backup at {backup_path}")
                     
-                    current_backup_key = backup_path
+                #     current_backup_key = backup_path
 
                 for num_bucket in NumBucket:
                     for affinity_ratio in AffinityTxnRatio:
                         for worker_thread_count in WorkerThreadCount:
                             for batch_size in BatchSize:
-                                for run_mode in RunModeType:
-                                    attempt = 0
-                                    success = False
-                                    
-                                    # 每次测试前重置数据
-                                    # reset_db_data(backup_path)
-                                    # 确保 server 进程被清理
-                                    kill_server() 
-
-                                    # 删除之前的结果文件，防止误判
-                                    if os.path.exists(result):
-                                        os.remove(result)
-
-                                    os.chdir(Run_Path)
-                                    while attempt < max_try and not success:
-                                        attempt += 1
-                                        extra_part_log = ""
-                                        if access_pattern == 1:
-                                            extra_part_log = f", ZipfianTheta={zipfian_theta}"
-                                        elif access_pattern == 2:
-                                            extra_part_log = f", HotspotFraction={hotspot_fraction}, HotspotProb={hotspot_prob}"
-
-                                        logging.info(
-                                            f"Running test with RunMode={run_mode}, AccessPattern={access_pattern}{extra_part_log}, AccountCount={account_count}, WorkerThreads={worker_thread_count}, Attempt={attempt}"
-                                        )
-                                        kwr_report_name = f"kwr_mode{run_mode}_access{access_pattern}_acc{account_count}_thd{worker_thread_count}"
-
-                                        # 构造命令
-                                        extra_arg = ""
-                                        if access_pattern == 1:
-                                            extra_arg = f" --zipfian-theta {zipfian_theta}"
-                                        elif access_pattern == 2:
-                                            extra_arg = f" --hotspot-fraction {hotspot_fraction} --hotspot-prob {hotspot_prob}"
-                                        
-                                        # 注意：这里添加 --skip-load-data，因为我们已经通过 reset_db_data 恢复了数据
-                                        # cmd = (
-                                        #     f"./run --workload {workload} --system-mode {run_mode} --access-pattern {access_pattern}{extra_arg} "
-                                        #     f"--account-count {account_count} --worker-threads {worker_thread_count} --try-count {try_count} --kwr-name {kwr_report_name} --skip-load-data"
-                                        #     f" --sys_extend_size {sys_extend_size} --sys_index_extend_size {sys_index_extend_size} --affinity-txn-ratio {affinity_ratio}"
-                                        # )
-                                        cmd = (
-                                            f"./run --workload {workload} --system-mode {run_mode} --access-pattern {access_pattern}{extra_arg} "
-                                            f"--account-count {account_count} --worker-threads {worker_thread_count} --try-count {try_count} --kwr-name {kwr_report_name}"
-                                            f" --sys_extend_size {sys_extend_size} --sys_index_extend_size {sys_index_extend_size} --affinity-txn-ratio {affinity_ratio} --batch-size {batch_size} --num-bucket {num_bucket}"
-                                        )
-                                        with open(output, "w", encoding="utf-8") as outfile:
-                                            process = subprocess.Popen(cmd, shell=True)
-                                            process.wait()
-                                        if os.path.exists(result):
-                                            success = True
-                                            logging.info("Test completed successfully.")
-
-                                            # 创建结果文件夹
-                                            extra_part_file = ""
-                                            if access_pattern == 1:
-                                                extra_part_file = f"_ZipfTheta{zipfian_theta}"
-                                            elif access_pattern == 2:
-                                                extra_part_file = f"_HsFrac{hotspot_fraction}_HsProb{hotspot_prob}"
-
-                                            dest_dir = (
-                                                f"{figure_path}/result_m{run_mode}_p{access_pattern}{extra_part_file}_c{account_count}_t{worker_thread_count}_r{affinity_ratio}_b{batch_size}_nb{num_bucket}/"
-                                            )
-                                            os.makedirs(dest_dir, exist_ok=True)
-
-                                            # 使用shutil复制文件，保持内容一致
-                                            dest_file = f"{dest_dir}result.txt"
-                                            shutil.copy2(result, dest_file)
-                                            log_file = f"{dest_dir}partitioning_log.log"
-                                            shutil.copy2(log, log_file)
-
-                                            # scp 将远程服务器的 kwr 报告文件复制到本地对应的结果文件夹中
-                                            ssh = paramiko.SSHClient()
-                                            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                                            ssh.connect(kwr_report_ip, username="root", password="20001010@@HcY")
-                                            sftp = ssh.open_sftp()
-                                            remote_warm_report = os.path.join(kwr_report_path, f"{kwr_report_name}_fisrt.html")
-                                            remote_run_report = os.path.join(kwr_report_path, f"{kwr_report_name}_end.html")
-                                            local_warm_report = os.path.join(dest_dir, f"{kwr_report_name}_fisrt.html")
-                                            local_run_report = os.path.join(dest_dir, f"{kwr_report_name}_end.html")
-                                            try:
-                                                # sftp.get(remote_warm_report, local_warm_report)
-                                                sftp.get(remote_run_report, local_run_report)
-                                            except Exception as e:
-                                                logging.error(f"\033[31m Failed to retrieve KWR report files: {e} \033[0m")
-                                            sftp.close()
-                                            ssh.close()
+                                current_txn_sizes = LongTxnSize if EnableLongTxn else [None]
+                                current_key_page_ratios = KeyPageRatio if EnableKeyPageRatio else [None]
+                                for long_txn_length in current_txn_sizes:
+                                    for key_page_ratio in current_key_page_ratios:
+                                        for run_mode in RunModeType:
+                                            attempt = 0
+                                            success = False
                                             
-                                        else:
-                                            logging.warning("Result file not found, retrying...")
-                                    if not success:
-                                        theta_err = f", ZipfianTheta={zipfian_theta}" if access_pattern == 1 else ""
-                                        logging.error(
-                                            f"Test failed after {max_try} attempts for RunMode={run_mode}, AccessPattern={access_pattern}{theta_err}, AccountCount={account_count}, WorkerThreads={worker_thread_count}"
-                                        )
-                                    
-                                    time.sleep(5) # 每次测试间隔10秒
+                                            # 每次测试前重置数据
+                                            # reset_db_data(backup_path)
+                                            # 确保 server 进程被清理
+                                            kill_server() 
+
+                                            # 删除之前的结果文件，防止误判
+                                            if os.path.exists(result):
+                                                os.remove(result)
+
+                                            os.chdir(Run_Path)
+                                            while attempt < max_try and not success:
+                                                attempt += 1
+                                                extra_part_log = ""
+                                                if access_pattern == 1:
+                                                    extra_part_log = f", ZipfianTheta={zipfian_theta}"
+                                                elif access_pattern == 2:
+                                                    extra_part_log = f", HotspotFraction={hotspot_fraction}, HotspotProb={hotspot_prob}"
+
+                                                logging.info(
+                                                    f"Running test with RunMode={run_mode}, AccessPattern={access_pattern}{extra_part_log}, AccountCount={account_count}, WorkerThreads={worker_thread_count}, Attempt={attempt}"
+                                                )
+                                                kwr_report_name = f"kwr_mode{run_mode}_access{access_pattern}_acc{account_count}_thd{worker_thread_count}"
+
+                                                # 构造命令
+                                                extra_arg = ""
+                                                if access_pattern == 1:
+                                                    extra_arg = f" --zipfian-theta {zipfian_theta}"
+                                                elif access_pattern == 2:
+                                                    extra_arg = f" --hotspot-fraction {hotspot_fraction} --hotspot-prob {hotspot_prob}"
+
+                                                if EnableLongTxn:
+                                                    try_count = 35000 // long_txn_length
+                                                
+                                                # 注意：这里添加 --skip-load-data，因为我们已经通过 reset_db_data 恢复了数据
+                                                # cmd = (
+                                                #     f"./run --workload {workload} --system-mode {run_mode} --access-pattern {access_pattern}{extra_arg} "
+                                                #     f"--account-count {account_count} --worker-threads {worker_thread_count} --try-count {try_count} --kwr-name {kwr_report_name} --skip-load-data"
+                                                #     f" --sys_extend_size {sys_extend_size} --sys_index_extend_size {sys_index_extend_size} --affinity-txn-ratio {affinity_ratio}"
+                                                # )
+                                                cmd = (
+                                                    f"./run --workload {workload} --system-mode {run_mode} --access-pattern {access_pattern}{extra_arg} "
+                                                    f"--account-count {account_count} --worker-threads {worker_thread_count} --try-count {try_count} --kwr-name {kwr_report_name}"
+                                                    f" --sys_extend_size {sys_extend_size} --sys_index_extend_size {sys_index_extend_size} --affinity-txn-ratio {affinity_ratio} --batch-size {batch_size} --num-bucket {num_bucket}"
+                                                )
+
+                                                if EnableLongTxn:
+                                                    cmd += f" --enable-long-txn --long-txn-length {long_txn_length}"
+                                                
+                                                if EnableKeyPageRatio:
+                                                    cmd += f" --key-page-ratio {key_page_ratio}"
+                                                    
+                                                with open(output, "w", encoding="utf-8") as outfile:
+                                                    process = subprocess.Popen(cmd, shell=True)
+                                                    process.wait()
+                                                if os.path.exists(result):
+                                                    success = True
+                                                    logging.info("Test completed successfully.")
+
+                                                    # 创建结果文件夹
+                                                    extra_part_file = ""
+                                                    if access_pattern == 1:
+                                                        extra_part_file = f"_ZipfTheta{zipfian_theta}"
+                                                    elif access_pattern == 2:
+                                                        extra_part_file = f"_HsFrac{hotspot_fraction}_HsProb{hotspot_prob}"
+
+                                                    extra_part_file_txn = ""
+                                                    if EnableLongTxn:
+                                                        extra_part_file_txn = f"_lt{long_txn_length}"
+                                                    
+                                                    extra_part_file_key_ratio = ""
+                                                    if EnableKeyPageRatio:
+                                                        extra_part_file_key_ratio = f"_kp{key_page_ratio}"
+
+                                                    dest_dir = (
+                                                        f"{figure_path}/result_m{run_mode}_p{access_pattern}{extra_part_file}_c{account_count}_t{worker_thread_count}_r{affinity_ratio}_b{batch_size}_nb{num_bucket}{extra_part_file_txn}{extra_part_file_key_ratio}/"
+                                                    )
+                                                os.makedirs(dest_dir, exist_ok=True)
+
+                                                # 使用shutil复制文件，保持内容一致
+                                                dest_file = f"{dest_dir}result.txt"
+                                                shutil.copy2(result, dest_file)
+                                                log_file = f"{dest_dir}partitioning_log.log"
+                                                shutil.copy2(log, log_file)
+
+                                                # scp 将远程服务器的 kwr 报告文件复制到本地对应的结果文件夹中
+                                                ssh = paramiko.SSHClient()
+                                                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                                                ssh.connect(kwr_report_ip, username="root", password="20001010@@HcY")
+                                                sftp = ssh.open_sftp()
+                                                remote_warm_report = os.path.join(kwr_report_path, f"{kwr_report_name}_fisrt.html")
+                                                remote_run_report = os.path.join(kwr_report_path, f"{kwr_report_name}_end.html")
+                                                local_warm_report = os.path.join(dest_dir, f"{kwr_report_name}_fisrt.html")
+                                                local_run_report = os.path.join(dest_dir, f"{kwr_report_name}_end.html")
+                                                try:
+                                                    # sftp.get(remote_warm_report, local_warm_report)
+                                                    sftp.get(remote_run_report, local_run_report)
+                                                except Exception as e:
+                                                    logging.error(f"\033[31m Failed to retrieve KWR report files: {e} \033[0m")
+                                                sftp.close()
+                                                ssh.close()
+                                                
+                                            else:
+                                                logging.warning("Result file not found, retrying...")
+                                        if not success:
+                                            theta_err = f", ZipfianTheta={zipfian_theta}" if access_pattern == 1 else ""
+                                            logging.error(
+                                                f"Test failed after {max_try} attempts for RunMode={run_mode}, AccessPattern={access_pattern}{theta_err}, AccountCount={account_count}, WorkerThreads={worker_thread_count}"
+                                            )
+                                        
+                                        time.sleep(5) # 每次测试间隔10秒
     kill_server()
     logging.info("All tests completed.")
