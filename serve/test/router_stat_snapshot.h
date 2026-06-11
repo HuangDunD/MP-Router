@@ -78,9 +78,13 @@ struct RouterStatSnapshot {
     timespec snapshot_ts;
     double total_time_ms = 0.0;
     double fetch_txn_from_pool_ms = 0.0;
+    double wait_prepared_batch_ms = 0.0;
     double schedule_total_ms = 0.0;
     double push_txn_to_queue_ms = 0.0;
-    double preprocess_txn_ms, wait_pending_txn_push_ms, wait_last_batch_finish_ms = 0.0;
+    double push_txn_to_queue_wall_ms = 0.0;
+    double preprocess_txn_ms = 0.0;
+    double wait_pending_txn_push_ms = 0.0;
+    double wait_last_batch_finish_ms = 0.0;
     double preprocess_lookup_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double get_page_ownership_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
@@ -172,14 +176,28 @@ struct RouterStatSnapshot {
 
         std::cout << "----- Time Statistics (ms)-----:" << std::endl;
         std::cout << "Total Time Elapsed: " << total_time_ms << " ms" << std::endl;
+        if (SYSTEM_MODE == 11) {
+            std::cout << "[Preprocess Thread Time Breakdown] " << std::endl;
+            std::cout << "  Fetch Txn From Pool Time: " << fetch_txn_from_pool_ms << " ms" << std::endl;
+            std::cout << "  Preprocess Txn Time: " << preprocess_txn_ms << " ms" << std::endl;
+            std::cout << "    Preprocess Lookup Time: " << preprocess_lookup_ms << " ms" << std::endl;
+            std::cout << "    Merge Global Txid To Txn Map Time: " << merge_global_txid_to_txn_map_ms << " ms" << std::endl;
+            std::cout << "    Compute Conflict Time: " << compute_conflict_ms << " ms" << std::endl;
+            std::cout << "    Compute Union Time: " << compute_union_ms << " ms" << std::endl;
+        }
         std::cout << "[Router Thread Time Breakdown] " << std::endl;
-        std::cout << "  Fetch Txn From Pool Time: " <<fetch_txn_from_pool_ms << " ms" << std::endl;
-        std::cout << "  Schedule Batch Total Time: " << schedule_total_ms << " ms" << std::endl;
-        std::cout << "    Preprocess Txn Time: " << preprocess_txn_ms << " ms" << std::endl;
-        std::cout << "      Preprocess Lookup Time: " << preprocess_lookup_ms << " ms" << std::endl;
-        std::cout << "      Merge Global Txid To Txn Map Time: " << merge_global_txid_to_txn_map_ms << " ms" << std::endl;
-        std::cout << "      Compute Conflict Time: " << compute_conflict_ms << " ms" << std::endl;
-        std::cout << "      Compute Union Time: " << compute_union_ms << " ms" << std::endl;
+        if (SYSTEM_MODE == 11) {
+            std::cout << "  Wait Prepared Batch Time: " << wait_prepared_batch_ms << " ms" << std::endl;
+            std::cout << "  Schedule Prepared Batch Total Time: " << schedule_total_ms << " ms" << std::endl;
+        } else {
+            std::cout << "  Fetch Txn From Pool Time: " << fetch_txn_from_pool_ms << " ms" << std::endl;
+            std::cout << "  Schedule Batch Total Time: " << schedule_total_ms << " ms" << std::endl;
+            std::cout << "    Preprocess Txn Time: " << preprocess_txn_ms << " ms" << std::endl;
+            std::cout << "      Preprocess Lookup Time: " << preprocess_lookup_ms << " ms" << std::endl;
+            std::cout << "      Merge Global Txid To Txn Map Time: " << merge_global_txid_to_txn_map_ms << " ms" << std::endl;
+            std::cout << "      Compute Conflict Time: " << compute_conflict_ms << " ms" << std::endl;
+            std::cout << "      Compute Union Time: " << compute_union_ms << " ms" << std::endl;
+        }
         std::cout << "    Wait Pending Txn Push Time: " << wait_pending_txn_push_ms << " ms" << std::endl;
         std::cout << "    Wait Last Batch Finish Time: " << wait_last_batch_finish_ms << " ms" << std::endl;
         std::cout << "    Get Page Ownership Time: " << get_page_ownership_ms << " ms" << std::endl;
@@ -196,7 +214,8 @@ struct RouterStatSnapshot {
         std::cout << "      Fill Pipeline Bubble Time: " << fill_pipeline_bubble_ms << " ms" << std::endl;
         std::cout << "      Push End Txns Time: " << push_end_txns_ms << " ms" << std::endl;
         std::cout << "      Final Push To Queues Time: " << final_push_to_queues_ms << " ms" << std::endl;
-        std::cout << "  Push Txn To Queue Time: " << push_txn_to_queue_ms << " ms" << std::endl;
+        std::cout << "  Push Txn To Queue Accumulated Worker Time: " << push_txn_to_queue_ms << " ms" << std::endl;
+        std::cout << "  Push Txn To Queue Wall Time: " << push_txn_to_queue_wall_ms << " ms" << std::endl;
 
         std::cout << "[Worker Thread Time Breakdown] " << std::endl;
         for(int i=0; i< ComputeNodeCount; i++) {
@@ -288,6 +307,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     
     SmartRouter::TimeBreakdown& tdb = router->get_time_breakdown();
     snap.fetch_txn_from_pool_ms = tdb.fetch_txn_from_pool_ms;
+    snap.wait_prepared_batch_ms = tdb.wait_prepared_batch_ms;
     snap.schedule_total_ms = tdb.schedule_total_ms;
     snap.preprocess_txn_ms = tdb.preprocess_txn_ms;
     snap.merge_global_txid_to_txn_map_ms = tdb.merge_global_txid_to_txn_map_ms;
@@ -317,6 +337,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.sum_worker_thread_exec_time_ms_per_node = tdb.sum_worker_thread_exec_time_ms_per_node;
     snap.sum_worker_thread_update_key_page_time_ms_per_node = tdb.sum_worker_thread_update_key_page_time_ms_per_node;
     snap.push_txn_to_queue_ms = tdb.push_txn_to_queue_ms;
+    snap.push_txn_to_queue_wall_ms = tdb.push_txn_to_queue_wall_ms;
     snap.mark_done_total_ms_per_node = tdb.mark_done_total_ms_per_node;
     snap.log_debug_info_total_ms_per_node = tdb.log_debug_info_total_ms_per_node;
     return snap;
@@ -406,6 +427,7 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     // time breakdown
     d.total_time_ms = (b.snapshot_ts.tv_sec - a.snapshot_ts.tv_sec) * 1000.0 + (b.snapshot_ts.tv_nsec - a.snapshot_ts.tv_nsec) / 1e6;
     d.fetch_txn_from_pool_ms = b.fetch_txn_from_pool_ms - a.fetch_txn_from_pool_ms;
+    d.wait_prepared_batch_ms = b.wait_prepared_batch_ms - a.wait_prepared_batch_ms;
     d.schedule_total_ms = b.schedule_total_ms - a.schedule_total_ms;
     d.preprocess_txn_ms = b.preprocess_txn_ms - a.preprocess_txn_ms;
     d.merge_global_txid_to_txn_map_ms = b.merge_global_txid_to_txn_map_ms - a.merge_global_txid_to_txn_map_ms;
@@ -439,6 +461,7 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
         d.log_debug_info_total_ms_per_node.push_back( b.log_debug_info_total_ms_per_node[i] - a.log_debug_info_total_ms_per_node[i] );
     }
     d.push_txn_to_queue_ms = b.push_txn_to_queue_ms - a.push_txn_to_queue_ms;
+    d.push_txn_to_queue_wall_ms = b.push_txn_to_queue_wall_ms - a.push_txn_to_queue_wall_ms;
     return d;
 }
 

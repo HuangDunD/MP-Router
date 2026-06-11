@@ -441,18 +441,15 @@ void run_smallbank_empty(thread_params* params, Logger* logger_){
     SlidingTransactionInforTable *tit = params->tit;
     SmallBank* smallbank = params->smallbank;
 
-    // init the thread connection for this compute node
-    auto con_str = DBConnection[compute_node_id];
-    auto con = new pqxx::connection(con_str);
-    if(!con->is_open()) {
-        std::cerr << "Failed to connect to database: " << con_str << std::endl;
-        assert(false);
-        exit(-1);
-    }
-
     int con_batch_id = 0;
     while (true) {
+        timespec pop_start_time, pop_end_time;
+        clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
         std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
+        double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
+                          (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
+        smart_router->add_worker_thread_pop_time(compute_node_id, params->thread_id, pop_time);
         if (txn_entries.empty()) {
             if(txn_queue->is_finished()) {
                 // 说明该计算节点的事务队列已经均处理完成, 可以退出线程了
@@ -462,17 +459,35 @@ void run_smallbank_empty(thread_params* params, Logger* logger_){
                 // 说明该计算节点的该批事务已经均处理完成, 告诉smart router 该批次这个节点完成了
                 smart_router->notify_batch_finished(compute_node_id, params->thread_id, con_batch_id);
                 // 等待下一批事务到来，即 batch_finished 标志被重置
+                timespec wait_start_time, wait_end_time;
+                clock_gettime(CLOCK_MONOTONIC, &wait_start_time);
                 smart_router->wait_for_next_batch(compute_node_id, params->thread_id, con_batch_id);
+                clock_gettime(CLOCK_MONOTONIC, &wait_end_time);
+                double wait_time = (wait_end_time.tv_sec - wait_start_time.tv_sec) * 1000.0 +
+                                   (wait_end_time.tv_nsec - wait_start_time.tv_nsec) / 1000000.0;
+                smart_router->add_worker_thread_wait_next_batch_time(compute_node_id, params->thread_id, wait_time);
                 con_batch_id++;
                 continue; // 重新进入循环，处理下一批事务
             }
-            else assert(false);
+            else {
+                // A pipelined preprocessor may briefly leave the queue empty
+                // before the current prepared batch is dispatched.
+                continue;
+            }
         }
         for(auto& txn_entry : txn_entries) {
             if (!measurement_window_open()) {
+                timespec mark_start_time, mark_end_time;
+                clock_gettime(CLOCK_MONOTONIC, &mark_start_time);
                 tit->mark_done(txn_entry);
+                clock_gettime(CLOCK_MONOTONIC, &mark_end_time);
+                double mark_done_time = (mark_end_time.tv_sec - mark_start_time.tv_sec) * 1000.0 +
+                                        (mark_end_time.tv_nsec - mark_start_time.tv_nsec) / 1000000.0;
+                smart_router->add_worker_thread_mark_done_time(compute_node_id, params->thread_id, mark_done_time);
                 continue;
             }
+            timespec exec_start_time, exec_end_time;
+            clock_gettime(CLOCK_MONOTONIC, &exec_start_time);
             // just for statistics
             exe_count++;
             maybe_finish_warmup(logger_);
@@ -495,10 +510,20 @@ void run_smallbank_empty(thread_params* params, Logger* logger_){
             ctid_ret_page_ids = txn_entry->accessed_page_ids;
             // update the smart router page map if needed
             if(smart_router) smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables), keys, rw, ctid_ret_page_ids, compute_node_id);
+            clock_gettime(CLOCK_MONOTONIC, &exec_end_time);
+            double exec_time = (exec_end_time.tv_sec - exec_start_time.tv_sec) * 1000.0 +
+                               (exec_end_time.tv_nsec - exec_start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_exec_time(compute_node_id, params->thread_id, exec_time);
 
             // statistics
             exec_txn_cnt_per_node[compute_node_id]++;
+            timespec mark_start_time, mark_end_time;
+            clock_gettime(CLOCK_MONOTONIC, &mark_start_time);
             tit->mark_done(txn_entry); // 一体化：标记完成，删除由 TIT 统一管理
+            clock_gettime(CLOCK_MONOTONIC, &mark_end_time);
+            double mark_done_time = (mark_end_time.tv_sec - mark_start_time.tv_sec) * 1000.0 +
+                                    (mark_end_time.tv_nsec - mark_start_time.tv_nsec) / 1000000.0;
+            smart_router->add_worker_thread_mark_done_time(compute_node_id, params->thread_id, mark_done_time);
         }
     }
     std::cout << "Empty txn worker thread " << params->thread_id << " on compute node " 
@@ -1859,6 +1884,8 @@ void print_usage(const char* program_name) {
     std::cout << "  --unlog                     Create UNLOGGED tables (default follows workload)" << std::endl;
     std::cout << "  --enable-autovacuum         Keep table autovacuum enabled after table creation [default: off]" << std::endl;
     std::cout << "  --without-kpmap             Skip key-page map initialization for client-only experiments" << std::endl;
+    std::cout << "  --router-only               Use empty SmallBank consumers to measure Router capacity" << std::endl;
+    std::cout << "  --fill-pipeline-bubble <0|1> Enable pipeline-bubble filling during conflict scheduling [default: 1]" << std::endl;
     std::cout << "  --time-run                  Run by wall-clock time instead of try-count" << std::endl;
     std::cout << "  --warmup-seconds <sec>      Warmup duration for --time-run [default: 180]" << std::endl;
     std::cout << "  --run-seconds <sec>         Measured duration after warmup for --time-run [default: 60]" << std::endl;
@@ -2376,6 +2403,7 @@ int main(int argc, char *argv[]) {
     int system_mode = 0; // Default system mode
     int access_pattern = 0; // 0: uniform, 1: zipfian, 2: hotspot
     bool without_kpmap = false;
+    bool router_only = false;
     // default parameters
     double zipfian_theta = 0.99; // Zipfian distribution parameter
     std::string zipfian_generator = "legacy";
@@ -2627,6 +2655,21 @@ int main(int argc, char *argv[]) {
         else if (arg == "--without-kpmap") {
             without_kpmap = true;
             std::cout << "Key-page map initialization disabled." << std::endl;
+        }
+        else if (arg == "--router-only") {
+            router_only = true;
+            std::cout << "Router-only benchmark enabled." << std::endl;
+        }
+        else if (arg == "--fill-pipeline-bubble") {
+            if (i + 1 < argc) {
+                int v = std::stoi(argv[++i]);
+                Enable_Fill_Pipeline_Bubble = (v != 0);
+                std::cout << "Fill pipeline bubble: " << (Enable_Fill_Pipeline_Bubble ? "enabled" : "disabled") << std::endl;
+            } else {
+                std::cerr << "Error: --fill-pipeline-bubble requires 0 or 1" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
         }
         else if (arg == "--partition-interval") {
             if (i + 1 < argc) {
@@ -2981,6 +3024,13 @@ int main(int argc, char *argv[]) {
     std::cout << "Use stored procedures: " << (use_sp ? "yes" : "no") << std::endl;
     std::cout << "Table autovacuum: " << (DISABLE_TABLE_AUTOVACUUM ? "off" : "on") << std::endl;
     std::cout << "Key-page map initialization: " << (without_kpmap ? "off" : "on") << std::endl;
+    std::cout << "Router-only benchmark: " << (router_only ? "on" : "off") << std::endl;
+    std::cout << "Fill pipeline bubble: " << (Enable_Fill_Pipeline_Bubble ? "on" : "off") << std::endl;
+
+    if (router_only && Workload_Type != 0) {
+        std::cerr << "Error: --router-only currently supports SmallBank only." << std::endl;
+        return -1;
+    }
     
     if (access_pattern == 1) {
         std::cout << "Zipfian theta: " << zipfian_theta << std::endl;
@@ -3084,7 +3134,7 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
 
         DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=postgres");
-        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=smallbank");
+        DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=postgres");
 
         if (!cli_db_connections.empty()) {
             std::cout << "Using PostgreSQL connection strings provided via command line:" << std::endl;
@@ -3487,7 +3537,7 @@ int main(int argc, char *argv[]) {
 
     // Create a performance snapshot
     int start_snapshot_id = -1;
-    if(DB_TYPE == 0) start_snapshot_id = create_perf_kwr_snapshot();
+    if(DB_TYPE == 0 && !router_only) start_snapshot_id = create_perf_kwr_snapshot();
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
     // --- Start Transaction Threads ---
@@ -3523,8 +3573,10 @@ int main(int argc, char *argv[]) {
     std::vector<std::vector<double>> worker_latencies(ComputeNodeCount * worker_threads);
     std::vector<std::vector<double>> worker_fetch_latencies(ComputeNodeCount * worker_threads);
     // pre-reserve some space to avoid frequent reallocations, e.g. 1M per thread
-    for(auto& v : worker_latencies) v.reserve(1000000); 
-    for(auto& v : worker_fetch_latencies) v.reserve(1000000);
+    if (!router_only) {
+        for(auto& v : worker_latencies) v.reserve(1000000);
+        for(auto& v : worker_fetch_latencies) v.reserve(1000000);
+    }
 
     std::vector<std::thread> db_conn_threads;
     for(int i = 0; i < ComputeNodeCount; i++) {
@@ -3541,7 +3593,10 @@ int main(int argc, char *argv[]) {
             params->smart_router = smart_router;
             params->tit = tit;
 
-            if(Workload_Type == 0) {
+            if (router_only) {
+                db_conn_threads.emplace_back(run_smallbank_empty, params, logger_);
+            }
+            else if(Workload_Type == 0) {
                 if (use_sp) {
                     if (DB_TYPE == 1) { // YashanDB
                         db_conn_threads.emplace_back(run_yashan_smallbank_txns_sp, params, logger_);
@@ -3583,8 +3638,6 @@ int main(int argc, char *argv[]) {
                     db_conn_threads.emplace_back(run_tpcc_txns_sp, params, logger_);
                 else assert(false && "Only support TPC-C with stored procedures!");
             }
-            // 测试路由吞吐量
-            // db_conn_threads.emplace_back(run_smallbank_empty, params, logger_);
         }
     }
 
@@ -3665,13 +3718,14 @@ int main(int argc, char *argv[]) {
     // Create a performance snapshot after running transactions
     std::this_thread::sleep_for(std::chrono::seconds(2)); // sleep for a while to ensure all operations are completed
     int end_snapshot_id = -1;
-    if(DB_TYPE == 0) end_snapshot_id = create_perf_kwr_snapshot();
+    if(DB_TYPE == 0 && !router_only) end_snapshot_id = create_perf_kwr_snapshot();
     std::cout << "Performance snapshots created: Start ID = " << start_snapshot_id 
               << ", End ID = " << end_snapshot_id << std::endl;
     
     // Print Report
     std::cout << "\n=== Performance Report ===" << std::endl;
     std::cout << "System mode: " << SYSTEM_MODE << " !!!" << std::endl;
+    std::cout << "Router-only benchmark: " << (router_only ? "yes" : "no") << std::endl;
     if(smart_router) {
         print_diff_snapshot(snapshot1, snapshot2);
     }
@@ -3712,7 +3766,7 @@ int main(int argc, char *argv[]) {
         time_based_run ? measurement_concurrency_retry_count : final_concurrency_retries;
     const uint64_t total_concurrency_retry_exhausted =
         time_based_run ? measurement_concurrency_retry_exhausted_count : final_concurrency_retry_exhausted;
-    const bool outcome_stats_enabled = DB_TYPE == 0 && use_sp;
+    const bool outcome_stats_enabled = !router_only && DB_TYPE == 0 && use_sp;
     const uint64_t throughput_transactions = outcome_stats_enabled ? total_committed : total_attempts;
 
     std::cout << "Total transaction attempts: " << total_attempts << std::endl;
@@ -3828,7 +3882,7 @@ int main(int argc, char *argv[]) {
     // generate_perf_kwr_report(conn0, start_snapshot_id, mid_snapshot_id, report_file_warm_phase);
     std::string report_file_run_phase = kwr_report_name +  "_end.html";
     // generate_perf_kwr_report(conn0, mid_snapshot_id, end_snapshot_id, report_file_run_phase);
-    if(DB_TYPE == 0) generate_perf_kwr_report(start_snapshot_id, end_snapshot_id, report_file_run_phase);
+    if(DB_TYPE == 0 && !router_only) generate_perf_kwr_report(start_snapshot_id, end_snapshot_id, report_file_run_phase);
 
     // restore streams (best-effort; program may exit via signal handler earlier)
     std::cout.rdbuf(old_cout);

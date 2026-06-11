@@ -1089,7 +1089,8 @@ public:
         pool_cv_.notify_one();
     }
 
-    std::unique_ptr<std::vector<TxnQueueEntry*>> fetch_batch_txns_from_pool(int batch_size) {
+    std::unique_ptr<std::vector<TxnQueueEntry*>> fetch_batch_txns_from_pool(
+            int batch_size, bool register_with_tit = true) {
         std::unique_ptr<std::vector<TxnQueueEntry*>> batch_txns = 
             std::make_unique<std::vector<TxnQueueEntry*>>();
         {
@@ -1111,9 +1112,10 @@ public:
             }
         }
         current_pool_size_ -= batch_size;
-        // 在lock之外更新tit
-        for (auto& entry : *batch_txns) {
-            tit->push(entry); // 即将调度这个事务， 从池中取出，放入事务信息表
+        if (register_with_tit) {
+            for (auto& entry : *batch_txns) {
+                tit->push(entry); // 即将调度这个事务， 从池中取出，放入事务信息表
+            }
         }
         if(current_pool_size_ <= max_pool_size_ * 0.8) {
             pool_cv_.notify_all();
@@ -1126,6 +1128,12 @@ public:
         pool_cv_.notify_all();
     }
 
+    void register_batch_with_tit(const std::vector<TxnQueueEntry*>& batch_txns) {
+        for (auto* entry : batch_txns) {
+            tit->push(entry);
+        }
+    }
+
     int size() {
         return current_pool_size_.load();
     }
@@ -1135,7 +1143,7 @@ private:
 
     const int max_pool_size_; // batch process txn size 
     std::atomic<int> current_pool_size_{0};
-    std::list<TxnQueueEntry*> txn_pool_; 
+    std::deque<TxnQueueEntry*> txn_pool_;
     std::mutex pool_mutex_;
     std::condition_variable pool_cv_;
 
@@ -1161,8 +1169,9 @@ public:
         pools[gen_thread_id % num_sub_pool_]->receive_txn_from_client_batch(std::move(entry));
     }
 
-    std::unique_ptr<std::vector<TxnQueueEntry*>> fetch_batch_txns_from_pool(int batch_size, int thread_id) {
-        return pools[thread_id % num_sub_pool_]->fetch_batch_txns_from_pool(batch_size);
+    std::unique_ptr<std::vector<TxnQueueEntry*>> fetch_batch_txns_from_pool(
+            int batch_size, int thread_id, bool register_with_tit = true) {
+        return pools[thread_id % num_sub_pool_]->fetch_batch_txns_from_pool(batch_size, register_with_tit);
     }
 
     void stop_pool() {
@@ -1170,6 +1179,10 @@ public:
         for(int i = 0; i < num_sub_pool_; i++){
             pools[i]->stop_pool();
         }
+    }
+
+    void register_batch_with_tit(const std::vector<TxnQueueEntry*>& batch_txns, int thread_id = 0) {
+        pools[thread_id % num_sub_pool_]->register_batch_with_tit(batch_txns);
     }
 
     int size() {

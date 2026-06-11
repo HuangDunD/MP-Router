@@ -6,7 +6,9 @@ project(MP-Router)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -fPIC")
 
-set(CMAKE_BUILD_TYPE Debug)
+if (NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Debug)
+endif()
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 
 set(CMAKE_CXX_STANDARD 20)

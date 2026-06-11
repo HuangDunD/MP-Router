@@ -954,6 +954,239 @@ std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_
     return scheduled_txn_queues;
 }
 
+std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_v3(
+        std::unique_ptr<std::vector<TxnQueueEntry*>> txn_batch) {
+    if (txn_batch == nullptr || txn_batch->empty()) return nullptr;
+
+    struct timespec start_time, end_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    auto prepared = std::make_unique<PreparedBatch>();
+    prepared->txn_batch = std::move(txn_batch);
+    const size_t n = prepared->txn_batch->size();
+    prepared->candidates.resize(n);
+    prepared->txid_to_txn_map.reserve(n);
+    prepared->global_conflicted_txids.reserve(n);
+    prepared->global_page_pairs.reserve(n * 4);
+    prepared->unique_conflict_pages.reserve(n * 4);
+
+    constexpr size_t kCanonicalPageShards = 64;
+    std::array<std::mutex, kCanonicalPageShards> canonical_mutexes;
+    std::array<std::unordered_map<DataItemKey, page_id_t, DataItemKeyHash>,
+               kCanonicalPageShards> canonical_pages;
+
+    const size_t preprocess_thread_count =
+        std::max<size_t>(1, std::min<size_t>(std::min<size_t>(worker_threads_, 8), n));
+    const size_t chunk = (n + preprocess_thread_count - 1) / preprocess_thread_count;
+    std::vector<std::vector<std::pair<uint64_t, tx_id_t>>> local_page_pairs(preprocess_thread_count);
+    std::vector<std::future<void>> futs;
+    futs.reserve(preprocess_thread_count);
+
+    for (size_t t = 0; t < preprocess_thread_count; ++t) {
+        const size_t begin = t * chunk;
+        const size_t end = std::min(n, begin + chunk);
+        futs.push_back(preprocess_threadpool.enqueue(
+            [this, &prepared, begin, end, t, &local_page_pairs,
+             &canonical_mutexes, &canonical_pages]() {
+                auto& page_pairs = local_page_pairs[t];
+                page_pairs.reserve((end - begin) * 4);
+
+                for (size_t idx = begin; idx < end; ++idx) {
+                    TxnQueueEntry* txn = prepared->txn_batch->at(idx);
+                    const int txn_type = txn->txn_type;
+                    std::vector<itemkey_t> keys;
+                    std::vector<table_id_t> table_ids;
+                    std::vector<bool> rw;
+
+                    if (Workload_Type == 0) {
+                        table_ids = smallbank_->get_table_ids_by_txn_type(txn_type);
+                        if (txn_type == 6) {
+                            keys = txn->accounts;
+                        } else {
+                            smallbank_->get_keys_by_txn_type(
+                                txn_type, txn->accounts[0], txn->accounts[1], keys);
+                        }
+                        rw = smallbank_->get_rw_by_txn_type(txn_type);
+                    } else if (Workload_Type == 1) {
+                        table_ids = ycsb_->get_table_ids_by_txn_type();
+                        keys = txn->ycsb_keys;
+                        rw = ycsb_->get_rw_flags();
+                    } else if (Workload_Type == 2) {
+                        keys = txn->tpcc_keys;
+                        table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, keys.size());
+                        rw = tpcc_->get_rw_flags_by_txn_type(txn_type, keys.size());
+                    } else {
+                        assert(false);
+                    }
+                    assert(table_ids.size() == keys.size());
+
+                    SchedulingCandidateTxn& sc = prepared->candidates[idx];
+                    sc.txn = txn;
+                    sc.ownership_node_count.assign(ComputeNodeCount, 0);
+                    sc.node_benefit_map.assign(ComputeNodeCount, 0.0);
+                    sc.will_route_node = -1;
+                    sc.is_scheduled = false;
+                    sc.hot_level = 0;
+                    sc.dense_id = -1;
+                    sc.valid_page_count = 0;
+                    sc.rw_flags = std::move(rw);
+                    sc.involved_pages.reserve(keys.size());
+                    sc.page_to_metis_node_vec.assign(keys.size(), -1);
+                    txn->accessed_page_ids.clear();
+                    txn->accessed_page_ids.reserve(keys.size());
+
+                    for (size_t access_idx = 0; access_idx < keys.size(); ++access_idx) {
+                        const DataItemKey data_key{table_ids[access_idx], keys[access_idx]};
+                        const size_t shard = DataItemKeyHash{}(data_key) % kCanonicalPageShards;
+                        page_id_t page;
+                        {
+                            std::lock_guard<std::mutex> lock(canonical_mutexes[shard]);
+                            auto it = canonical_pages[shard].find(data_key);
+                            if (it == canonical_pages[shard].end()) {
+                                auto entry = lookup(txn, table_ids[access_idx], keys[access_idx]);
+                                page = entry.page;
+                                canonical_pages[shard].emplace(data_key, page);
+                            } else {
+                                page = it->second;
+                                txn->accessed_page_ids.push_back(page);
+                            }
+                        }
+
+                        const uint64_t table_page =
+                            (static_cast<uint64_t>(table_ids[access_idx]) << 32) |
+                            static_cast<uint32_t>(page);
+                        sc.involved_pages.push_back(table_page);
+                        if (page != static_cast<page_id_t>(-1)) {
+                            sc.valid_page_count++;
+                            page_pairs.emplace_back(table_page, txn->tx_id);
+                        }
+                    }
+                }
+            }));
+    }
+    for (auto& fut : futs) fut.get();
+
+    struct timespec merge_start_time, merge_end_time;
+    clock_gettime(CLOCK_MONOTONIC, &merge_start_time);
+
+    std::vector<std::pair<uint64_t, tx_id_t>> all_page_pairs;
+    size_t total_pair_count = 0;
+    for (const auto& pairs : local_page_pairs) total_pair_count += pairs.size();
+    all_page_pairs.reserve(total_pair_count);
+    for (auto& pairs : local_page_pairs) {
+        all_page_pairs.insert(all_page_pairs.end(),
+                              std::make_move_iterator(pairs.begin()),
+                              std::make_move_iterator(pairs.end()));
+    }
+    std::sort(all_page_pairs.begin(), all_page_pairs.end());
+
+    if (SYSTEM_MODE == 29) {
+        for (const auto& sc : prepared->candidates) {
+            prepared->conflicted_txns.insert(sc.txn->tx_id);
+        }
+    } else {
+        for (size_t i = 0; i < all_page_pairs.size();) {
+            size_t range_end = i + 1;
+            while (range_end < all_page_pairs.size() &&
+                   all_page_pairs[range_end].first == all_page_pairs[i].first) {
+                ++range_end;
+            }
+            const tx_id_t first_txn = all_page_pairs[i].second;
+            bool has_distinct_txn = false;
+            for (size_t j = i + 1; j < range_end; ++j) {
+                if (all_page_pairs[j].second != first_txn) {
+                    has_distinct_txn = true;
+                    break;
+                }
+            }
+            if (has_distinct_txn) {
+                for (size_t j = i; j < range_end; ++j) {
+                    prepared->conflicted_txns.insert(all_page_pairs[j].second);
+                }
+            }
+            i = range_end;
+        }
+    }
+
+    for (size_t idx = 0; idx < n; ++idx) {
+        SchedulingCandidateTxn* sc = &prepared->candidates[idx];
+        prepared->txid_to_txn_map.emplace(sc->txn->tx_id, sc);
+        if (!prepared->conflicted_txns.count(sc->txn->tx_id)) continue;
+        prepared->global_conflicted_txids.push_back(sc->txn->tx_id);
+        for (uint64_t page : sc->involved_pages) {
+            if ((page & 0xFFFFFFFF) == 0xFFFFFFFF) continue;
+            prepared->global_page_pairs.emplace_back(page, sc->txn->tx_id);
+            prepared->unique_conflict_pages.push_back(page);
+        }
+    }
+
+    std::sort(prepared->global_page_pairs.begin(), prepared->global_page_pairs.end());
+    for (size_t i = 0; i < prepared->global_page_pairs.size();) {
+        const uint64_t page = prepared->global_page_pairs[i].first;
+        const size_t range_begin = i;
+        while (i < prepared->global_page_pairs.size() &&
+               prepared->global_page_pairs[i].first == page) {
+            ++i;
+        }
+        prepared->page_to_txn_range_map[page] = {
+            static_cast<uint32_t>(range_begin),
+            static_cast<uint32_t>(i - range_begin)};
+    }
+
+    std::sort(prepared->unique_conflict_pages.begin(), prepared->unique_conflict_pages.end());
+    prepared->unique_conflict_pages.erase(
+        std::unique(prepared->unique_conflict_pages.begin(), prepared->unique_conflict_pages.end()),
+        prepared->unique_conflict_pages.end());
+
+    clock_gettime(CLOCK_MONOTONIC, &merge_end_time);
+    time_stats_.merge_global_txid_to_txn_map_ms +=
+        (merge_end_time.tv_sec - merge_start_time.tv_sec) * 1000.0 +
+        (merge_end_time.tv_nsec - merge_start_time.tv_nsec) / 1000000.0;
+
+    struct timespec union_start_time, union_end_time;
+    clock_gettime(CLOCK_MONOTONIC, &union_start_time);
+    if (SYSTEM_MODE == 29) {
+        prepared->conflicted_txn_partitions.emplace_back(
+            prepared->conflicted_txns.begin(), prepared->conflicted_txns.end());
+    } else {
+        std::unordered_map<tx_id_t, tx_id_t> parent;
+        std::function<tx_id_t(tx_id_t)> find = [&](tx_id_t id) {
+            auto [it, inserted] = parent.emplace(id, id);
+            if (inserted || it->second == id) return id;
+            return it->second = find(it->second);
+        };
+        auto unite = [&](tx_id_t lhs, tx_id_t rhs) {
+            const tx_id_t lhs_root = find(lhs);
+            const tx_id_t rhs_root = find(rhs);
+            if (lhs_root != rhs_root) parent[lhs_root] = rhs_root;
+        };
+        for (const auto& [page, range] : prepared->page_to_txn_range_map) {
+            if (range.second <= 1) continue;
+            const tx_id_t first = prepared->global_page_pairs[range.first].second;
+            for (size_t j = 1; j < range.second; ++j) {
+                unite(first, prepared->global_page_pairs[range.first + j].second);
+            }
+        }
+        std::unordered_map<tx_id_t, std::vector<tx_id_t>> partitions;
+        for (tx_id_t tx_id : prepared->conflicted_txns) {
+            partitions[find(tx_id)].push_back(tx_id);
+        }
+        for (auto& [root, partition] : partitions) {
+            prepared->conflicted_txn_partitions.push_back(std::move(partition));
+        }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &union_end_time);
+    time_stats_.compute_union_ms +=
+        (union_end_time.tv_sec - union_start_time.tv_sec) * 1000.0 +
+        (union_end_time.tv_nsec - union_start_time.tv_nsec) / 1000000.0;
+
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    time_stats_.preprocess_txn_ms +=
+        (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+        (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+    return prepared;
+}
+
 // 这里不再将 std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> 作为返回值，而是直接将txn_queues_作为输入，
 // 这样做的好处是可以不等待这个函数处理完成整个batch后再返回结果，而是可以在函数内部直接将调度好的事务放入对应的txn_queues_中，
 // 从而可以降低worker端等待事务调度完成的结果，pipeline效率更高。
@@ -2311,16 +2544,46 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
 // 这样做的好处是可以不等待这个函数处理完成整个batch后再返回结果，而是可以在函数内部直接将调度好的事务放入对应的txn_queues_中，
 // 从而可以降低worker端等待事务调度完成的结果，pipeline效率更高。
 void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vector<TxnQueueEntry*>> &txn_batch) {
-    
+    auto prepared = preprocess_route_batch_v3(std::move(txn_batch));
+    if (prepared != nullptr) schedule_prepared_batch_v3(*prepared);
+}
+
+void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     assert(SYSTEM_MODE == 11 || SYSTEM_MODE == 26 || SYSTEM_MODE == 27 || SYSTEM_MODE == 29 || SYSTEM_MODE == 30); // 仅支持模式11
-    
+
+    auto& txn_batch = prepared.txn_batch;
+    auto& candidates = prepared.candidates;
+    auto& txid_to_txn_map = prepared.txid_to_txn_map;
+    auto& conflicted_txns = prepared.conflicted_txns;
+    auto& global_conflicted_txids = prepared.global_conflicted_txids;
+    auto& global_page_pairs = prepared.global_page_pairs;
+    auto& page_to_txn_range_map = prepared.page_to_txn_range_map;
+    auto& unique_conflict_pages = prepared.unique_conflict_pages;
+    auto& conflicted_txn_partitions = prepared.conflicted_txn_partitions;
+    const size_t n = txn_batch->size();
+    std::vector<std::future<void>> futs;
+    std::unordered_map<uint64_t, std::string> debug_pages;
+    {
+        std::shared_lock<std::shared_mutex> lock(hot_mutex_);
+        for (size_t i = 0; i < hottest_keys.size(); ++i) {
+            auto it = hot_key_map.find({0, hottest_keys[i]});
+            if (it != hot_key_map.end()) {
+                debug_pages[(static_cast<uint64_t>(0) << 32) | it->second.page] =
+                    "table: 0, key: " + std::to_string(hottest_keys[i]);
+            }
+            auto it1 = hot_key_map.find({1, hottest_keys[i]});
+            if (it1 != hot_key_map.end()) {
+                debug_pages[(static_cast<uint64_t>(1) << 32) | it1->second.page] =
+                    "table: 1, key: " + std::to_string(hottest_keys[i]);
+            }
+        }
+    }
+
     if (WarmupEnd)
         logger->info("[SmartRouter Scheduling] Start scheduling for txn batch of size " + std::to_string(txn_batch->size()));
 
-    // 计时
     struct timespec start_time, end_time;
-    clock_gettime(CLOCK_MONOTONIC, &start_time);
-
+#if 0
     // 并行前处理：每个 txn 独立生成 SchedulingCandidateTxn 和 involved_pages 列表
     size_t n = txn_batch->size();
     
@@ -2334,7 +2597,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     global_page_pairs.reserve(n * 4); // Heuristic
 
     forbid_update_hot_entry();
-    // for debug, i want see the key 1 is on which page
+    // Used only by optional batch-router debug logging later in this function.
     std::unordered_map<uint64_t, std::string> debug_pages;
     for(size_t i=0; i < hottest_keys.size(); i++) {
         auto it = hot_key_map.find({0, hottest_keys[i]});
@@ -2615,7 +2878,8 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     // 这里还没有获取 ownership 信息，后续再处理，合并之后首先要求事务之间的页面冲突关系，通过倒排索引
     // 以上为batch pipeline预处理的部分
     // !同步点，标志着上一个batch的事务执行完成
-    
+#endif
+
     // 计时
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     // waiting the pending txns to be pushed to txn_queues_
@@ -2743,6 +3007,7 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     futs.clear();
     size_t conflict_free_thread_count = std::min<size_t>(std::min<size_t>(worker_threads_, 64ul), n);
     if (conflict_free_thread_count == 0) conflict_free_thread_count = 1;
+    size_t conflict_free_chunk = (n + conflict_free_thread_count - 1) / conflict_free_thread_count;
     futs.reserve(conflict_free_thread_count);
     std::vector<double> compute_node_workload_benefit = this->workload_balance_penalty_weights_; // 负载均衡因子
     std::vector<double> remain_queue_balance_penalty_weights = this->remain_queue_balance_penalty_weights_; // 剩余队列负载均衡因子
@@ -2752,10 +3017,10 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
     }
     
     for (size_t t = 0; t < conflict_free_thread_count; ++t) {
-        size_t start = t * chunk;
-        size_t end = std::min(n, start + chunk);
-        futs.push_back(threadpool.enqueue([this, &txn_batch, &txid_to_txn_map, start, end, t, total_load_balance_penalty_weights, 
-                conflicted_txns, &page_ownership_to_node_map, &candidate_txn_cnt, &ownership_ok_txn_cnt_per_node, &page_to_txn_range_map, 
+        size_t start = t * conflict_free_chunk;
+        size_t end = std::min(n, start + conflict_free_chunk);
+        futs.push_back(threadpool.enqueue([this, &txn_batch, &txid_to_txn_map, start, end, t, &total_load_balance_penalty_weights,
+                &conflicted_txns, &page_ownership_to_node_map, &candidate_txn_cnt, &ownership_ok_txn_cnt_per_node, &page_to_txn_range_map,
                 &unconflict_and_ownership_ok_txn_cnt, &unconflict_and_ownership_cross_txn_cnt, &unconflict_and_shared_txn_cnt, 
                 &schedule_txn_cnt_per_node_this_batch, &expected_page_transfer_count_per_node]() {
             
@@ -2766,12 +3031,11 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
             for (size_t idx = start; idx < end; ++idx) {
                 // Periodically update weights based on current batch progress
                 if ((idx - start) % 500 == 0) {
-                    for(int i=0; i<ComputeNodeCount; i++) {
-                        std::vector<double> compute_node_workload_benefit = this->workload_balance_penalty_weights_; // 负载均衡因子
-                        std::vector<double> remain_queue_balance_penalty_weights = this->remain_queue_balance_penalty_weights_; // 剩余队列负载均衡因子
-                        for(int i=0; i<ComputeNodeCount; i++) {
-                            current_weights[i] = compute_node_workload_benefit[i] + remain_queue_balance_penalty_weights[i];
-                        }
+                    std::vector<double> compute_node_workload_benefit = this->workload_balance_penalty_weights_;
+                    std::vector<double> remain_queue_balance_penalty_weights = this->remain_queue_balance_penalty_weights_;
+                    for(int node_id=0; node_id<ComputeNodeCount; node_id++) {
+                        current_weights[node_id] =
+                            compute_node_workload_benefit[node_id] + remain_queue_balance_penalty_weights[node_id];
                     }
                 }
 
@@ -3949,44 +4213,46 @@ void SmartRouter::get_route_primary_batch_schedule_v3(std::unique_ptr<std::vecto
                 // !1.65 check 是否当前txn_queue中几乎没有事务了，如果没有事务，则调度一小部分ownership_ok_txn 事务，防止计算节点没有事情做, 填充流水线气泡
                 struct timespec fill_bubble_start_time, fill_bubble_end_time;
                 clock_gettime(CLOCK_MONOTONIC, &fill_bubble_start_time);
-                for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
-                    if(txn_queues_[node_id]->size() < 5) {
-                        auto& ok_queue = local_ownership_ok_txn_queues_list[t][node_id];
-                        if(ok_queue.empty()) continue;
-                        
-                        int fetch_count = 0;
-                        int max_fetch = 5; // 最多调度5个事务
+                if (Enable_Fill_Pipeline_Bubble) {
+                    for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
+                        if(txn_queues_[node_id]->size() < 5) {
+                            auto& ok_queue = local_ownership_ok_txn_queues_list[t][node_id];
+                            if(ok_queue.empty()) continue;
+                            
+                            int fetch_count = 0;
+                            int max_fetch = 5; // 最多调度5个事务
 
-                        // 随机选取一些事务(begin iterator is effectively random)
-                        for(auto it = ok_queue.begin(); it != ok_queue.end(); ) {
-                            tx_id_t tid = *it;
-                            SchedulingCandidateTxn* sc = txid_to_txn_map[tid];
-                            // check dependency, ensuring ref == 0
-                            if(sc->txn->ref.load(std::memory_order_acquire) == 0) {
-                                dag_ready_txn[node_id].push_back(sc->txn);
-                                sc->is_scheduled = true;
-                                it = ok_queue.erase(it);
-                                fetch_count++;
-                                if(fetch_count >= max_fetch) break;
-                            } else {
-                                ++it;
+                            // 随机选取一些事务(begin iterator is effectively random)
+                            for(auto it = ok_queue.begin(); it != ok_queue.end(); ) {
+                                tx_id_t tid = *it;
+                                SchedulingCandidateTxn* sc = txid_to_txn_map[tid];
+                                // check dependency, ensuring ref == 0
+                                if(sc->txn->ref.load(std::memory_order_acquire) == 0) {
+                                    dag_ready_txn[node_id].push_back(sc->txn);
+                                    sc->is_scheduled = true;
+                                    it = ok_queue.erase(it);
+                                    fetch_count++;
+                                    if(fetch_count >= max_fetch) break;
+                                } else {
+                                    ++it;
+                                }
                             }
-                        }
-                        
-                        size_t cnt = dag_ready_txn[node_id].size();
-                        if(cnt > 0) {
-                            txn_queues_[node_id]->push_txn_back_batch(std::move(dag_ready_txn[node_id]));
-                            assert(dag_ready_txn[node_id].empty());
-                            scheduled_front_txn_cnt += cnt;
-                            local_scheduled_front_txn_cnt[t] += cnt; 
+                            
+                            size_t cnt = dag_ready_txn[node_id].size();
+                            if(cnt > 0) {
+                                txn_queues_[node_id]->push_txn_back_batch(std::move(dag_ready_txn[node_id]));
+                                assert(dag_ready_txn[node_id].empty());
+                                scheduled_front_txn_cnt += cnt;
+                                local_scheduled_front_txn_cnt[t] += cnt; 
                         #if LOG_BATCH_ROUTER
-                            if(t==0)
-                            logger->info("[SmartRouter Scheduling] Batch id: " + std::to_string(batch_id) + 
-                                            " Thread " + std::to_string(t) + 
-                                            " Fill pipeline bubble: Scheduling " + std::to_string(cnt) + 
-                                            " ownership_ok txns to node " + std::to_string(node_id) + 
-                                            " to fill txn queue, now txn queue size: " + std::to_string(txn_queues_[node_id]->size()));
+                                if(t==0)
+                                logger->info("[SmartRouter Scheduling] Batch id: " + std::to_string(batch_id) + 
+                                                " Thread " + std::to_string(t) + 
+                                                " Fill pipeline bubble: Scheduling " + std::to_string(cnt) + 
+                                                " ownership_ok txns to node " + std::to_string(node_id) + 
+                                                " to fill txn queue, now txn queue size: " + std::to_string(txn_queues_[node_id]->size()));
                         #endif
+                            }
                         }
                     }
                 }
