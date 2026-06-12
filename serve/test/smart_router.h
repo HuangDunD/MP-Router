@@ -779,6 +779,7 @@ public:
 
     struct PreparedBatch {
         std::unique_ptr<std::vector<TxnQueueEntry*>> txn_batch;
+        double preprocess_ms = 0.0;
         std::vector<SchedulingCandidateTxn> candidates;
         std::unordered_map<tx_id_t, SchedulingCandidateTxn*> txid_to_txn_map;
         std::unordered_set<tx_id_t> conflicted_txns;
@@ -1405,6 +1406,7 @@ public:
             std::deque<std::unique_ptr<PreparedBatch>> registered_batches;
             std::mutex registered_mutex;
             std::condition_variable registered_cv;
+            std::condition_variable registered_space_cv;
             bool register_done = false;
 
             std::thread register_thread([&]() {
@@ -1418,6 +1420,14 @@ public:
 
                     // Refill before registering so preprocess continues while this batch waits for scheduling.
                     launch_next_preprocess();
+
+                    {
+                        std::unique_lock<std::mutex> lock(registered_mutex);
+                        registered_space_cv.wait(lock, [&]() {
+                            return registered_batches.size() <
+                                static_cast<size_t>(std::max(1, PreparedBatchQueueLimit));
+                        });
+                    }
 
                     struct timespec register_start, register_end;
                     clock_gettime(CLOCK_MONOTONIC, &register_start);
@@ -1455,6 +1465,7 @@ public:
                     prepared = std::move(registered_batches.front());
                     registered_batches.pop_front();
                 }
+                registered_space_cv.notify_one();
                 clock_gettime(CLOCK_MONOTONIC, &wait_prepared_end);
                 time_stats_.wait_prepared_batch_ms +=
                     (wait_prepared_end.tv_sec - wait_prepared_start.tv_sec) * 1000.0 +

@@ -1303,6 +1303,7 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
     const double preprocess_ms =
         (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
         (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+    prepared->preprocess_ms = preprocess_ms;
     {
         std::lock_guard<std::mutex> lock(preprocess_stats_mutex_);
         time_stats_.preprocess_lookup_ms += lookup_ms;
@@ -1610,6 +1611,13 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
             txn_queues_[i]->set_process_batch_id(batch_id);
         }
         batch_cv.notify_all();
+    }
+
+    struct timespec route_start_ts;
+    clock_gettime(CLOCK_MONOTONIC, &route_start_ts);
+    double route_start_ms = route_start_ts.tv_sec * 1000.0 + route_start_ts.tv_nsec / 1000000.0;
+    for (auto* txn_entry : *txn_batch) {
+        txn_entry->route_start_time = route_start_ms;
     }
     
     // 计时
@@ -3105,6 +3113,14 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
             txn_queues_[i]->set_process_batch_id(batch_id);
         }
         batch_cv.notify_all();
+    }
+
+    struct timespec route_start_ts;
+    clock_gettime(CLOCK_MONOTONIC, &route_start_ts);
+    double route_start_ms = route_start_ts.tv_sec * 1000.0 + route_start_ts.tv_nsec / 1000000.0;
+    double latency_start_ms = route_start_ms - prepared.preprocess_ms;
+    for (auto* txn_entry : *txn_batch) {
+        txn_entry->route_start_time = latency_start_ms;
     }
     
     // 计时

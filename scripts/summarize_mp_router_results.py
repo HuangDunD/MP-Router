@@ -13,13 +13,18 @@ SUMMARY_COLUMNS = [
     "workload",
     "access_pattern",
     "zipfian_theta",
+    "zipfian_generator",
     "hotspot_fraction",
     "hotspot_prob",
     "account_count",
+    "warehouse_count",
     "worker_threads",
     "affinity_txn_ratio",
     "batch_size",
     "num_bucket",
+    "key_page_ratio",
+    "mlp_enabled",
+    "scan_axis",
     "use_data_cache",
     "data_cache_path",
     "throughput_after_warmup_tps",
@@ -27,8 +32,12 @@ SUMMARY_COLUMNS = [
     "committed_transactions",
     "committed_transactions_after_warmup",
     "batch_local_conflicting_ratio",
+    "cache_fusion_receive_wait_count",
+    "cache_fusion_receive_total_time_s",
     "cache_fusion_receive_waits_per_txn",
     "cache_fusion_receive_avg_ms",
+    "cache_fusion_receive_waits_per_app_txn",
+    "cache_fusion_receive_time_ms_per_app_txn",
     "result_file",
     "kwr_file",
 ]
@@ -88,6 +97,13 @@ def clean_number(value):
     return value.replace(",", "").replace("%", "").strip()
 
 
+def to_float(value):
+    try:
+        return float(clean_number(str(value)))
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_result(path):
     text = read_text(path)
     return {
@@ -113,6 +129,37 @@ def header_index(header, candidates):
     return None
 
 
+def parse_cache_fusion_row(row, header):
+    wait_count_index = header_index(header, ["等待次数", "waits", "waitcount"])
+    total_time_index = header_index(header, ["总时间(s)", "总时间", "totaltime(s)", "totaltime"])
+    per_txn_index = header_index(header, ["每事务等待数", "waitspertxn", "waitpertxn"])
+    avg_ms_index = header_index(
+        header, ["平均时间(ms)", "平均时间", "avgwait(ms)", "avgwait", "averagetime(ms)"]
+    )
+
+    if wait_count_index is None and len(row) >= 2:
+        wait_count_index = 1
+    if total_time_index is None and len(row) >= 3:
+        total_time_index = 2
+    if avg_ms_index is None and len(row) >= 4:
+        avg_ms_index = 3
+
+    return {
+        "cache_fusion_receive_wait_count": clean_number(row[wait_count_index])
+        if wait_count_index is not None and wait_count_index < len(row)
+        else "",
+        "cache_fusion_receive_total_time_s": clean_number(row[total_time_index])
+        if total_time_index is not None and total_time_index < len(row)
+        else "",
+        "cache_fusion_receive_waits_per_txn": clean_number(row[per_txn_index])
+        if per_txn_index is not None and per_txn_index < len(row)
+        else "",
+        "cache_fusion_receive_avg_ms": clean_number(row[avg_ms_index])
+        if avg_ms_index is not None and avg_ms_index < len(row)
+        else "",
+    }
+
+
 def parse_kwr(path):
     if not path.exists():
         return {}
@@ -131,25 +178,27 @@ def parse_kwr(path):
                 ):
                     header = candidate
                     break
-            per_txn_index = header_index(header, ["每事务等待数", "waitspertxn", "waitpertxn"])
-            avg_ms_index = header_index(
-                header, ["平均时间(ms)", "平均时间", "avgwait(ms)", "avgwait", "averagetime(ms)"]
-            )
-            if avg_ms_index is None and len(row) >= 4:
-                avg_ms_index = 3
-            parsed = {
-                "cache_fusion_receive_waits_per_txn": clean_number(row[per_txn_index])
-                if per_txn_index is not None and per_txn_index < len(row)
-                else "",
-                "cache_fusion_receive_avg_ms": clean_number(row[avg_ms_index])
-                if avg_ms_index is not None and avg_ms_index < len(row)
-                else "",
-            }
-            if per_txn_index is not None:
+            parsed = parse_cache_fusion_row(row, header)
+            if parsed.get("cache_fusion_receive_waits_per_txn"):
                 return parsed
             if not fallback:
                 fallback = parsed
     return fallback
+
+
+def add_app_txn_cache_fusion_metrics(row):
+    app_txn_count = to_float(row.get("committed_transactions_after_warmup"))
+    if app_txn_count is None or app_txn_count <= 0:
+        app_txn_count = to_float(row.get("committed_transactions"))
+    if app_txn_count is None or app_txn_count <= 0:
+        return
+
+    wait_count = to_float(row.get("cache_fusion_receive_wait_count"))
+    total_time_s = to_float(row.get("cache_fusion_receive_total_time_s"))
+    if wait_count is not None:
+        row["cache_fusion_receive_waits_per_app_txn"] = f"{wait_count / app_txn_count:.6f}"
+    if total_time_s is not None:
+        row["cache_fusion_receive_time_ms_per_app_txn"] = f"{total_time_s * 1000.0 / app_txn_count:.6f}"
 
 
 def load_metadata(case_dir):
@@ -171,6 +220,7 @@ def collect_rows(result_dir):
         row.update(parse_result(result_path))
         if kwr_files:
             row.update(parse_kwr(kwr_path))
+        add_app_txn_cache_fusion_metrics(row)
         row["result_file"] = str(result_path)
         row["kwr_file"] = str(kwr_path) if kwr_files else ""
         rows.append(row)
@@ -191,7 +241,9 @@ def write_markdown(path, rows):
         "run_mode",
         "throughput_after_warmup_tps",
         "cache_fusion_receive_waits_per_txn",
+        "cache_fusion_receive_waits_per_app_txn",
         "cache_fusion_receive_avg_ms",
+        "cache_fusion_receive_time_ms_per_app_txn",
     ]
     with path.open("w", encoding="utf-8") as f:
         f.write(f"# MP-Router Result Summary\n\nCompleted cases: {len(rows)}\n\n")

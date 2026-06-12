@@ -30,18 +30,64 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_bufferin
 
 
 def kill_server():
+    os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8") as outfile:
         subprocess.run("ps -ef | grep run | grep -v grep | awk '{print $2}' | xargs kill -9",stdout=outfile, stderr=outfile,shell=True)
         subprocess.run("rm ./output.txt", stdout=outfile, stderr=outfile, shell=True)
     time.sleep(1)
 
 def build():
+    os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8") as outfile:
         subprocess.run("rm -rf ./build", stdout=outfile, stderr=outfile, shell=True)
         subprocess.run("mkdir ./build", stdout=outfile, stderr=outfile, shell=True)
         subprocess.run("cd ./build && cmake ..", shell=True)
         subprocess.run("cd ./build && make -j8", shell=True)
     time.sleep(1)
+
+original_config_h_text = None
+current_built_mlp_mode = None
+
+def set_mlp_prediction(enabled):
+    global original_config_h_text
+    config_path = os.path.join(workspace, "config.h")
+    with open(config_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    if original_config_h_text is None:
+        original_config_h_text = text
+    value = "1" if int(enabled) else "0"
+    new_text, count = re.subn(
+        r"^#define\s+MLP_PREDICTION\s+\d+(\s*//.*)?$",
+        lambda m: f"#define MLP_PREDICTION {value}{m.group(1) or ''}",
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if count != 1:
+        raise RuntimeError("Unable to find MLP_PREDICTION definition in config.h")
+    if new_text != text:
+        logging.info(f"Setting MLP_PREDICTION={value} in config.h")
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(new_text)
+
+def restore_config_h():
+    if original_config_h_text is None or not RestoreConfigAfterRun:
+        return
+    config_path = os.path.join(workspace, "config.h")
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(original_config_h_text)
+    logging.info("Restored original config.h")
+
+def ensure_build_for_mlp(mlp_enabled):
+    global current_built_mlp_mode
+    if current_built_mlp_mode == int(mlp_enabled):
+        return
+    if not RebuildForMLP and current_built_mlp_mode is not None:
+        raise RuntimeError("EnableMLP contains multiple values but RebuildForMLP is disabled.")
+    kill_server()
+    set_mlp_prediction(mlp_enabled)
+    build()
+    current_built_mlp_mode = int(mlp_enabled)
 
 def run_cmd(cmd, check=True):
     logging.info(f"Executing: {cmd}")
@@ -381,8 +427,26 @@ def reset_db_data(backup_path):
     wait_for_db_start()
     logging.info(">>> Database Reset Complete <<<")
 
-def data_cache_path(workload_name, account_count):
-    return f"/sharedata/kingbase/{workload_name}_{account_count}"
+def workload_scale_value(workload_name, account_count=None, warehouse_count=None):
+    if workload_name in ("tpcc", "tpcc-standard"):
+        return warehouse_count
+    return account_count
+
+def workload_scale_arg(workload_name, account_count=None, warehouse_count=None):
+    if workload_name in ("tpcc", "tpcc-standard"):
+        return f"--warehouse-count {warehouse_count}"
+    return f"--account-count {account_count}"
+
+def workload_scale_label(workload_name, account_count=None, warehouse_count=None):
+    if workload_name in ("tpcc", "tpcc-standard"):
+        return f"wh{warehouse_count}"
+    return f"acc{account_count}"
+
+def data_cache_path(workload_name, account_count=None, warehouse_count=None):
+    scale_value = workload_scale_value(workload_name, account_count, warehouse_count)
+    if workload_name == "smallbank":
+        return f"/sharedata/kingbase/{workload_name}_{scale_value}"
+    return f"/sharedata/kingbase/{workload_name}_{workload_scale_label(workload_name, account_count, warehouse_count)}"
 
 def data_cache_is_valid(backup_path):
     if not check_remote_exists(backup_path):
@@ -396,63 +460,269 @@ def data_cache_is_valid(backup_path):
         return False
     return True
 
-def ensure_data_cache(run_mode, access_pattern, account_count, worker_threads, extra_arg, force_reload=False):
-    backup_path = data_cache_path(workload, account_count)
+def ensure_data_cache(case, force_reload=False):
+    backup_path = data_cache_path(case["workload"], case.get("account_count"), case.get("warehouse_count"))
     if force_reload or not data_cache_is_valid(backup_path):
         reason = "--force-reload" if force_reload else "no valid cache was detected"
         logging.info(f"Preparing data cache {backup_path}: {reason}")
-        prepare_backup_data(
-            run_mode, access_pattern, account_count, worker_threads, extra_arg, backup_path
-        )
+        prepare_backup_data(case, backup_path)
     else:
         logging.info(f"Automatically using existing data cache: {backup_path}")
     return backup_path
 
-def build_case_plan():
-    cases = []
-    case_id = 0
-    for account_count in AccountCount:
-        for access_pattern in AccessPattern:
-            if access_pattern == 1:
-                param_list = ZipfianTheta
-            elif access_pattern == 2:
-                param_list = [(f, p) for f in HotspotFraction for p in HotspotProb]
-            else:
-                param_list = [None]
+def list_for_workload(mapping, workload_name, default_values):
+    if isinstance(mapping, dict):
+        return mapping.get(workload_name, default_values)
+    return default_values
 
-            for param in param_list:
-                zipfian_theta = param if access_pattern == 1 else None
-                zipfian_generator = ZipfianGenerator if access_pattern == 1 else None
-                hotspot_fraction, hotspot_prob = param if access_pattern == 2 else (None, None)
-                for num_bucket in NumBucket:
-                    for affinity_ratio in AffinityTxnRatio:
-                        for worker_thread_count in WorkerThreadCount:
-                            for batch_size in BatchSize:
-                                txn_sizes = LongTxnSize if EnableLongTxn else [None]
-                                key_page_ratios = KeyPageRatio if EnableKeyPageRatio else [None]
-                                for long_txn_length in txn_sizes:
-                                    for key_page_ratio in key_page_ratios:
-                                        for run_mode in RunModeType:
-                                            case_id += 1
-                                            cases.append({
-                                                "case_id": case_id,
-                                                "run_mode": run_mode,
-                                                "workload": workload,
-                                                "access_pattern": access_pattern,
-                                                "zipfian_theta": zipfian_theta,
-                                                "zipfian_generator": zipfian_generator,
-                                                "hotspot_fraction": hotspot_fraction,
-                                                "hotspot_prob": hotspot_prob,
-                                                "account_count": account_count,
-                                                "worker_threads": worker_thread_count,
-                                                "affinity_txn_ratio": affinity_ratio,
-                                                "batch_size": batch_size,
-                                                "num_bucket": num_bucket,
-                                                "long_txn_length": long_txn_length,
-                                                "key_page_ratio": key_page_ratio,
-                                                "use_data_cache": UseDataCache,
-                                                "data_cache_path": data_cache_path(workload, account_count),
-                                            })
+def access_patterns_for_workload(workload_name):
+    return list_for_workload(WorkloadAccessPatterns, workload_name, AccessPattern)
+
+def default_access_pattern_for_workload(workload_name):
+    if isinstance(DefaultAccessPattern, dict):
+        return DefaultAccessPattern.get(workload_name, access_patterns_for_workload(workload_name)[0])
+    return DefaultAccessPattern
+
+def default_scale_for_workload(workload_name):
+    if workload_name in ("tpcc", "tpcc-standard"):
+        return None, list_for_workload(WarehouseCount, workload_name, WarehouseCount)[0]
+    return list_for_workload(AccountCount, workload_name, AccountCount)[0], None
+
+def scale_values_for_workload(workload_name):
+    if workload_name in ("tpcc", "tpcc-standard"):
+        for warehouse_count in list_for_workload(WarehouseCount, workload_name, WarehouseCount):
+            yield None, warehouse_count
+    else:
+        for account_count in list_for_workload(AccountCount, workload_name, AccountCount):
+            yield account_count, None
+
+def default_access_config(workload_name):
+    access_pattern = default_access_pattern_for_workload(workload_name)
+    if access_pattern == 1:
+        return {
+            "access_pattern": access_pattern,
+            "zipfian_theta": DefaultZipfianTheta,
+            "zipfian_generator": ZipfianGenerator,
+            "hotspot_fraction": None,
+            "hotspot_prob": None,
+        }
+    if access_pattern == 2:
+        return {
+            "access_pattern": access_pattern,
+            "zipfian_theta": None,
+            "zipfian_generator": None,
+            "hotspot_fraction": DefaultHotspotFraction,
+            "hotspot_prob": DefaultHotspotProb,
+        }
+    return {
+        "access_pattern": access_pattern,
+        "zipfian_theta": None,
+        "zipfian_generator": None,
+        "hotspot_fraction": None,
+        "hotspot_prob": None,
+    }
+
+def access_configs_for_workload(workload_name):
+    configs = []
+    for access_pattern in access_patterns_for_workload(workload_name):
+        if access_pattern == 1:
+            for theta in ZipfianTheta:
+                configs.append({
+                    "access_pattern": access_pattern,
+                    "zipfian_theta": theta,
+                    "zipfian_generator": ZipfianGenerator,
+                    "hotspot_fraction": None,
+                    "hotspot_prob": None,
+                })
+        elif access_pattern == 2:
+            for hotspot_fraction in HotspotFraction:
+                for hotspot_prob in HotspotProb:
+                    configs.append({
+                        "access_pattern": access_pattern,
+                        "zipfian_theta": None,
+                        "zipfian_generator": None,
+                        "hotspot_fraction": hotspot_fraction,
+                        "hotspot_prob": hotspot_prob,
+                    })
+        else:
+            configs.append({
+                "access_pattern": access_pattern,
+                "zipfian_theta": None,
+                "zipfian_generator": None,
+                "hotspot_fraction": None,
+                "hotspot_prob": None,
+            })
+    return configs
+
+def base_case_config(workload_name, account_count=None, warehouse_count=None):
+    case = {
+        "workload": workload_name,
+        "account_count": account_count,
+        "warehouse_count": warehouse_count,
+        "worker_threads": DefaultWorkerThreads,
+        "affinity_txn_ratio": DefaultAffinityTxnRatio,
+        "batch_size": DefaultBatchSize,
+        "num_bucket": DefaultNumBucket,
+        "long_txn_length": DefaultLongTxnLength if EnableLongTxn else None,
+        "key_page_ratio": DefaultKeyPageMapCapacity,
+        "mlp_enabled": DefaultEnableMLP,
+        "use_data_cache": UseDataCache,
+        "scan_axis": "base",
+    }
+    case.update(default_access_config(workload_name))
+    return case
+
+def dedupe_case_configs(configs):
+    deduped = []
+    seen = set()
+    for case in configs:
+        key = (
+            case["workload"],
+            case.get("account_count"),
+            case.get("warehouse_count"),
+            case["access_pattern"],
+            case.get("zipfian_theta"),
+            case.get("zipfian_generator"),
+            case.get("hotspot_fraction"),
+            case.get("hotspot_prob"),
+            case["worker_threads"],
+            case["affinity_txn_ratio"],
+            case["batch_size"],
+            case["num_bucket"],
+            case.get("long_txn_length"),
+            case.get("key_page_ratio"),
+            case.get("mlp_enabled"),
+        )
+        if key not in seen:
+            seen.add(key)
+            deduped.append(case)
+    return deduped
+
+def build_axis_case_configs(workload_name, account_count=None, warehouse_count=None):
+    base = base_case_config(workload_name, account_count, warehouse_count)
+    configs = []
+
+    for access_config in access_configs_for_workload(workload_name):
+        case = dict(base)
+        case.update(access_config)
+        case["scan_axis"] = "access"
+        configs.append(case)
+
+    for worker_threads in WorkerThreadCount:
+        case = dict(base)
+        case["worker_threads"] = worker_threads
+        case["scan_axis"] = "worker_threads"
+        configs.append(case)
+
+    for batch_size in BatchSize:
+        case = dict(base)
+        case["batch_size"] = batch_size
+        case["scan_axis"] = "batch_size"
+        configs.append(case)
+
+    for key_page_ratio in KeyPageMapCapacity:
+        case = dict(base)
+        case["key_page_ratio"] = key_page_ratio
+        case["scan_axis"] = "key_page_capacity"
+        configs.append(case)
+
+    for mlp_enabled in EnableMLP:
+        case = dict(base)
+        case["mlp_enabled"] = mlp_enabled
+        case["scan_axis"] = "mlp"
+        configs.append(case)
+
+    return dedupe_case_configs(configs)
+
+def build_full_case_configs(workload_name, account_count=None, warehouse_count=None):
+    configs = []
+    long_txn_sizes = LongTxnSize if EnableLongTxn else [None]
+    for access_config in access_configs_for_workload(workload_name):
+        for worker_threads in WorkerThreadCount:
+            for batch_size in BatchSize:
+                for key_page_ratio in KeyPageMapCapacity:
+                    for mlp_enabled in EnableMLP:
+                        for affinity_ratio in AffinityTxnRatio:
+                            for num_bucket in NumBucket:
+                                for long_txn_length in long_txn_sizes:
+                                    case = {
+                                        "workload": workload_name,
+                                        "account_count": account_count,
+                                        "warehouse_count": warehouse_count,
+                                        "worker_threads": worker_threads,
+                                        "affinity_txn_ratio": affinity_ratio,
+                                        "batch_size": batch_size,
+                                        "num_bucket": num_bucket,
+                                        "long_txn_length": long_txn_length,
+                                        "key_page_ratio": key_page_ratio,
+                                        "mlp_enabled": mlp_enabled,
+                                        "use_data_cache": UseDataCache,
+                                        "scan_axis": "full",
+                                    }
+                                    case.update(access_config)
+                                    configs.append(case)
+    return dedupe_case_configs(configs)
+
+def build_case_configs_for_workload(workload_name, account_count=None, warehouse_count=None):
+    if SweepMode == "axis":
+        return build_axis_case_configs(workload_name, account_count, warehouse_count)
+    if SweepMode == "full":
+        return build_full_case_configs(workload_name, account_count, warehouse_count)
+    raise ValueError(f"Unknown SweepMode: {SweepMode}")
+
+def build_case_plan():
+    main_case_pairs = []
+    mlp_case_pairs = []
+    seen = set()
+    baseline_mlp = int(DefaultEnableMLP)
+    mlp_run_modes = MLPRunModeType if MLPRunModeType else RunModeType
+
+    def case_key(case_config, run_mode):
+        return (
+            case_config["workload"],
+            case_config.get("account_count"),
+            case_config.get("warehouse_count"),
+            case_config["access_pattern"],
+            case_config.get("zipfian_theta"),
+            case_config.get("zipfian_generator"),
+            case_config.get("hotspot_fraction"),
+            case_config.get("hotspot_prob"),
+            case_config["worker_threads"],
+            case_config["affinity_txn_ratio"],
+            case_config["batch_size"],
+            case_config["num_bucket"],
+            case_config.get("long_txn_length"),
+            case_config.get("key_page_ratio"),
+            case_config.get("mlp_enabled"),
+            run_mode,
+        )
+
+    case_id = 0
+    for workload_name in Workloads:
+        for account_count, warehouse_count in scale_values_for_workload(workload_name):
+            for case_config in build_case_configs_for_workload(workload_name, account_count, warehouse_count):
+                is_mlp_delta = (
+                    case_config.get("scan_axis") == "mlp"
+                    and int(case_config.get("mlp_enabled", baseline_mlp)) != baseline_mlp
+                )
+                run_modes = mlp_run_modes if is_mlp_delta else RunModeType
+                for run_mode in run_modes:
+                    key = case_key(case_config, run_mode)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    case = dict(case_config)
+                    case["run_mode"] = run_mode
+                    case["data_cache_path"] = data_cache_path(workload_name, account_count, warehouse_count)
+                    if is_mlp_delta:
+                        mlp_case_pairs.append(case)
+                    else:
+                        main_case_pairs.append(case)
+
+    cases = main_case_pairs + mlp_case_pairs
+    for case in cases:
+        case_id += 1
+        case["case_id"] = case_id
     return cases
 
 def write_case_plan(cases, plan_path):
@@ -495,23 +765,40 @@ def case_group_dir_name(case):
     if case.get("hotspot_prob") is not None:
         parts.append(f"HsProb{value_for_path(case['hotspot_prob'])}")
     parts.extend([
-        f"c{case['account_count']}",
+        workload_scale_label(case["workload"], case.get("account_count"), case.get("warehouse_count")),
         f"t{case['worker_threads']}",
         f"r{value_for_path(case['affinity_txn_ratio'])}",
         f"b{case['batch_size']}",
         f"nb{case['num_bucket']}",
+        f"kp{value_for_path(case['key_page_ratio'])}",
+        f"mlp{case['mlp_enabled']}",
     ])
     if case.get("long_txn_length") is not None:
         parts.append(f"lt{case['long_txn_length']}")
-    if case.get("key_page_ratio") is not None:
-        parts.append(f"kp{value_for_path(case['key_page_ratio'])}")
     return "_".join(parts)
 
 def summarize_result_dir(result_dir):
     summary_script = os.path.join(workspace, "scripts", "summarize_mp_router_results.py")
     subprocess.run([sys.executable, summary_script, result_dir], check=False)
 
-def prepare_backup_data(run_mode, access_pattern, account_count, worker_threads, extra_arg, backup_path):
+def access_extra_args(case):
+    if case["access_pattern"] == 1:
+        return f" --zipfian-theta {case['zipfian_theta']} --zipfian-generator {case['zipfian_generator']}"
+    if case["access_pattern"] == 2:
+        return f" --hotspot-fraction {case['hotspot_fraction']} --hotspot-prob {case['hotspot_prob']}"
+    return ""
+
+def extend_sizes_for_case(case):
+    if case["workload"] not in ("tpcc", "tpcc-standard") and case.get("account_count") is not None:
+        account_count = case["account_count"]
+        if account_count <= 2000000:
+            return 100000, 10000
+        if account_count <= 5000000:
+            return 200000, 30000
+        return 800000, 80000
+    return sys_extend_size, sys_index_extend_size
+
+def prepare_backup_data(case, backup_path):
     logging.info(f">>> Preparing Backup Data (Load & Backup) to {backup_path} <<<")
     
     # 1. 确保数据库是启动状态
@@ -520,9 +807,13 @@ def prepare_backup_data(run_mode, access_pattern, account_count, worker_threads,
 
     # 2. 运行导入数据 (使用 --load-data-only)
     # 使用 build 目录下的 run
+    sys_extend, sys_index_extend = extend_sizes_for_case(case)
     cmd = (
-        f"./run --workload {workload} --load-data-only --system-mode {run_mode} --access-pattern {access_pattern}{extra_arg} "
-        f"--account-count {account_count} --worker-threads {worker_threads} --sys_extend_size {sys_extend_size} --sys_index_extend_size {sys_index_extend_size}"
+        f"./run --workload {case['workload']} --load-data-only --system-mode {case['run_mode']} "
+        f"--access-pattern {case['access_pattern']}{access_extra_args(case)} "
+        f"{workload_scale_arg(case['workload'], case.get('account_count'), case.get('warehouse_count'))} "
+        f"--worker-threads {case['worker_threads']} "
+        f"--sys_extend_size {sys_extend} --sys_index_extend_size {sys_index_extend}"
     )
     if Unlog:
         cmd += " --unlog"
@@ -604,6 +895,12 @@ RunModeType = [0, 2, 11, 13, 23, 25]
 # ! system: 0 随机路由, 2 page hash 11 MP-Router 13 MP-Router without scheduling 23 metis 24 ownership + load 25 load
 # RunModeType = [13]
 # RunModeType = [1]
+Workloads = ["smallbank", "tpcc"] # one script run can cover multiple workloads
+WorkloadAccessPatterns = {
+    "smallbank": [1, 2, 0],
+    "tpcc": [1, 2, 0],
+}
+SweepMode = "axis" # axis: vary one dimension from defaults; full: Cartesian product
 AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
 # AccessPattern = [1]
 # ZipfianTheta = [0.4]
@@ -616,6 +913,7 @@ HotspotProb = [0.8]
 # HotspotProb = [0.8, 0.9, 0.95]
 # account = 100W, 单个表大概14W个页面, 每个页面8KB, 大小约1.1GB
 AccountCount = [5000000]
+WarehouseCount = [200]
 # WorkerThreadCount = [16]
 WorkerThreadCount = [16]
 try_count = 35000
@@ -625,7 +923,7 @@ RunSeconds = 30
 FillPipelineBubble = 0
 Unlog = 1
 UseDataCache = False # True: restore workload data cache before each case; False: do not restart DB, load data in each run
-workload = "smallbank"
+workload = Workloads[0]
 sys_extend_size = 300000
 sys_index_extend_size = 30000
 AffinityTxnRatio = [0.8]
@@ -635,8 +933,26 @@ BatchSize = [10000] # default 10000
 NumBucket = [4]
 EnableLongTxn = 0 # 0:disable, 1:enable
 LongTxnSize = [4, 8, 12, 14, 16, 20] # only valid when EnableLongTxn=1
-EnableKeyPageRatio = 0 # 0:disable, 1:enable
-KeyPageRatio = [0.2, 0.4, 0.6, 0.8, 1.0] # only valid when EnableKeyPageRatio=1
+KeyPageMapCapacity = [1.1] # passed to --key-page-ratio
+EnableMLP = [0] # 0:disable, 1:enable; changing this requires rebuilding with MLP_PREDICTION
+MLPRunModeType = [11] # MLP-delta cases run only these modes; baseline MLP=0 reuses normal sweep results
+RebuildForMLP = True
+RestoreConfigAfterRun = True
+
+DefaultAccessPattern = {
+    "smallbank": 1,
+    "tpcc": 1,
+}
+DefaultZipfianTheta = 0.7
+DefaultHotspotFraction = 0.01
+DefaultHotspotProb = 0.8
+DefaultWorkerThreads = WorkerThreadCount[0]
+DefaultBatchSize = BatchSize[0]
+DefaultKeyPageMapCapacity = KeyPageMapCapacity[0]
+DefaultEnableMLP = EnableMLP[0]
+DefaultAffinityTxnRatio = AffinityTxnRatio[0]
+DefaultNumBucket = NumBucket[0]
+DefaultLongTxnLength = LongTxnSize[0]
 
 # -------------------------------------------- # main test logic -------------------------------------------- #
 
@@ -688,198 +1004,131 @@ if __name__ == "__main__":
     figure_path = os.path.join(os.getcwd(), time_str)
     planned_cases = build_case_plan()
     write_case_plan(planned_cases, os.path.join(figure_path, "case_plan.tsv"))
-    planned_case_iter = iter(planned_cases)
     if args.plan_only:
         logging.info(f"Plan-only mode completed: {figure_path}")
         raise SystemExit(0)
 
     # !开始本次的测试
     os.chdir(workspace)
-
-    if AccountCount[0] <= 2000000:
-        sys_extend_size = 100000
-    elif AccountCount[0] <= 5000000:
-        sys_extend_size = 200000
-    else:
-        sys_extend_size = 800000
-
-    if AccountCount[0] <= 2000000:
-        sys_index_extend_size = 10000
-    elif AccountCount[0] <= 5000000:
-        sys_index_extend_size = 30000
-    else:
-        sys_index_extend_size = 80000
-
-    kill_server()
-    build()
+    atexit.register(restore_config_h)
     
     # 标记是否已经准备好备份数据
     current_backup_key = None 
 
-    for account_count in AccountCount:
-        for access_pattern in AccessPattern:
-            # 只有 access_pattern == 1 (zipfian) 才遍历 ZipfianTheta，其余模式不遍历
-            if access_pattern == 1:
-                param_list = ZipfianTheta
-            elif access_pattern == 2:
-                param_list = [(f, p) for f in HotspotFraction for p in HotspotProb]
+    for case in planned_cases:
+        ensure_build_for_mlp(case["mlp_enabled"])
+        backup_path = case["data_cache_path"]
+        if UseDataCache and backup_path != current_backup_key:
+            backup_path = ensure_data_cache(case, force_reload=args.force_reload)
+            current_backup_key = backup_path
+
+        attempt = 0
+        success = False
+
+        if UseDataCache:
+            reset_db_data(backup_path)
+        # 确保 server 进程被清理
+        kill_server()
+
+        # 删除之前的结果文件，防止误判
+        if os.path.exists(result):
+            os.remove(result)
+
+        os.chdir(Run_Path)
+        while attempt < max_try and not success:
+            attempt += 1
+            extra_part_log = ""
+            if case["access_pattern"] == 1:
+                extra_part_log = f", ZipfianTheta={case['zipfian_theta']}, ZipfianGenerator={case['zipfian_generator']}"
+            elif case["access_pattern"] == 2:
+                extra_part_log = f", HotspotFraction={case['hotspot_fraction']}, HotspotProb={case['hotspot_prob']}"
+
+            scale_label = workload_scale_label(case["workload"], case.get("account_count"), case.get("warehouse_count"))
+            logging.info(
+                f"Running case {case['case_id']} with Workload={case['workload']}, RunMode={case['run_mode']}, "
+                f"AccessPattern={case['access_pattern']}{extra_part_log}, Scale={scale_label}, "
+                f"WorkerThreads={case['worker_threads']}, BatchSize={case['batch_size']}, "
+                f"KeyPageCapacity={case['key_page_ratio']}, MLP={case['mlp_enabled']}, Attempt={attempt}"
+            )
+            kwr_report_name = (
+                f"kwr_{time_str}_case{case['case_id']:03d}"
+                f"_mode{case['run_mode']}_access{case['access_pattern']}"
+                f"_{case['workload']}_{scale_label}_thd{case['worker_threads']}"
+            )
+
+            sys_extend, sys_index_extend = extend_sizes_for_case(case)
+            cmd = (
+                f"./run --workload {case['workload']} --system-mode {case['run_mode']} "
+                f"--access-pattern {case['access_pattern']}{access_extra_args(case)} "
+                f"{workload_scale_arg(case['workload'], case.get('account_count'), case.get('warehouse_count'))} "
+                f"--worker-threads {case['worker_threads']} --kwr-name {kwr_report_name}"
+                f" --sys_extend_size {sys_extend} --sys_index_extend_size {sys_index_extend} "
+                f"--affinity-txn-ratio {case['affinity_txn_ratio']} "
+                f" --batch-size {case['batch_size']} --num-bucket {case['num_bucket']}"
+                f" --key-page-ratio {case['key_page_ratio']}"
+            )
+            if UseDataCache:
+                cmd += " --skip-load-data"
+
+            if TimeRun:
+                cmd += f" --time-run --warmup-seconds {WarmupSeconds} --run-seconds {RunSeconds} --fill-pipeline-bubble {FillPipelineBubble}"
+                if Unlog:
+                    cmd += " --unlog"
             else:
-                param_list = [None]
-            
-            for param in param_list:
-                zipfian_theta = None
-                zipfian_generator = None
-                hotspot_fraction = None
-                hotspot_prob = None
-                
-                if access_pattern == 1:
-                    zipfian_theta = param
-                    zipfian_generator = ZipfianGenerator
-                elif access_pattern == 2:
-                    hotspot_fraction, hotspot_prob = param
+                current_try_count = try_count
+                if EnableLongTxn and case.get("long_txn_length"):
+                    current_try_count = 35000 // case["long_txn_length"]
+                cmd += f" --try-count {current_try_count}"
 
-                # 构造 extra_arg 用于 load data
-                extra_arg_load = ""
-                if access_pattern == 1:
-                    extra_arg_load = f" --zipfian-theta {zipfian_theta} --zipfian-generator {zipfian_generator}"
-                elif access_pattern == 2:
-                    extra_arg_load = f" --hotspot-fraction {hotspot_fraction} --hotspot-prob {hotspot_prob}"
+            if EnableLongTxn and case.get("long_txn_length"):
+                cmd += f" --enable-long-txn --long-txn-length {case['long_txn_length']}"
 
-                backup_path = data_cache_path(workload, account_count)
-                if UseDataCache and backup_path != current_backup_key:
-                    backup_path = ensure_data_cache(
-                        RunModeType[0],
-                        access_pattern,
-                        account_count,
-                        WorkerThreadCount[0],
-                        extra_arg_load,
-                        force_reload=args.force_reload,
-                    )
-                    current_backup_key = backup_path
+            with open(output, "w", encoding="utf-8") as outfile:
+                process = subprocess.Popen(cmd, shell=True)
+                process.wait()
+            if os.path.exists(result):
+                success = True
+                logging.info("Test completed successfully.")
 
-                for num_bucket in NumBucket:
-                    for affinity_ratio in AffinityTxnRatio:
-                        for worker_thread_count in WorkerThreadCount:
-                            for batch_size in BatchSize:
-                                current_txn_sizes = LongTxnSize if EnableLongTxn else [None]
-                                current_key_page_ratios = KeyPageRatio if EnableKeyPageRatio else [None]
-                                for long_txn_length in current_txn_sizes:
-                                    for key_page_ratio in current_key_page_ratios:
-                                        for run_mode in RunModeType:
-                                            case = next(planned_case_iter)
-                                            attempt = 0
-                                            success = False
+                # 同一组负载参数放在一个目录下，mode 作为下一层目录，避免顶层结果过散。
+                dest_dir = os.path.join(
+                    figure_path,
+                    case_group_dir_name(case),
+                    f"m{case['run_mode']}",
+                )
+                os.makedirs(dest_dir, exist_ok=True)
+                write_case_metadata(case, dest_dir, kwr_report_name, cmd)
 
-                                            if UseDataCache:
-                                                reset_db_data(backup_path)
-                                            # 确保 server 进程被清理
-                                            kill_server()
+                # 使用shutil复制文件，保持内容一致
+                dest_file = os.path.join(dest_dir, "result.txt")
+                shutil.copy2(result, dest_file)
+                log_file = os.path.join(dest_dir, "partitioning_log.log")
+                shutil.copy2(log, log_file)
 
-                                            # 删除之前的结果文件，防止误判
-                                            if os.path.exists(result):
-                                                os.remove(result)
+                # scp 将远程服务器的 kwr 报告文件复制到本地对应的结果文件夹中
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh.connect(kwr_report_ip, username="root", password=kwr_ip_password)
+                sftp = ssh.open_sftp()
+                remote_run_report = os.path.join(kwr_report_path, f"{kwr_report_name}_end.html")
+                local_run_report = os.path.join(dest_dir, f"{kwr_report_name}_end.html")
+                try:
+                    sftp.get(remote_run_report, local_run_report)
+                except Exception as e:
+                    logging.error(f"\033[31m Failed to retrieve KWR report files: {e} \033[0m")
+                sftp.close()
+                ssh.close()
+                summarize_result_dir(figure_path)
+            else:
+                logging.warning("Result file not found, retrying...")
+        if not success:
+            logging.error(
+                f"Test failed after {max_try} attempts for case {case['case_id']}: "
+                f"Workload={case['workload']}, RunMode={case['run_mode']}, AccessPattern={case['access_pattern']}, "
+                f"Scale={workload_scale_label(case['workload'], case.get('account_count'), case.get('warehouse_count'))}"
+            )
 
-                                            os.chdir(Run_Path)
-                                            while attempt < max_try and not success:
-                                                attempt += 1
-                                                extra_part_log = ""
-                                                if access_pattern == 1:
-                                                    extra_part_log = f", ZipfianTheta={zipfian_theta}, ZipfianGenerator={zipfian_generator}"
-                                                elif access_pattern == 2:
-                                                    extra_part_log = f", HotspotFraction={hotspot_fraction}, HotspotProb={hotspot_prob}"
-
-                                                logging.info(
-                                                    f"Running test with RunMode={run_mode}, AccessPattern={access_pattern}{extra_part_log}, AccountCount={account_count}, WorkerThreads={worker_thread_count}, Attempt={attempt}"
-                                                )
-                                                kwr_report_name = (
-                                                    f"kwr_{time_str}_case{case['case_id']:03d}"
-                                                    f"_mode{run_mode}_access{access_pattern}"
-                                                    f"_acc{account_count}_thd{worker_thread_count}"
-                                                )
-
-                                                # 构造命令
-                                                extra_arg = ""
-                                                if access_pattern == 1:
-                                                    extra_arg = f" --zipfian-theta {zipfian_theta} --zipfian-generator {zipfian_generator}"
-                                                elif access_pattern == 2:
-                                                    extra_arg = f" --hotspot-fraction {hotspot_fraction} --hotspot-prob {hotspot_prob}"
-
-                                                cmd = (
-                                                    f"./run --workload {workload} --system-mode {run_mode} --access-pattern {access_pattern}{extra_arg} "
-                                                    f"--account-count {account_count} --worker-threads {worker_thread_count} --kwr-name {kwr_report_name}"
-                                                    f" --sys_extend_size {sys_extend_size} --sys_index_extend_size {sys_index_extend_size} --affinity-txn-ratio {affinity_ratio} "
-                                                    f" --batch-size {batch_size} --num-bucket {num_bucket}"
-                                                )
-                                                if UseDataCache:
-                                                    cmd += " --skip-load-data"
-
-                                                if TimeRun:
-                                                    cmd += f" --time-run --warmup-seconds {WarmupSeconds} --run-seconds {RunSeconds} --fill-pipeline-bubble {FillPipelineBubble}"
-                                                    if Unlog:
-                                                        cmd += " --unlog"
-                                                else:
-                                                    current_try_count = try_count
-                                                    if EnableLongTxn:
-                                                        current_try_count = 35000 // long_txn_length
-                                                    cmd += f" --try-count {current_try_count}"
-
-                                                if EnableLongTxn:
-                                                    cmd += f" --enable-long-txn --long-txn-length {long_txn_length}"
-
-                                                if EnableKeyPageRatio:
-                                                    cmd += f" --key-page-ratio {key_page_ratio}"
-
-                                                with open(output, "w", encoding="utf-8") as outfile:
-                                                    process = subprocess.Popen(cmd, shell=True)
-                                                    process.wait()
-                                                if os.path.exists(result):
-                                                    success = True
-                                                    logging.info("Test completed successfully.")
-
-                                                    # 同一组负载参数放在一个目录下，mode 作为下一层目录，避免顶层结果过散。
-                                                    dest_dir = os.path.join(
-                                                        figure_path,
-                                                        case_group_dir_name(case),
-                                                        f"m{run_mode}",
-                                                    )
-                                                    os.makedirs(dest_dir, exist_ok=True)
-                                                    write_case_metadata(case, dest_dir, kwr_report_name, cmd)
-
-                                                    # 使用shutil复制文件，保持内容一致
-                                                    dest_file = os.path.join(dest_dir, "result.txt")
-                                                    shutil.copy2(result, dest_file)
-                                                    log_file = os.path.join(dest_dir, "partitioning_log.log")
-                                                    shutil.copy2(log, log_file)
-
-                                                    # scp 将远程服务器的 kwr 报告文件复制到本地对应的结果文件夹中
-                                                    ssh = paramiko.SSHClient()
-                                                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                                                    ssh.connect(kwr_report_ip, username="root", password=kwr_ip_password)
-                                                    sftp = ssh.open_sftp()
-                                                    remote_warm_report = os.path.join(kwr_report_path, f"{kwr_report_name}_fisrt.html")
-                                                    remote_run_report = os.path.join(kwr_report_path, f"{kwr_report_name}_end.html")
-                                                    local_warm_report = os.path.join(dest_dir, f"{kwr_report_name}_fisrt.html")
-                                                    local_run_report = os.path.join(dest_dir, f"{kwr_report_name}_end.html")
-                                                    try:
-                                                        # sftp.get(remote_warm_report, local_warm_report)
-                                                        sftp.get(remote_run_report, local_run_report)
-                                                    except Exception as e:
-                                                        logging.error(f"\033[31m Failed to retrieve KWR report files: {e} \033[0m")
-                                                    sftp.close()
-                                                    ssh.close()
-                                                    summarize_result_dir(figure_path)
-                                                else:
-                                                    logging.warning("Result file not found, retrying...")
-                                            if not success:
-                                                theta_err = (
-                                                    f", ZipfianTheta={zipfian_theta}, ZipfianGenerator={zipfian_generator}"
-                                                    if access_pattern == 1 else ""
-                                                )
-                                                logging.error(
-                                                    f"Test failed after {max_try} attempts for RunMode={run_mode}, AccessPattern={access_pattern}{theta_err}, AccountCount={account_count}, WorkerThreads={worker_thread_count}"
-                                                )
-
-                                            time.sleep(test_interval_seconds)
+        time.sleep(test_interval_seconds)
     kill_server()
     summarize_result_dir(figure_path)
     logging.info("All tests completed.")

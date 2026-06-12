@@ -81,15 +81,20 @@ private:
                 // 相同槽、相同 id 的情况理论上不会发生（tx_id 唯一）
                 assert(false);
             }
-            bool was_done = old_ptr->done.load(std::memory_order_acquire);
-            if (was_done) {
+            if (old_ptr->done.load(std::memory_order_acquire)) {
                 // 已完成，可安全交给后台线程回收
                 completed_to_reclaim.push_back(old_ptr);
             } else {
-                // 未完成，放入延迟集合，等 mark_done 时删除
+                // mark_done may race with the slot overwrite above. Recheck while
+                // holding defer_mutex_ so a just-finished transaction is reclaimed
+                // instead of being stranded in deferred_.
                 std::lock_guard<std::mutex> lk(defer_mutex_);
-                deferred_.insert(old_ptr);
-                logger_->warning("Transaction ID " + std::to_string(old_id) + " deferred for deletion.");
+                if (old_ptr->done.load(std::memory_order_acquire)) {
+                    completed_to_reclaim.push_back(old_ptr);
+                } else {
+                    deferred_.insert(old_ptr);
+                    logger_->warning("Transaction ID " + std::to_string(old_id) + " deferred for deletion.");
+                }
             }
         }
     }
@@ -159,9 +164,10 @@ public:
             if (cb) cb(ready_txns, finish_call_id);
         }
 
+        entry->done.store(true, std::memory_order_release);
+
         if (cur == entry && cur_id == entry->tx_id) {
             // 仍在表中：不立即删除，等待下一次覆盖回收
-            entry->done.store(true, std::memory_order_release);
             slot.status.store(TxnStatus::Done, std::memory_order_release);
             return;
         }

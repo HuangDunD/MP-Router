@@ -66,6 +66,7 @@ extern int TxnPoolMaxSize; // 事务池的最大大小
 extern int TxnQueueMaxSize; // 事务队列的最大大小
 extern int BatchRouterProcessSize; // 每次批量路由处理的事务数量
 extern int PreprocessBatchConcurrency; // 同时允许预处理的batch数量
+extern int PreparedBatchQueueLimit; // 已预处理且等待调度的batch队列上限
 extern int PreprocessInternalThreads; // 单个batch内部preprocess并行度；<=0 表示沿用RouterInternalThreads
 extern int BatchExecutorPOPTxnSize; // 每次批量执行pop的事务数量
 extern int PreExtendPageSize; // 预分配页面大小

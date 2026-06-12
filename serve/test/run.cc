@@ -46,6 +46,12 @@ static bool should_record_after_warmup_latency(bool database_committed = true) {
     return WarmupEnd && database_committed && measurement_window_open();
 }
 
+static double latency_start_time_ms(const TxnQueueEntry* txn_entry) {
+    if (txn_entry == nullptr) return 0.0;
+    if (txn_entry->route_start_time > 0) return txn_entry->route_start_time;
+    return txn_entry->fetch_time;
+}
+
 static void force_stop_txn_queues() {
     for (auto* txn_queue : txn_queues) {
         if (txn_queue != nullptr) {
@@ -761,8 +767,9 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
             if (should_record_after_warmup_latency()) {
                 if (params->latency_record) params->latency_record->push_back(exec_time);
-                if (params->fetch_latency_record && txn_entry->fetch_time > 0) {
-                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                double latency_start_ms = latency_start_time_ms(txn_entry);
+                if (params->fetch_latency_record && latency_start_ms > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
             }
 
@@ -1016,8 +1023,9 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
             if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
-                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
-                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                double latency_start_ms = latency_start_time_ms(txn_entry);
+                if(params->fetch_latency_record && latency_start_ms > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
             }
 
@@ -1280,8 +1288,9 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
             if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
-                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
-                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                double latency_start_ms = latency_start_time_ms(txn_entry);
+                if(params->fetch_latency_record && latency_start_ms > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
             }
 
@@ -1376,8 +1385,9 @@ void run_mysql_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
             if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
-                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
-                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                double latency_start_ms = latency_start_time_ms(txn_entry);
+                if(params->fetch_latency_record && latency_start_ms > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
             }
 
@@ -1484,8 +1494,9 @@ void run_mysql_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
             if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
-                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
-                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                double latency_start_ms = latency_start_time_ms(txn_entry);
+                if(params->fetch_latency_record && latency_start_ms > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
             }
 
@@ -1748,8 +1759,9 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
             if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
-                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
-                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                double latency_start_ms = latency_start_time_ms(txn_entry);
+                if(params->fetch_latency_record && latency_start_ms > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
             }
 
@@ -1896,6 +1908,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --fill-pipeline-bubble <0|1> Enable pipeline-bubble filling during conflict scheduling [default: 1]" << std::endl;
     std::cout << "  --important-router-batch-log <0|1> Enable important per-batch SmartRouter logs [default: 1]" << std::endl;
     std::cout << "  --preprocess-batch-concurrency <n> Concurrent FIFO batch preprocessors [default: 1]" << std::endl;
+    std::cout << "  --prepared-batch-queue-limit <n> Prepared batches allowed to wait after TIT registration [default: 2]" << std::endl;
     std::cout << "  --preprocess-internal-threads <n> Threads inside one preprocess batch [default: router-threads]" << std::endl;
     std::cout << "  --time-run                  Run by wall-clock time instead of try-count" << std::endl;
     std::cout << "  --warmup-seconds <sec>      Warmup duration for --time-run [default: 180]" << std::endl;
@@ -2300,8 +2313,9 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
             if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
-                if(params->fetch_latency_record && txn_entry->fetch_time > 0) {
-                     params->fetch_latency_record->push_back(current_time_ms - txn_entry->fetch_time);
+                double latency_start_ms = latency_start_time_ms(txn_entry);
+                if(params->fetch_latency_record && latency_start_ms > 0) {
+                     params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
             }
 
@@ -2880,6 +2894,20 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--prepared-batch-queue-limit") {
+            if (i + 1 < argc) {
+                PreparedBatchQueueLimit = std::stoi(argv[++i]);
+                if (PreparedBatchQueueLimit <= 0) {
+                    std::cerr << "Error: prepared batch queue limit must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Prepared batch queue limit set to: " << PreparedBatchQueueLimit << std::endl;
+            } else {
+                std::cerr << "Error: --prepared-batch-queue-limit requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else if (arg == "--preprocess-internal-threads") {
             if (i + 1 < argc) {
                 PreprocessInternalThreads = std::stoi(argv[++i]);
@@ -3098,6 +3126,7 @@ int main(int argc, char *argv[]) {
     std::cout << "Router-only benchmark: " << (router_only ? "on" : "off") << std::endl;
     std::cout << "Fill pipeline bubble: " << (Enable_Fill_Pipeline_Bubble ? "on" : "off") << std::endl;
     std::cout << "Preprocess batch concurrency: " << PreprocessBatchConcurrency << std::endl;
+    std::cout << "Prepared batch queue limit: " << PreparedBatchQueueLimit << std::endl;
     std::cout << "Preprocess internal threads: " << PreprocessInternalThreads << std::endl;
 
     if (router_only && Workload_Type != 0) {
@@ -3512,7 +3541,7 @@ int main(int argc, char *argv[]) {
     const size_t estimated_inflight_txns =
         static_cast<size_t>(TxnPoolMaxSize) +
         static_cast<size_t>(ComputeNodeCount) * static_cast<size_t>(TxnQueueMaxSize) +
-        static_cast<size_t>(std::max(1, PreprocessBatchConcurrency + 2)) *
+        static_cast<size_t>(std::max(1, PreprocessBatchConcurrency + PreparedBatchQueueLimit + 1)) *
             static_cast<size_t>(BatchRouterProcessSize);
     const size_t tit_table_size = std::max<size_t>(1000000, estimated_inflight_txns * 2);
     std::cout << "TIT table size: " << tit_table_size << std::endl;
@@ -3959,7 +3988,7 @@ int main(int argc, char *argv[]) {
         std::cout << "No transactions recorded after warmup for latency stats." << std::endl;
     }
 
-    // --- Fetch to Complete Latency Statistics (After Warmup) ---
+    // --- Preprocess + Route to Complete Latency Statistics (After Warmup) ---
     std::vector<double> all_fetch_latencies;
     total_size = 0;
     for (const auto& v : worker_fetch_latencies) total_size += v.size();
@@ -3976,7 +4005,7 @@ int main(int argc, char *argv[]) {
         double p95 = all_fetch_latencies[static_cast<size_t>(all_fetch_latencies.size() * 0.95)];
         double p99 = all_fetch_latencies[static_cast<size_t>(all_fetch_latencies.size() * 0.99)];
         
-        std::cout << "Fetch-to-Complete Latency Statistics (After Warmup):" << std::endl;
+        std::cout << "Preprocess-and-Route-to-Complete Latency Statistics (After Warmup):" << std::endl;
         std::cout << "  Average: " << avg << " ms" << std::endl;
         std::cout << "  P50: " << p50 << " ms" << std::endl;
         std::cout << "  P95: " << p95 << " ms" << std::endl;
