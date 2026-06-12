@@ -949,7 +949,9 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
     uint64_t zipf_seed = 2 * thread_id * GetCPUCycle();
     uint64_t zipf_seed_mask = (uint64_t(1) << 48) - 1;
     if (use_finite_zipfian) {
-        finite_zipfian_gen = new FiniteZipfGen(get_account_count(), zipfian_theta, zipf_seed & zipf_seed_mask);
+        // 仅让线程0负责填充全局hottest_keys，避免并发写冲突和重复填充
+        std::vector<uint64_t>* hot_keys_ptr = (thread_id == 0) ? &hottest_keys : nullptr;
+        finite_zipfian_gen = new FiniteZipfGen(get_account_count(), zipfian_theta, zipf_seed & zipf_seed_mask, NumBucket, hot_keys_ptr);
     } else {
         // 仅让线程0负责填充全局hottest_keys，避免并发写冲突和重复填充
         std::vector<uint64_t>* hot_keys_ptr = (thread_id == 0) ? &hottest_keys : nullptr;
