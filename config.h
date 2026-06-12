@@ -49,7 +49,8 @@ extern int DB_TYPE;
 // for log
 extern std::string partition_log_file_; 
 
-extern int worker_threads; // 工作线程数量, 路由和RAC节点建立的连接数
+extern int worker_threads; // 每个计算节点的执行/数据库连接线程数
+extern int RouterInternalThreads; // SmartRouter内部并行线程数；<=0 表示沿用 worker_threads
 extern std::vector<std::string> DBConnection; // for PostgreSQL
 extern std::vector<YashanConnInfo> YashanDBConnections; // for YashanDB
 extern std::vector<MySQLConnInfo> MySQLConnections; // for MySQL
@@ -64,6 +65,8 @@ extern bool WarmupEnd;  // 标记是否完成了warmup阶段
 extern int TxnPoolMaxSize; // 事务池的最大大小
 extern int TxnQueueMaxSize; // 事务队列的最大大小
 extern int BatchRouterProcessSize; // 每次批量路由处理的事务数量
+extern int PreprocessBatchConcurrency; // 同时允许预处理的batch数量
+extern int PreprocessInternalThreads; // 单个batch内部preprocess并行度；<=0 表示沿用RouterInternalThreads
 extern int BatchExecutorPOPTxnSize; // 每次批量执行pop的事务数量
 extern int PreExtendPageSize; // 预分配页面大小
 extern int PreExtendIndexPageSize; // 预分配索引页面大小
@@ -77,6 +80,7 @@ extern bool Enable_Long_Txn; // 是否启用长事务
 extern int Long_Txn_Length; // 长事务的长度
 extern double Key_Page_Map_Cache_Ratio; // 能缓存key-page映射的比例, 0.0-1.0
 extern bool Enable_Fill_Pipeline_Bubble; // 是否启用batch router中的流水线气泡填充优化
+extern bool Enable_Important_Router_Batch_Log; // 是否启用mode 11重要逐batch调度日志
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;

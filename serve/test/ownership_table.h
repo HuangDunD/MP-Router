@@ -21,6 +21,11 @@ public:
     bool mode = false; // false表示shared, true表示exclusive
 };
 
+struct OwnershipSnapshot {
+    uint64_t owner_mask = 0;
+    bool mode = false; // false表示shared, true表示exclusive
+};
+
 class OwnershipTable {
 public:
     OwnershipTable(Logger* logger) : logger(logger), ownership_changes_per_txn_type(SYS_8_DECISION_TYPE_COUNT) {
@@ -89,6 +94,27 @@ public:
         table_id_t table_id = static_cast<table_id_t>(table_page_id >> 32);
         page_id_t page_id = static_cast<page_id_t>(table_page_id & 0xFFFFFFFF);
         return std::move(get_owner(table_id, page_id));
+    }
+
+    OwnershipSnapshot get_owner_fast(table_id_t table_id, page_id_t page_id) const {
+        if (table_id < 0 || table_id >= MAX_DB_TABLE_NUM) assert(false);
+        if (page_id < 0 || page_id >= MAX_DB_PAGE_NUM) assert(false);
+        const auto& entry = table_[table_id][page_id];
+        std::unique_lock lock(entry->mutex);
+        OwnershipSnapshot snapshot;
+        snapshot.mode = entry->mode;
+        for (node_id_t owner : entry->owners) {
+            if (owner >= 0 && owner < ComputeNodeCount && owner < 64) {
+                snapshot.owner_mask |= (1ull << owner);
+            }
+        }
+        return snapshot;
+    }
+
+    OwnershipSnapshot get_owner_fast(uint64_t table_page_id) const {
+        table_id_t table_id = static_cast<table_id_t>(table_page_id >> 32);
+        page_id_t page_id = static_cast<page_id_t>(table_page_id & 0xFFFFFFFF);
+        return get_owner_fast(table_id, page_id);
     }
 
     // 设置页面所有权, 如果所有权发生变化返回true，否则返回false

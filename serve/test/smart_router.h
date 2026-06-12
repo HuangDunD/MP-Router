@@ -11,6 +11,7 @@
 #include <random>
 #include <algorithm>
 #include <mutex>
+#include <shared_mutex>
 #include <iostream>
 #include <string>
 #include <atomic>
@@ -19,6 +20,7 @@
 #include <cmath>
 #include <array>
 #include <future>
+#include <deque>
 
 #include "common.h"
 #include "btree_search.h"
@@ -104,20 +106,34 @@ public:
         // 时间开销细分
         double fetch_txn_from_pool_ms = 0.0;
         double wait_prepared_batch_ms = 0.0;
+        double launch_next_preprocess_ms = 0.0;
+        double register_batch_with_tit_ms = 0.0;
+        double prepared_batch_destroy_ms = 0.0;
         double schedule_total_ms = 0.0;
+        double batch_boundary_gap_ms = 0.0;
+        double schedule_entry_setup_ms = 0.0;
+        double batch_finish_log_ms = 0.0;
+        double post_schedule_finish_cleanup_ms = 0.0;
+        uint64_t pending_cleanup_fast_skip_count = 0;
         double push_txn_to_queue_ms = 0.0;
         double push_txn_to_queue_wall_ms = 0.0;
             // for batch scheduling
             double preprocess_txn_ms = 0.0;
+            uint64_t preprocess_completed_txn_count = 0;
             double wait_pending_txn_push_ms = 0.0;
             double wait_last_batch_finish_ms = 0.0;
             double preprocess_lookup_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
+            double preprocess_merge_page_pairs_ms = 0.0;
             double get_page_ownership_ms = 0.0;
             double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double compute_union_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
             double ownership_retrieval_and_devide_unconflicted_txn_ms = 0.0; 
             double process_conflicted_txn_ms = 0.0;
+            double conflict_free_path_worker_wall_ms = 0.0;
+            uint64_t batch_local_total_txn_count = 0;
+            uint64_t batch_local_conflict_free_txn_count = 0;
+            uint64_t batch_local_conflicted_txn_count = 0;
                 double merge_and_construct_ipq_ms = 0.0;
                 double select_condidate_txns_ms = 0.0;
                 double compute_transfer_page_ms = 0.0;
@@ -125,6 +141,8 @@ public:
                 double decide_txn_schedule_ms = 0.0;
                 double add_txn_dependency_ms = 0.0;
                 double push_prioritized_txns_ms = 0.0;
+                double push_prioritized_scan_register_ms = 0.0;
+                double push_prioritized_queue_push_ms = 0.0;
                 double fill_pipeline_bubble_ms = 0.0;
                 double push_end_txns_ms = 0.0;
                 double final_push_to_queues_ms = 0.0;
@@ -154,15 +172,15 @@ public:
 
     struct Stats {
         // 当前大小
-        std::size_t hot_hash_entries = 0;
+        std::atomic<std::size_t> hot_hash_entries = 0;
         std::size_t btree_bytes = 0; // 追踪但不受大小限制
         // 查找计数
-        std::uint64_t hot_hit = 0;
-        std::uint64_t hot_miss = 0;
+        std::atomic<std::uint64_t> hot_hit = 0;
+        std::atomic<std::uint64_t> hot_miss = 0;
         std::uint64_t btree_hit = 0; // 范围提示命中
         std::uint64_t btree_miss = 0; // 无提示，需访问
         // 驱逐计数
-        std::uint64_t evict_hot_entries = 0;
+        std::atomic<std::uint64_t> evict_hot_entries = 0;
         // 页面更新计数
         std::atomic<int> change_page_cnt = 0;
         std::atomic<int> page_update_cnt = 0;
@@ -250,18 +268,22 @@ public:
     };
 
 public:
-    explicit SmartRouter(const Config &cfg, TxnPool* txn_pool, std::vector<TxnQueue*> txn_queue, PendingTxnSet* pending_txn_queue_, int worker_threads,
+    explicit SmartRouter(const Config &cfg, TxnPool* txn_pool, std::vector<TxnQueue*> txn_queue, PendingTxnSet* pending_txn_queue_, int db_worker_threads, int router_internal_threads,
             BtreeIndexService *btree_service, NewMetis* metis = nullptr, Logger* logger_ptr = nullptr, SmallBank* smallbank = nullptr, YCSB* ycsb = nullptr, TPCC* tpcc = nullptr)
         : cfg_(cfg),
           txn_pool_(txn_pool),
           txn_queues_(txn_queue),
-          db_con_worker_threads(worker_threads),
-          worker_threads_(worker_threads),
+          db_con_worker_threads(db_worker_threads),
+          worker_threads_(std::max(1, router_internal_threads)),
           logger(logger_ptr),
           btree_service_(btree_service),
           metis_(metis),
-          threadpool(4 * worker_threads, *logger),
-          preprocess_threadpool(static_cast<size_t>(std::max(1, std::min(worker_threads, 8))), *logger),
+          threadpool(4 * std::max(1, router_internal_threads), *logger),
+          preprocess_threadpool(
+              static_cast<size_t>(std::max(1, std::min(std::max(1, PreprocessInternalThreads), 8))) *
+                  static_cast<size_t>(std::max(1, PreprocessBatchConcurrency)),
+              *logger),
+          cleanup_threadpool(1, *logger),
           routed_txn_cnt_per_node(MaxComputeNodeCount), 
           batch_finished_flags(MaxComputeNodeCount, 0),
           workload_balance_penalty_weights_(MaxComputeNodeCount, 0),
@@ -284,15 +306,15 @@ public:
         time_stats_.schedule_decision_ms_per_thread.resize(worker_threads_, 0.0);
         time_stats_.push_txn_to_queue_ms_per_thread.resize(worker_threads_, 0.0);
 
-        time_stats_.pop_txn_from_queue_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
-        time_stats_.pop_txn_empty_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
-        time_stats_.pop_txn_dag_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
-        time_stats_.pop_txn_regular_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
-        time_stats_.wait_next_batch_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
-        time_stats_.worker_thread_exec_time_ms.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
-        time_stats_.worker_thread_update_key_page_time_ms.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
-        time_stats_.mark_done_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
-        time_stats_.log_debug_info_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(worker_threads_, 0.0));
+        time_stats_.pop_txn_from_queue_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.pop_txn_empty_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.pop_txn_dag_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.pop_txn_regular_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.wait_next_batch_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.worker_thread_exec_time_ms.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.worker_thread_update_key_page_time_ms.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.mark_done_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.log_debug_info_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
 
         time_stats_.pop_txn_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.pop_txn_empty_total_ms_per_node.resize(ComputeNodeCount, 0.0);
@@ -505,13 +527,11 @@ public:
 #endif // MLP_PREDICTION
 
     void forbid_update_hot_entry() {
-        std::unique_lock<std::shared_mutex> lock(hot_mutex_);
-        enable_hot_update = false; 
+        enable_hot_update.store(false, std::memory_order_release);
     }
 
     void allow_update_hot_entry() {
-        std::unique_lock<std::shared_mutex> lock(hot_mutex_);
-        enable_hot_update = true; 
+        enable_hot_update.store(true, std::memory_order_release);
     }
 
     // 可能Update SQL执行之后数据页所在的位置, 根据returning ctid 进行更新key-page映射
@@ -550,12 +570,14 @@ public:
                 // 这个地方应该是访问了原来的页面和新的页面, 都变成了这个节点的所有     
                 ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], ctid_ret_pages[i], routed_node_id);
                 ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], original_page, routed_node_id); 
-                if(enable_hot_update == false) continue; // 如果不允许更新hot entry, 直接跳过
-                std::unique_lock<std::shared_mutex> lock(hot_mutex_);
-                auto it = hot_key_map.find({table_ids[i], keys[i]});
-                if (it != hot_key_map.end()) {
+                if(!enable_hot_update.load(std::memory_order_acquire)) continue; // 如果不允许更新hot entry, 直接跳过
+                const DataItemKey data_key{table_ids[i], keys[i]};
+                auto& shard = hot_key_shard_(data_key);
+                std::unique_lock<std::shared_mutex> lock(shard.mutex);
+                auto it = shard.map.find(data_key);
+                if (it != shard.map.end()) {
                     // 更新page
-                    if(enable_hot_update) it->second.page = ctid_ret_pages[i];
+                    if(enable_hot_update.load(std::memory_order_relaxed)) it->second.page = ctid_ret_pages[i];
                     // 毫秒级时间戳
                     it->second.last_access_time = static_cast<uint64_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -579,29 +601,31 @@ public:
     inline void initial_key_page(table_id_t table_id, itemkey_t key, page_id_t page) {
         if (!key_page_map_enabled_) return;
     #if !MLP_PREDICTION
-        if(stats_.hot_hash_entries > cfg_.hot_hash_entry_limit) return; // 超预算则不插入新条目
-        std::unique_lock<std::shared_mutex> lock(hot_mutex_);
-        auto it = hot_key_map.find({table_id, key});
-        if (it == hot_key_map.end()) {
+        if(stats_.hot_hash_entries.load(std::memory_order_relaxed) > cfg_.hot_hash_entry_limit) return; // 超预算则不插入新条目
+        const DataItemKey data_key{table_id, key};
+        auto& shard = hot_key_shard_(data_key);
+        std::unique_lock<std::shared_mutex> lock(shard.mutex);
+        auto it = shard.map.find(data_key);
+        if (it == shard.map.end()) {
             // 插入新条目
-            hot_lru_.push_front({table_id, key});
+            shard.lru.push_front(data_key);
             HotEntry entry;
             entry.page = page;
             entry.freq = 1;
-            entry.lru_it = hot_lru_.begin();
-            hot_key_map.emplace(DataItemKey{table_id, key}, std::move(entry));
-            stats_.hot_hash_entries++;
+            entry.lru_it = shard.lru.begin();
+            shard.map.emplace(data_key, std::move(entry));
+            stats_.hot_hash_entries.fetch_add(1, std::memory_order_relaxed);
             // std::cout << "Initialized hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
             // 检查是否超预算, 超预算则驱逐
-            while (stats_.hot_hash_entries > cfg_.hot_hash_entry_limit && !hot_lru_.empty()) {
-                DataItemKey evict_key = hot_lru_.back();
-                auto evict_it = hot_key_map.find(evict_key);
-                if (evict_it != hot_key_map.end()) {
-                    stats_.hot_hash_entries--;
-                    stats_.evict_hot_entries++;
-                    hot_key_map.erase(evict_it);
+            while (stats_.hot_hash_entries.load(std::memory_order_relaxed) > cfg_.hot_hash_entry_limit && !shard.lru.empty()) {
+                DataItemKey evict_key = shard.lru.back();
+                auto evict_it = shard.map.find(evict_key);
+                if (evict_it != shard.map.end()) {
+                    stats_.hot_hash_entries.fetch_sub(1, std::memory_order_relaxed);
+                    stats_.evict_hot_entries.fetch_add(1, std::memory_order_relaxed);
+                    shard.map.erase(evict_it);
                 }
-                hot_lru_.pop_back();
+                shard.lru.pop_back();
                 // std::cout << "Evicted hot key: (table_id=" << evict_key.table_id << ", key=" << evict_key.key << ")" <<
                 //         std::endl;
             }
@@ -737,6 +761,7 @@ public:
     struct SchedulingCandidateTxn {
         TxnQueueEntry* txn;
         std::vector<uint64_t> involved_pages;
+        std::vector<int32_t> conflict_page_indexes;
         std::vector<bool> rw_flags; 
         std::vector<int> ownership_node_count; // 记录每个节点作为ownership节点的页面数量
         // 在这里面存储对应页面的metis node和ownership node, 这样可以避免全局维护一个page_to_node_map，对map修改需要mutex锁
@@ -747,6 +772,8 @@ public:
         bool is_scheduled = false; // 是否已经被调度, 避免重复调度
         int hot_level = 0; // 热点级别
         int dense_id = -1; // 线程本地稠密ID, 用于优化IPQ
+        int batch_dense_id = -1; // batch内稠密ID, 用于避免调度热路径反复hash tx_id
+        bool is_conflicted = false;
         int valid_page_count = 0; // 有效页面数量
     };
 
@@ -755,11 +782,13 @@ public:
         std::vector<SchedulingCandidateTxn> candidates;
         std::unordered_map<tx_id_t, SchedulingCandidateTxn*> txid_to_txn_map;
         std::unordered_set<tx_id_t> conflicted_txns;
-        std::vector<tx_id_t> global_conflicted_txids;
-        std::vector<std::pair<uint64_t, tx_id_t>> global_page_pairs;
+        std::vector<SchedulingCandidateTxn*> global_conflicted_txns;
+        std::vector<std::pair<uint64_t, SchedulingCandidateTxn*>> global_page_pairs;
         std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> page_to_txn_range_map;
+        std::unordered_map<uint64_t, uint32_t> conflict_page_index_map;
+        std::vector<std::pair<uint32_t, uint32_t>> conflict_page_ranges;
         std::vector<uint64_t> unique_conflict_pages;
-        std::vector<std::vector<tx_id_t>> conflicted_txn_partitions;
+        std::vector<std::vector<SchedulingCandidateTxn*>> conflicted_txn_partitions;
     };
 
     void compute_benefit_for_node(SchedulingCandidateTxn* sc, std::vector<int>& ownership_node_count, std::vector<double>& compute_node_workload_benefit,
@@ -1334,7 +1363,7 @@ public:
 
         batch_id = -1; // 对于流水线模式，初始batch_id为-1，因为同步点get_route_primary_batch_schedule_v2中会先+1
         if (SYSTEM_MODE == 11) {
-            auto fetch_and_preprocess = [this]() -> std::unique_ptr<PreparedBatch> {
+            auto fetch_batch = [this]() -> std::unique_ptr<std::vector<TxnQueueEntry*>> {
                 struct timespec fetch_start, fetch_end;
                 clock_gettime(CLOCK_MONOTONIC, &fetch_start);
                 auto txn_batch = txn_pool_->fetch_batch_txns_from_pool(
@@ -1343,27 +1372,93 @@ public:
                 time_stats_.fetch_txn_from_pool_ms +=
                     (fetch_end.tv_sec - fetch_start.tv_sec) * 1000.0 +
                     (fetch_end.tv_nsec - fetch_start.tv_nsec) / 1000000.0;
-                return preprocess_route_batch_v3(std::move(txn_batch));
+                return txn_batch;
             };
 
-            auto next_prepared = std::async(std::launch::async, fetch_and_preprocess);
+            std::deque<std::future<std::unique_ptr<PreparedBatch>>> prepared_futures;
+            bool input_exhausted = false;
+            auto launch_next_preprocess = [&]() {
+                if (input_exhausted) return false;
+                auto txn_batch = fetch_batch();
+                if (txn_batch == nullptr) {
+                    input_exhausted = true;
+                    return false;
+                }
+                struct timespec launch_start, launch_end;
+                clock_gettime(CLOCK_MONOTONIC, &launch_start);
+                prepared_futures.emplace_back(std::async(
+                    std::launch::async,
+                    [this, txn_batch = std::move(txn_batch)]() mutable {
+                        return preprocess_route_batch_v3(std::move(txn_batch));
+                    }));
+                clock_gettime(CLOCK_MONOTONIC, &launch_end);
+                time_stats_.launch_next_preprocess_ms +=
+                    (launch_end.tv_sec - launch_start.tv_sec) * 1000.0 +
+                    (launch_end.tv_nsec - launch_start.tv_nsec) / 1000000.0;
+                return true;
+            };
+
+            for (int i = 0; i < std::max(1, PreprocessBatchConcurrency); ++i) {
+                if (!launch_next_preprocess()) break;
+            }
+
+            std::deque<std::unique_ptr<PreparedBatch>> registered_batches;
+            std::mutex registered_mutex;
+            std::condition_variable registered_cv;
+            bool register_done = false;
+
+            std::thread register_thread([&]() {
+                while (!prepared_futures.empty()) {
+                    auto prepared = prepared_futures.front().get();
+                    prepared_futures.pop_front();
+                    if (prepared == nullptr) {
+                        input_exhausted = true;
+                        continue;
+                    }
+
+                    // Refill before registering so preprocess continues while this batch waits for scheduling.
+                    launch_next_preprocess();
+
+                    struct timespec register_start, register_end;
+                    clock_gettime(CLOCK_MONOTONIC, &register_start);
+                    txn_pool_->register_batch_with_tit(*prepared->txn_batch);
+                    clock_gettime(CLOCK_MONOTONIC, &register_end);
+                    time_stats_.register_batch_with_tit_ms +=
+                        (register_end.tv_sec - register_start.tv_sec) * 1000.0 +
+                        (register_end.tv_nsec - register_start.tv_nsec) / 1000000.0;
+
+                    {
+                        std::lock_guard<std::mutex> lock(registered_mutex);
+                        registered_batches.push_back(std::move(prepared));
+                    }
+                    registered_cv.notify_one();
+                }
+                {
+                    std::lock_guard<std::mutex> lock(registered_mutex);
+                    register_done = true;
+                }
+                registered_cv.notify_all();
+            });
+
             while (true) {
                 struct timespec wait_prepared_start, wait_prepared_end;
                 clock_gettime(CLOCK_MONOTONIC, &wait_prepared_start);
-                auto prepared = next_prepared.get();
+                std::unique_ptr<PreparedBatch> prepared;
+                {
+                    std::unique_lock<std::mutex> lock(registered_mutex);
+                    registered_cv.wait(lock, [&]() {
+                        return register_done || !registered_batches.empty();
+                    });
+                    if (registered_batches.empty()) {
+                        break;
+                    }
+                    prepared = std::move(registered_batches.front());
+                    registered_batches.pop_front();
+                }
                 clock_gettime(CLOCK_MONOTONIC, &wait_prepared_end);
                 time_stats_.wait_prepared_batch_ms +=
                     (wait_prepared_end.tv_sec - wait_prepared_start.tv_sec) * 1000.0 +
                     (wait_prepared_end.tv_nsec - wait_prepared_start.tv_nsec) / 1000000.0;
-                if (prepared == nullptr) {
-                    for (auto txn_queue : txn_queues_) txn_queue->set_finished();
-                    batch_cv.notify_all();
-                    break;
-                }
-
-                // Keep at most one batch ahead. Its preprocessing overlaps this batch's scheduling.
-                next_prepared = std::async(std::launch::async, fetch_and_preprocess);
-                txn_pool_->register_batch_with_tit(*prepared->txn_batch);
 
                 struct timespec schedule_start, schedule_end;
                 clock_gettime(CLOCK_MONOTONIC, &schedule_start);
@@ -1372,7 +1467,23 @@ public:
                 time_stats_.schedule_total_ms +=
                     (schedule_end.tv_sec - schedule_start.tv_sec) * 1000.0 +
                     (schedule_end.tv_nsec - schedule_start.tv_nsec) / 1000000.0;
+
+                struct timespec destroy_start, destroy_end;
+                clock_gettime(CLOCK_MONOTONIC, &destroy_start);
+                if (cleanup_threadpool.get_pending_task_count() >= kMaxPendingCleanupBatches) {
+                    prepared.reset();
+                } else {
+                    auto retired = std::shared_ptr<PreparedBatch>(prepared.release());
+                    cleanup_threadpool.enqueue([retired]() {});
+                }
+                clock_gettime(CLOCK_MONOTONIC, &destroy_end);
+                time_stats_.prepared_batch_destroy_ms +=
+                    (destroy_end.tv_sec - destroy_start.tv_sec) * 1000.0 +
+                    (destroy_end.tv_nsec - destroy_start.tv_nsec) / 1000000.0;
             }
+            register_thread.join();
+            for (auto txn_queue : txn_queues_) txn_queue->set_finished();
+            batch_cv.notify_all();
             std::cout << "Router worker thread finished." << std::endl;
             return;
         }
@@ -1628,8 +1739,16 @@ public:
     }
 
 private:
+    struct OwnershipOkResult {
+        bool ok = false;
+        node_id_t first_node = -1;
+        uint64_t node_mask = 0;
+    };
+
     std::vector<node_id_t> checkif_txn_ownership_ok(SchedulingCandidateTxn* sc);
+    OwnershipOkResult check_txn_ownership_ok_fast(const SchedulingCandidateTxn* sc);
     void update_sc_ownership_count(SchedulingCandidateTxn* sc, int page_idx, const std::pair<std::vector<node_id_t>, bool>& old_ownership, const std::pair<std::vector<node_id_t>, bool>& new_ownership);
+    void update_sc_ownership_count_fast(SchedulingCandidateTxn* sc, int page_idx, const OwnershipSnapshot& ownership);
 
     std::vector<double> compute_load_balance_penalty_weights();
     std::vector<double> compute_remain_queue_balance_penalty_weights();
@@ -1665,18 +1784,20 @@ private:
             return empty_entry;
         }
     #if !MLP_PREDICTION
-        std::shared_lock<std::shared_mutex> lock(hot_mutex_);
-        auto it = hot_key_map.find({table_id, key});
-        if (it != hot_key_map.end()) {
+        const DataItemKey data_key{table_id, key};
+        const auto& shard = hot_key_shard_(data_key);
+        std::shared_lock<std::shared_mutex> lock(shard.mutex);
+        auto it = shard.map.find(data_key);
+        if (it != shard.map.end()) {
             // hot hash 命中
-            stats_.hot_hit++;
+            stats_.hot_hit.fetch_add(1, std::memory_order_relaxed);
             it->second.freq.fetch_add(1, std::memory_order_relaxed);
             // !不需要更新 LRU 列表，只需要标记 referenced
             it->second.referenced.store(true, std::memory_order_relaxed);
             txn->accessed_page_ids.push_back(it->second.page); // 记录访问过的page id
             return it->second;
         } else { 
-            stats_.hot_miss++;
+            stats_.hot_miss.fetch_add(1, std::memory_order_relaxed);
             HotEntry empty_entry;
             txn->accessed_page_ids.push_back(empty_entry.page); // 记录一个无效的page id, 保证 accessed_page_ids 与 table_ids 对齐
             return empty_entry;
@@ -1710,48 +1831,65 @@ private:
         return entry;
     #endif
     }
+
+    inline page_id_t lookup_page_fast(table_id_t table_id, itemkey_t key) const {
+        if (!key_page_map_enabled_) return kInvalidPageId;
+    #if !MLP_PREDICTION
+        const DataItemKey data_key{table_id, key};
+        const auto& shard = hot_key_shard_(data_key);
+        std::shared_lock<std::shared_mutex> lock(shard.mutex);
+        auto it = shard.map.find(data_key);
+        if (it == shard.map.end()) return kInvalidPageId;
+        return it->second.page;
+    #else
+        auto pred = const_cast<SmartRouter*>(this)->mlp_predict(table_id, key);
+        return pred.has_value() ? pred.value() : kInvalidPageId;
+    #endif
+    }
     
     // 插入映射。如果存储满了, 会在预算内驱逐。
     inline HotEntry insert_or_victim_hot(table_id_t table_id, itemkey_t key, page_id_t page) {
         if (!key_page_map_enabled_) {
-            return HotEntry{page, 1, hot_lru_.end()};
+            return HotEntry{page, 1, {}};
         }
         // 策略1: Try Lock. 如果锁竞争激烈，直接放弃缓存本次插入，避免阻塞主线程，反正只是Cache
-        std::unique_lock<std::shared_mutex> lock(hot_mutex_, std::try_to_lock);
+        const DataItemKey data_key{table_id, key};
+        auto& shard = hot_key_shard_(data_key);
+        std::unique_lock<std::shared_mutex> lock(shard.mutex, std::try_to_lock);
         if(!lock.owns_lock()) {
              // 没抢到锁，直接返回临时对象，不进Cache
-             return HotEntry{page, 1, hot_lru_.end()}; 
+             return HotEntry{page, 1, {}};
         }
 
         // Double-check: 再次检查 key 是否已存在 (处理并发 race condition)
-        auto existing_it = hot_key_map.find({table_id, key});
-        if (existing_it != hot_key_map.end()) {
+        auto existing_it = shard.map.find(data_key);
+        if (existing_it != shard.map.end()) {
              // 别人已经插进去了，直接返回现有的
              return existing_it->second;
         }
         
         // 插入新条目
-        hot_lru_.push_front({table_id, key});
-        auto [it, ok] = hot_key_map.emplace(
-            DataItemKey{table_id, key},
-            HotEntry{page, 1, hot_lru_.begin()}
+        shard.lru.push_front(data_key);
+        auto [it, ok] = shard.map.emplace(
+            data_key,
+            HotEntry{page, 1, shard.lru.begin()}
         );
         if (!ok) assert(false); // 不应该发生
 
-        stats_.hot_hash_entries++;
+        stats_.hot_hash_entries.fetch_add(1, std::memory_order_relaxed);
         // std::cout << "Inserted hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
         
         // 策略2: Batch Eviction. 如果超限，一次性腾出 10% 的空间 (Low Watermark)
         // 避免每次 insert 都触发昂贵的 CLOCK 循环
-        if (stats_.hot_hash_entries > cfg_.hot_hash_entry_limit) {
+        if (stats_.hot_hash_entries.load(std::memory_order_relaxed) > cfg_.hot_hash_entry_limit) {
             size_t low_watermark = cfg_.hot_hash_entry_limit * 0.90; 
-            while (stats_.hot_hash_entries > low_watermark && !hot_lru_.empty()) {
-                const auto & candidate_key = hot_lru_.back();
-                auto victim_it = hot_key_map.find(candidate_key);
+            while (stats_.hot_hash_entries.load(std::memory_order_relaxed) > low_watermark && !shard.lru.empty()) {
+                const auto & candidate_key = shard.lru.back();
+                auto victim_it = shard.map.find(candidate_key);
                 
-                if (victim_it == hot_key_map.end()) {
+                if (victim_it == shard.map.end()) {
                     // Should not happen, but safe cleanup
-                    hot_lru_.pop_back();
+                    shard.lru.pop_back();
                     continue;
                 }
 
@@ -1759,14 +1897,14 @@ private:
                     // Give second chance
                     victim_it->second.referenced.store(false, std::memory_order_relaxed);
                     // Move to front (splice is efficient, iterator invalidated? No, list iterator stable)
-                    hot_lru_.splice(hot_lru_.begin(), hot_lru_, std::prev(hot_lru_.end()));
+                    shard.lru.splice(shard.lru.begin(), shard.lru, std::prev(shard.lru.end()));
                     // it->second.lru_it 仍然有效，指向同一个节点，只是位置变了
                 } else {
                     // Evict
-                    stats_.hot_hash_entries--;
-                    stats_.evict_hot_entries++;
-                    hot_key_map.erase(victim_it);
-                    hot_lru_.pop_back();
+                    stats_.hot_hash_entries.fetch_sub(1, std::memory_order_relaxed);
+                    stats_.evict_hot_entries.fetch_add(1, std::memory_order_relaxed);
+                    shard.map.erase(victim_it);
+                    shard.lru.pop_back();
                     // std::cout << "Evicted hot key: (table_id=" << candidate_key.table_id << ", key=" << candidate_key.key << ")" << std::endl;
                     // logger->info("Evicted hot key: (table_id=" + std::to_string(candidate_key.table_id) + ", key=" + std::to_string(candidate_key.key) + ")");
                 }
@@ -1777,23 +1915,25 @@ private:
 
     inline void insert_batch_bnode(table_id_t table_id, BtreeNode *return_node) {
         if (return_node == nullptr) return;
-        std::unique_lock<std::shared_mutex> lock(hot_mutex_);
-        if (stats_.hot_hash_entries > cfg_.hot_hash_entry_limit * 0.9) return; // 热点缓存快满了就不插入了
+        if (stats_.hot_hash_entries.load(std::memory_order_relaxed) > cfg_.hot_hash_entry_limit * 0.9) return; // 热点缓存快满了就不插入了
         // 批量插入B+树的非叶子节点
         for (size_t i = 0; i < return_node->keys.size(); i++) {
             itemkey_t key = return_node->keys[i];
             page_id_t page = return_node->values[i];
             if (key == -1) continue; // 跳过无效键
-            auto it = hot_key_map.find({table_id, key});
-            if (it == hot_key_map.end()) {
+            const DataItemKey data_key{table_id, key};
+            auto& shard = hot_key_shard_(data_key);
+            std::unique_lock<std::shared_mutex> lock(shard.mutex);
+            auto it = shard.map.find(data_key);
+            if (it == shard.map.end()) {
                 // 插入新条目
-                hot_lru_.push_front({table_id, key});
+                shard.lru.push_front(data_key);
                 HotEntry entry;
                 entry.page = page;
                 entry.freq = 1;
-                entry.lru_it = hot_lru_.begin();
-                hot_key_map.emplace(DataItemKey{table_id, key}, entry);
-                stats_.hot_hash_entries++;
+                entry.lru_it = shard.lru.begin();
+                shard.map.emplace(data_key, entry);
+                stats_.hot_hash_entries.fetch_add(1, std::memory_order_relaxed);
                 // std::cout << "Inserted hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page <<
                 //         std::endl;
             }
@@ -2057,18 +2197,49 @@ private:
 #endif // MLP_PREDICTION
 
 private:
+    static constexpr size_t kHotKeyShardCount = 256;
+    static_assert((kHotKeyShardCount & (kHotKeyShardCount - 1)) == 0,
+                  "hot key shard count must be a power of two");
+
+    struct HotKeyShard {
+        std::unordered_map<DataItemKey, HotEntry, DataItemKeyHash> map;
+        std::list<DataItemKey> lru; // 前端为最新，后端为最旧
+        mutable std::shared_mutex mutex;
+    };
+
+    static size_t hot_key_shard_index_(const DataItemKey& key) {
+        return DataItemKeyHash{}(key) & (kHotKeyShardCount - 1);
+    }
+
+    HotKeyShard& hot_key_shard_(const DataItemKey& key) {
+        return hot_key_shards_[hot_key_shard_index_(key)];
+    }
+
+    const HotKeyShard& hot_key_shard_(const DataItemKey& key) const {
+        return hot_key_shards_[hot_key_shard_index_(key)];
+    }
+
+    std::optional<page_id_t> find_hot_page_for_debug_(table_id_t table_id, itemkey_t key) const {
+        const DataItemKey data_key{table_id, key};
+        const auto& shard = hot_key_shard_(data_key);
+        std::shared_lock<std::shared_mutex> lock(shard.mutex);
+        auto it = shard.map.find(data_key);
+        if (it == shard.map.end()) return std::nullopt;
+        return it->second.page;
+    }
+
     // 配置
     Config cfg_{};
     Logger* logger;
     int worker_threads_; // 路由工作线程数
     int router_worker_threads_; // 实际路由工作线程数
     int db_con_worker_threads; // 每个计算节点的数据库连接线程数
+    bool has_last_batch_finish_ts_ = false;
+    struct timespec last_batch_finish_ts_{};
 
-    // 一级缓存: hot hash (key -> HotEntry)
-    std::unordered_map<DataItemKey, HotEntry, DataItemKeyHash> hot_key_map;
-    std::list<DataItemKey> hot_lru_; // 前端为最新，后端为最旧
-    std::shared_mutex hot_mutex_;
-    bool enable_hot_update = true;
+    // 一级缓存: sharded hot hash (key -> HotEntry)
+    std::array<HotKeyShard, kHotKeyShardCount> hot_key_shards_;
+    std::atomic<bool> enable_hot_update{true};
 
     // 二级缓存: B+ 树的非叶子节点, 在路由层通过维护B+树的中间节点，通过pageinspect插件访问B+树的叶子节点获取key->page的映射
     BtreeIndexService *btree_service_;
@@ -2079,6 +2250,8 @@ private:
     //for metis
     ThreadPool threadpool;
     ThreadPool preprocess_threadpool;
+    ThreadPool cleanup_threadpool;
+    static constexpr size_t kMaxPendingCleanupBatches = 2;
     NewMetis* metis_;
 
     // 统计数据
@@ -2110,6 +2283,7 @@ private:
 
     // for batch routing
     std::mutex batch_mutex;
+    std::mutex preprocess_stats_mutex_;
     std::condition_variable batch_cv;
     int batch_id = 0;
     std::vector<int> batch_finished_flags;

@@ -445,7 +445,7 @@ void run_smallbank_empty(thread_params* params, Logger* logger_){
     while (true) {
         timespec pop_start_time, pop_end_time;
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
         clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
         double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
                           (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
@@ -509,7 +509,15 @@ void run_smallbank_empty(thread_params* params, Logger* logger_){
 
             ctid_ret_page_ids = txn_entry->accessed_page_ids;
             // update the smart router page map if needed
-            if(smart_router) smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables), keys, rw, ctid_ret_page_ids, compute_node_id);
+            if(smart_router) {
+                timespec update_start_time, update_end_time;
+                clock_gettime(CLOCK_MONOTONIC, &update_start_time);
+                smart_router->update_key_page(txn_entry, const_cast<std::vector<table_id_t>&>(tables), keys, rw, ctid_ret_page_ids, compute_node_id);
+                clock_gettime(CLOCK_MONOTONIC, &update_end_time);
+                double update_time = (update_end_time.tv_sec - update_start_time.tv_sec) * 1000.0 +
+                                     (update_end_time.tv_nsec - update_start_time.tv_nsec) / 1000000.0;
+                smart_router->add_worker_thread_update_time(compute_node_id, params->thread_id, update_time);
+            }
             clock_gettime(CLOCK_MONOTONIC, &exec_end_time);
             double exec_time = (exec_end_time.tv_sec - exec_start_time.tv_sec) * 1000.0 +
                                (exec_end_time.tv_nsec - exec_start_time.tv_nsec) / 1000000.0;
@@ -560,7 +568,7 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
     while (true) {
         // ! Fetch a transaction from the global transaction pool
         // ! pay attention here, different system mode may have different txn fetching strategy, now all use pool front
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
         if (txn_entries.empty()) {
             if(txn_queue->is_finished()) {
                 // 说明该计算节点的事务队列已经均处理完成, 可以退出线程了
@@ -577,7 +585,7 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
             else assert(false);
         }
 
-        // 执行std::list<TxnQueueEntry*> txn_entries中的每个事务
+        // 执行当前 batch 中的每个事务
         for (auto& txn_entry : txn_entries) {
             if (!measurement_window_open()) {
                 tit->mark_done(txn_entry);
@@ -799,7 +807,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
         int call_id, ret;
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id, &ret);
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id, &ret);
         // if(WarmupEnd)
         //     logger_->info("Compute Node " + std::to_string(compute_node_id) + 
         //                 " Thread " + std::to_string(params->thread_id) + 
@@ -1142,7 +1150,7 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
         timespec pop_start_time, pop_end_time;
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
         // if(WarmupEnd)
         //     logger_->info("Compute Node " + std::to_string(compute_node_id) + 
         //                 " Thread " + std::to_string(params->thread_id) + 
@@ -1304,7 +1312,7 @@ void run_mysql_ycsb_txns_sp(thread_params* params, Logger* logger_) {
     while (true) {
         timespec pop_start_time, pop_end_time;
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
         clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
         double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
                           (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
@@ -1400,7 +1408,7 @@ void run_mysql_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         timespec pop_start_time, pop_end_time;
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
         int call_id;
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
         clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
         double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
                           (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
@@ -1517,7 +1525,7 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
         int call_id;
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
 
         clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
         double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
@@ -1802,7 +1810,7 @@ void run_ycsb_txns_empty(thread_params* params, Logger* logger_) {
         timespec pop_start_time, pop_end_time;
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn();
         // if(WarmupEnd)
         //     logger_->info("Compute Node " + std::to_string(compute_node_id) + 
         //                 " Thread " + std::to_string(params->thread_id) + 
@@ -1881,11 +1889,16 @@ void print_usage(const char* program_name) {
     std::cout << "  --btree-read-mode <mode>    B-tree read mode (0=conn0, 1=random) [default: 0]" << std::endl;
     std::cout << "  --btree-frequency <seconds> B-tree refresh frequency in seconds [default: 5]" << std::endl;
     std::cout << "  --account-count <number>    Number of accounts to load [default: 300000]" << std::endl;
+    std::cout << "  --worker-threads <n>        DB/client worker threads per compute node [default: 16]" << std::endl;
+    std::cout << "  --router-threads <n>        SmartRouter internal parallelism [default: worker-threads]" << std::endl;
     std::cout << "  --unlog                     Create UNLOGGED tables (default follows workload)" << std::endl;
     std::cout << "  --enable-autovacuum         Keep table autovacuum enabled after table creation [default: off]" << std::endl;
     std::cout << "  --without-kpmap             Skip key-page map initialization for client-only experiments" << std::endl;
     std::cout << "  --router-only               Use empty SmallBank consumers to measure Router capacity" << std::endl;
     std::cout << "  --fill-pipeline-bubble <0|1> Enable pipeline-bubble filling during conflict scheduling [default: 1]" << std::endl;
+    std::cout << "  --important-router-batch-log <0|1> Enable important per-batch SmartRouter logs [default: 1]" << std::endl;
+    std::cout << "  --preprocess-batch-concurrency <n> Concurrent FIFO batch preprocessors [default: 1]" << std::endl;
+    std::cout << "  --preprocess-internal-threads <n> Threads inside one preprocess batch [default: router-threads]" << std::endl;
     std::cout << "  --time-run                  Run by wall-clock time instead of try-count" << std::endl;
     std::cout << "  --warmup-seconds <sec>      Warmup duration for --time-run [default: 180]" << std::endl;
     std::cout << "  --run-seconds <sec>         Measured duration after warmup for --time-run [default: 60]" << std::endl;
@@ -2100,7 +2113,7 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
         int call_id;
-        std::list<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
 
 
         clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
@@ -2633,6 +2646,20 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--router-threads") {
+            if (i + 1 < argc) {
+                RouterInternalThreads = std::stoi(argv[++i]);
+                if (RouterInternalThreads <= 0) {
+                    std::cerr << "Error: Router threads must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Router internal threads set to: " << RouterInternalThreads << std::endl;
+            } else {
+                std::cerr << "Error: --router-threads requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else if (arg == "--use-sp") {
             if (i + 1 < argc) {
                 int v = std::stoi(argv[++i]);
@@ -2667,6 +2694,17 @@ int main(int argc, char *argv[]) {
                 std::cout << "Fill pipeline bubble: " << (Enable_Fill_Pipeline_Bubble ? "enabled" : "disabled") << std::endl;
             } else {
                 std::cerr << "Error: --fill-pipeline-bubble requires 0 or 1" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--important-router-batch-log" || arg == "--router-batch-log") {
+            if (i + 1 < argc) {
+                int v = std::stoi(argv[++i]);
+                Enable_Important_Router_Batch_Log = (v != 0);
+                std::cout << "Important router batch log: " << (Enable_Important_Router_Batch_Log ? "enabled" : "disabled") << std::endl;
+            } else {
+                std::cerr << "Error: " << arg << " requires 0 or 1" << std::endl;
                 print_usage(argv[0]);
                 return -1;
             }
@@ -2826,6 +2864,34 @@ int main(int argc, char *argv[]) {
                 std::cout << "Batch size set to: " << BatchRouterProcessSize << std::endl;
             } else {
                 std::cerr << "Error: --batch-size requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--preprocess-batch-concurrency") {
+            if (i + 1 < argc) {
+                PreprocessBatchConcurrency = std::stoi(argv[++i]);
+                if (PreprocessBatchConcurrency <= 0) {
+                    std::cerr << "Error: preprocess batch concurrency must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Preprocess batch concurrency set to: " << PreprocessBatchConcurrency << std::endl;
+            } else {
+                std::cerr << "Error: --preprocess-batch-concurrency requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--preprocess-internal-threads") {
+            if (i + 1 < argc) {
+                PreprocessInternalThreads = std::stoi(argv[++i]);
+                if (PreprocessInternalThreads <= 0) {
+                    std::cerr << "Error: preprocess internal threads must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Preprocess internal threads set to: " << PreprocessInternalThreads << std::endl;
+            } else {
+                std::cerr << "Error: --preprocess-internal-threads requires a value" << std::endl;
                 print_usage(argv[0]);
                 return -1;
             }
@@ -3014,6 +3080,13 @@ int main(int argc, char *argv[]) {
     }
     
     std::string access_pattern_name;
+    if (RouterInternalThreads <= 0) {
+        RouterInternalThreads = worker_threads;
+    }
+    if (PreprocessInternalThreads <= 0) {
+        PreprocessInternalThreads = RouterInternalThreads;
+    }
+
     switch (access_pattern) {
         case 0: access_pattern_name = "Uniform"; break;
         case 1: access_pattern_name = "Zipfian"; break;
@@ -3026,6 +3099,8 @@ int main(int argc, char *argv[]) {
     std::cout << "Key-page map initialization: " << (without_kpmap ? "off" : "on") << std::endl;
     std::cout << "Router-only benchmark: " << (router_only ? "on" : "off") << std::endl;
     std::cout << "Fill pipeline bubble: " << (Enable_Fill_Pipeline_Bubble ? "on" : "off") << std::endl;
+    std::cout << "Preprocess batch concurrency: " << PreprocessBatchConcurrency << std::endl;
+    std::cout << "Preprocess internal threads: " << PreprocessInternalThreads << std::endl;
 
     if (router_only && Workload_Type != 0) {
         std::cerr << "Error: --router-only currently supports SmallBank only." << std::endl;
@@ -3079,7 +3154,8 @@ int main(int argc, char *argv[]) {
                   << ", items=" << tpcc->item_count() << "." << std::endl;
     }
 
-    std::cout << "Worker threads: " << worker_threads << std::endl;
+    std::cout << "DB/client worker threads per node: " << worker_threads << std::endl;
+    std::cout << "SmartRouter internal threads: " << RouterInternalThreads << std::endl;
     std::cout << "====================" << std::endl;
 
     // --- Load Database Connection Info ---
@@ -3435,7 +3511,14 @@ int main(int argc, char *argv[]) {
     // BtreeIndexService *index_service = new BtreeIndexService(DBConnection, index_names, read_btree_mode, read_frequency); // !not used
 
     // initialize the transaction pool
-    SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, 2*ComputeNodeCount*worker_threads*BatchRouterProcessSize);
+    const size_t estimated_inflight_txns =
+        static_cast<size_t>(TxnPoolMaxSize) +
+        static_cast<size_t>(ComputeNodeCount) * static_cast<size_t>(TxnQueueMaxSize) +
+        static_cast<size_t>(std::max(1, PreprocessBatchConcurrency + 2)) *
+            static_cast<size_t>(BatchRouterProcessSize);
+    const size_t tit_table_size = std::max<size_t>(1000000, estimated_inflight_txns * 2);
+    std::cout << "TIT table size: " << tit_table_size << std::endl;
+    SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, tit_table_size);
     TxnPool* txn_pool = new TxnPool(4, TxnPoolMaxSize, tit);
     auto shared_txn_queue = new SharedTxnQueue(tit, logger_, TxnQueueMaxSize);
     auto pending_txn_queue = new PendingTxnSet(tit, logger_);
@@ -3452,7 +3535,19 @@ int main(int argc, char *argv[]) {
     } else {
         cfg.hot_hash_entry_limit = 640ULL * 1024ULL * 1024ULL; // 开的尽可能大，对于其他负载我们不做key 不足的实验
     }
-    SmartRouter* smart_router = new SmartRouter(cfg, txn_pool, txn_queues, pending_txn_queue, worker_threads, nullptr, metis, logger_, smallbank, ycsb, tpcc);
+    SmartRouter* smart_router = new SmartRouter(
+        cfg,
+        txn_pool,
+        txn_queues,
+        pending_txn_queue,
+        worker_threads,
+        RouterInternalThreads,
+        nullptr,
+        metis,
+        logger_,
+        smallbank,
+        ycsb,
+        tpcc);
     if (without_kpmap) {
         smart_router->disable_key_page_map();
     }
@@ -3739,6 +3834,17 @@ int main(int argc, char *argv[]) {
         std::cout << "exec txn sum ms: " << total_exec_time << " ms" << std::endl;
         std::cout << "Average txn exec ms per thread: " << (worker_threads > 0 ? total_exec_time / (worker_threads * ComputeNodeCount) : 0.0) << " ms" << std::endl;
         std::cout << "Average txn exec ms: " << (exe_count > 0 ? total_exec_time / exe_count : 0.0) << " ms" << std::endl;
+    }
+    if (tit != nullptr) {
+        auto mark_done_stats = tit->get_mark_done_stats();
+        std::cout << "[TIT MarkDone Stats]" << std::endl;
+        std::cout << "  Calls: " << mark_done_stats.calls << std::endl;
+        std::cout << "  Notification Groups: " << mark_done_stats.notification_groups << std::endl;
+        std::cout << "  Completed Groups: " << mark_done_stats.completed_groups << std::endl;
+        std::cout << "  Notified After Txns: " << mark_done_stats.notified_after_txns << std::endl;
+        std::cout << "  Ready Txns: " << mark_done_stats.ready_txns << std::endl;
+        std::cout << "  Ready Callback Calls: " << mark_done_stats.ready_callback_calls << std::endl;
+        std::cout << "  Deferred Reclaims: " << mark_done_stats.deferred_reclaims << std::endl;
     }
     std::cout << "All transaction threads completed." << std::endl;
     for(int i =0; i<ComputeNodeCount; i++){

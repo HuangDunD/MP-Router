@@ -79,19 +79,33 @@ struct RouterStatSnapshot {
     double total_time_ms = 0.0;
     double fetch_txn_from_pool_ms = 0.0;
     double wait_prepared_batch_ms = 0.0;
+    double launch_next_preprocess_ms = 0.0;
+    double register_batch_with_tit_ms = 0.0;
+    double prepared_batch_destroy_ms = 0.0;
     double schedule_total_ms = 0.0;
+    double batch_boundary_gap_ms = 0.0;
+    double schedule_entry_setup_ms = 0.0;
+    double batch_finish_log_ms = 0.0;
+    double post_schedule_finish_cleanup_ms = 0.0;
+    uint64_t pending_cleanup_fast_skip_count = 0;
     double push_txn_to_queue_ms = 0.0;
     double push_txn_to_queue_wall_ms = 0.0;
     double preprocess_txn_ms = 0.0;
+    uint64_t preprocess_completed_txn_count = 0;
     double wait_pending_txn_push_ms = 0.0;
     double wait_last_batch_finish_ms = 0.0;
     double preprocess_lookup_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
+    double preprocess_merge_page_pairs_ms = 0.0;
     double get_page_ownership_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double merge_global_txid_to_txn_map_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double compute_conflict_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double compute_union_ms = 0.0; // 这部分属于preprocess_txn_ms的一部分
     double ownership_retrieval_and_devide_unconflicted_txn_ms = 0.0; 
     double process_conflicted_txn_ms = 0.0;
+    double conflict_free_path_worker_wall_ms = 0.0;
+    uint64_t batch_local_total_txn_count = 0;
+    uint64_t batch_local_conflict_free_txn_count = 0;
+    uint64_t batch_local_conflicted_txn_count = 0;
     double merge_and_construct_ipq_ms = 0.0;
     double select_condidate_txns_ms = 0.0;
     double compute_transfer_page_ms = 0.0;
@@ -99,6 +113,8 @@ struct RouterStatSnapshot {
     double decide_txn_schedule_ms = 0.0;
     double add_txn_dependency_ms = 0.0;
     double push_prioritized_txns_ms = 0.0;
+    double push_prioritized_scan_register_ms = 0.0;
+    double push_prioritized_queue_push_ms = 0.0;
     double fill_pipeline_bubble_ms = 0.0;
     double push_end_txns_ms = 0.0;
     double final_push_to_queues_ms = 0.0;
@@ -180,15 +196,41 @@ struct RouterStatSnapshot {
             std::cout << "[Preprocess Thread Time Breakdown] " << std::endl;
             std::cout << "  Fetch Txn From Pool Time: " << fetch_txn_from_pool_ms << " ms" << std::endl;
             std::cout << "  Preprocess Txn Time: " << preprocess_txn_ms << " ms" << std::endl;
+            std::cout << "  Preprocess Completed Txns: " << preprocess_completed_txn_count << std::endl;
+            std::cout << "  Preprocess Batch-Task Estimated Capacity: "
+                      << (preprocess_txn_ms > 0.0
+                              ? 1000.0 * preprocess_completed_txn_count / preprocess_txn_ms
+                              : 0.0)
+                      << " TPS" << std::endl;
+            std::cout << "  Preprocess Effective Completion Throughput: "
+                      << (total_time_ms > 0.0
+                              ? 1000.0 * preprocess_completed_txn_count / total_time_ms
+                              : 0.0)
+                      << " TPS" << std::endl;
             std::cout << "    Preprocess Lookup Time: " << preprocess_lookup_ms << " ms" << std::endl;
-            std::cout << "    Merge Global Txid To Txn Map Time: " << merge_global_txid_to_txn_map_ms << " ms" << std::endl;
+            std::cout << "    Merge And Sort Page Pairs Time: " << preprocess_merge_page_pairs_ms << " ms" << std::endl;
             std::cout << "    Compute Conflict Time: " << compute_conflict_ms << " ms" << std::endl;
+            std::cout << "    Build Scheduling Metadata Time: " << merge_global_txid_to_txn_map_ms << " ms" << std::endl;
             std::cout << "    Compute Union Time: " << compute_union_ms << " ms" << std::endl;
+            std::cout << "    Other Preprocess Time: "
+                      << std::max(0.0, preprocess_txn_ms - preprocess_lookup_ms -
+                                          preprocess_merge_page_pairs_ms - compute_conflict_ms -
+                                          merge_global_txid_to_txn_map_ms - compute_union_ms)
+                      << " ms" << std::endl;
+            std::cout << "[Batch Registration Thread Time Breakdown] " << std::endl;
+            std::cout << "  Register Batch With TIT Time: " << register_batch_with_tit_ms << " ms" << std::endl;
         }
         std::cout << "[Router Thread Time Breakdown] " << std::endl;
         if (SYSTEM_MODE == 11) {
             std::cout << "  Wait Prepared Batch Time: " << wait_prepared_batch_ms << " ms" << std::endl;
+            std::cout << "  Launch Next Preprocess Time: " << launch_next_preprocess_ms << " ms" << std::endl;
+            std::cout << "  Prepared Batch Retire Time: " << prepared_batch_destroy_ms << " ms" << std::endl;
+            std::cout << "  Batch Boundary Gap Time: " << batch_boundary_gap_ms << " ms" << std::endl;
             std::cout << "  Schedule Prepared Batch Total Time: " << schedule_total_ms << " ms" << std::endl;
+            std::cout << "    Schedule Entry Setup Time: " << schedule_entry_setup_ms << " ms" << std::endl;
+            std::cout << "    Batch Finish Log Time: " << batch_finish_log_ms << " ms" << std::endl;
+            std::cout << "    Post Schedule Finish Cleanup Time: " << post_schedule_finish_cleanup_ms << " ms" << std::endl;
+            std::cout << "    Pending Cleanup Fast Skip Count: " << pending_cleanup_fast_skip_count << std::endl;
         } else {
             std::cout << "  Fetch Txn From Pool Time: " << fetch_txn_from_pool_ms << " ms" << std::endl;
             std::cout << "  Schedule Batch Total Time: " << schedule_total_ms << " ms" << std::endl;
@@ -204,6 +246,26 @@ struct RouterStatSnapshot {
         std::cout << "    Ownership Retrieval And Devide Unconflicted Txn Time: " 
                   << ownership_retrieval_and_devide_unconflicted_txn_ms << " ms" << std::endl;
         std::cout << "    Process Conflicted Txn Time: " << process_conflicted_txn_ms << " ms" << std::endl;
+        std::cout << "    Batch-Local Total Txns: " << batch_local_total_txn_count << std::endl;
+        std::cout << "    Batch-Local Conflict-Free Txns: " << batch_local_conflict_free_txn_count << std::endl;
+        std::cout << "    Batch-Local Conflicting Txns: " << batch_local_conflicted_txn_count << std::endl;
+        std::cout << "    Batch-Local Conflicting Ratio: "
+                  << (batch_local_total_txn_count > 0
+                          ? 100.0 * batch_local_conflicted_txn_count / batch_local_total_txn_count
+                          : 0.0)
+                  << "%" << std::endl;
+        std::cout << "    Conflict-Free Path Parallel Worker Wall Time: "
+                  << conflict_free_path_worker_wall_ms << " ms" << std::endl;
+        std::cout << "    Conflict-Free Path Estimated Capacity: "
+                  << (conflict_free_path_worker_wall_ms > 0.0
+                          ? 1000.0 * batch_local_conflict_free_txn_count / conflict_free_path_worker_wall_ms
+                          : 0.0)
+                  << " TPS" << std::endl;
+        std::cout << "    Conflict Scheduler Estimated Capacity: "
+                  << (process_conflicted_txn_ms > 0.0
+                          ? 1000.0 * batch_local_conflicted_txn_count / process_conflicted_txn_ms
+                          : 0.0)
+                  << " TPS" << std::endl;
         std::cout << "      Merge And Construct IPQ Time: " << merge_and_construct_ipq_ms << " ms" << std::endl;
         std::cout << "      Select Condidate Txns Time: " << select_condidate_txns_ms << " ms" << std::endl;
         std::cout << "      Compute Transfer Page Time: " << compute_transfer_page_ms << " ms" << std::endl;
@@ -211,6 +273,8 @@ struct RouterStatSnapshot {
         std::cout << "      Decide Txn Schedule Time: " << decide_txn_schedule_ms << " ms" << std::endl;
         std::cout << "      Add Txn Dependency Time: " << add_txn_dependency_ms << " ms" << std::endl;
         std::cout << "      Push Prioritized Txns Time: " << push_prioritized_txns_ms << " ms" << std::endl;
+        std::cout << "        Push Prioritized Scan/Register Time: " << push_prioritized_scan_register_ms << " ms" << std::endl;
+        std::cout << "        Push Prioritized Queue Push Time: " << push_prioritized_queue_push_ms << " ms" << std::endl;
         std::cout << "      Fill Pipeline Bubble Time: " << fill_pipeline_bubble_ms << " ms" << std::endl;
         std::cout << "      Push End Txns Time: " << push_end_txns_ms << " ms" << std::endl;
         std::cout << "      Final Push To Queues Time: " << final_push_to_queues_ms << " ms" << std::endl;
@@ -243,13 +307,13 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     // SmartRouter exposes get_stats() which returns a reference. We'll copy values.
     SmartRouter::Stats &s = router->get_stats();
     // Non-atomic fields (copy directly)
-    snap.hot_hash_entries = s.hot_hash_entries;
+    snap.hot_hash_entries = s.hot_hash_entries.load(std::memory_order_relaxed);
     snap.btree_bytes = s.btree_bytes;
-    snap.hot_hit = s.hot_hit;
-    snap.hot_miss = s.hot_miss;
+    snap.hot_hit = s.hot_hit.load(std::memory_order_relaxed);
+    snap.hot_miss = s.hot_miss.load(std::memory_order_relaxed);
     snap.btree_hit = s.btree_hit;
     snap.btree_miss = s.btree_miss;
-    snap.evict_hot_entries = s.evict_hot_entries;
+    snap.evict_hot_entries = s.evict_hot_entries.load(std::memory_order_relaxed);
     // Atomic fields -- read using load
     snap.change_page_cnt = s.change_page_cnt.load(std::memory_order_relaxed);
     snap.page_update_missing_cnt = s.page_update_missing_cnt.load(std::memory_order_relaxed);
@@ -308,16 +372,30 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     SmartRouter::TimeBreakdown& tdb = router->get_time_breakdown();
     snap.fetch_txn_from_pool_ms = tdb.fetch_txn_from_pool_ms;
     snap.wait_prepared_batch_ms = tdb.wait_prepared_batch_ms;
+    snap.launch_next_preprocess_ms = tdb.launch_next_preprocess_ms;
+    snap.register_batch_with_tit_ms = tdb.register_batch_with_tit_ms;
+    snap.prepared_batch_destroy_ms = tdb.prepared_batch_destroy_ms;
     snap.schedule_total_ms = tdb.schedule_total_ms;
+    snap.batch_boundary_gap_ms = tdb.batch_boundary_gap_ms;
+    snap.schedule_entry_setup_ms = tdb.schedule_entry_setup_ms;
+    snap.batch_finish_log_ms = tdb.batch_finish_log_ms;
+    snap.post_schedule_finish_cleanup_ms = tdb.post_schedule_finish_cleanup_ms;
+    snap.pending_cleanup_fast_skip_count = tdb.pending_cleanup_fast_skip_count;
     snap.preprocess_txn_ms = tdb.preprocess_txn_ms;
+    snap.preprocess_completed_txn_count = tdb.preprocess_completed_txn_count;
     snap.merge_global_txid_to_txn_map_ms = tdb.merge_global_txid_to_txn_map_ms;
     snap.get_page_ownership_ms = tdb.get_page_ownership_ms;
     snap.preprocess_lookup_ms = tdb.preprocess_lookup_ms;
+    snap.preprocess_merge_page_pairs_ms = tdb.preprocess_merge_page_pairs_ms;
     snap.compute_conflict_ms = tdb.compute_conflict_ms;
     snap.compute_union_ms = tdb.compute_union_ms;
     snap.wait_pending_txn_push_ms = tdb.wait_pending_txn_push_ms;
     snap.wait_last_batch_finish_ms = tdb.wait_last_batch_finish_ms;
     snap.ownership_retrieval_and_devide_unconflicted_txn_ms = tdb.ownership_retrieval_and_devide_unconflicted_txn_ms;
+    snap.conflict_free_path_worker_wall_ms = tdb.conflict_free_path_worker_wall_ms;
+    snap.batch_local_total_txn_count = tdb.batch_local_total_txn_count;
+    snap.batch_local_conflict_free_txn_count = tdb.batch_local_conflict_free_txn_count;
+    snap.batch_local_conflicted_txn_count = tdb.batch_local_conflicted_txn_count;
     snap.merge_and_construct_ipq_ms = tdb.merge_and_construct_ipq_ms;
     snap.process_conflicted_txn_ms = tdb.process_conflicted_txn_ms;
     snap.select_condidate_txns_ms = tdb.select_condidate_txns_ms;
@@ -326,6 +404,8 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.decide_txn_schedule_ms = tdb.decide_txn_schedule_ms;
     snap.add_txn_dependency_ms = tdb.add_txn_dependency_ms;
     snap.push_prioritized_txns_ms = tdb.push_prioritized_txns_ms;
+    snap.push_prioritized_scan_register_ms = tdb.push_prioritized_scan_register_ms;
+    snap.push_prioritized_queue_push_ms = tdb.push_prioritized_queue_push_ms;
     snap.fill_pipeline_bubble_ms = tdb.fill_pipeline_bubble_ms;
     snap.push_end_txns_ms = tdb.push_end_txns_ms;
     snap.final_push_to_queues_ms = tdb.final_push_to_queues_ms;
@@ -428,16 +508,39 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.total_time_ms = (b.snapshot_ts.tv_sec - a.snapshot_ts.tv_sec) * 1000.0 + (b.snapshot_ts.tv_nsec - a.snapshot_ts.tv_nsec) / 1e6;
     d.fetch_txn_from_pool_ms = b.fetch_txn_from_pool_ms - a.fetch_txn_from_pool_ms;
     d.wait_prepared_batch_ms = b.wait_prepared_batch_ms - a.wait_prepared_batch_ms;
+    d.launch_next_preprocess_ms = b.launch_next_preprocess_ms - a.launch_next_preprocess_ms;
+    d.register_batch_with_tit_ms = b.register_batch_with_tit_ms - a.register_batch_with_tit_ms;
+    d.prepared_batch_destroy_ms = b.prepared_batch_destroy_ms - a.prepared_batch_destroy_ms;
     d.schedule_total_ms = b.schedule_total_ms - a.schedule_total_ms;
+    d.batch_boundary_gap_ms = b.batch_boundary_gap_ms - a.batch_boundary_gap_ms;
+    d.schedule_entry_setup_ms = b.schedule_entry_setup_ms - a.schedule_entry_setup_ms;
+    d.batch_finish_log_ms = b.batch_finish_log_ms - a.batch_finish_log_ms;
+    d.post_schedule_finish_cleanup_ms = b.post_schedule_finish_cleanup_ms - a.post_schedule_finish_cleanup_ms;
+    d.pending_cleanup_fast_skip_count = b.pending_cleanup_fast_skip_count - a.pending_cleanup_fast_skip_count;
     d.preprocess_txn_ms = b.preprocess_txn_ms - a.preprocess_txn_ms;
+    d.preprocess_completed_txn_count =
+        b.preprocess_completed_txn_count >= a.preprocess_completed_txn_count
+            ? b.preprocess_completed_txn_count - a.preprocess_completed_txn_count
+            : 0;
     d.merge_global_txid_to_txn_map_ms = b.merge_global_txid_to_txn_map_ms - a.merge_global_txid_to_txn_map_ms;
     d.get_page_ownership_ms = b.get_page_ownership_ms - a.get_page_ownership_ms;
     d.preprocess_lookup_ms = b.preprocess_lookup_ms - a.preprocess_lookup_ms;
+    d.preprocess_merge_page_pairs_ms = b.preprocess_merge_page_pairs_ms - a.preprocess_merge_page_pairs_ms;
     d.compute_conflict_ms = b.compute_conflict_ms - a.compute_conflict_ms;
     d.compute_union_ms = b.compute_union_ms - a.compute_union_ms;
     d.wait_pending_txn_push_ms = b.wait_pending_txn_push_ms - a.wait_pending_txn_push_ms;
     d.wait_last_batch_finish_ms = b.wait_last_batch_finish_ms - a.wait_last_batch_finish_ms;
     d.ownership_retrieval_and_devide_unconflicted_txn_ms = b.ownership_retrieval_and_devide_unconflicted_txn_ms - a.ownership_retrieval_and_devide_unconflicted_txn_ms;
+    d.conflict_free_path_worker_wall_ms = b.conflict_free_path_worker_wall_ms - a.conflict_free_path_worker_wall_ms;
+    d.batch_local_total_txn_count = b.batch_local_total_txn_count >= a.batch_local_total_txn_count
+                                        ? b.batch_local_total_txn_count - a.batch_local_total_txn_count
+                                        : 0;
+    d.batch_local_conflict_free_txn_count = b.batch_local_conflict_free_txn_count >= a.batch_local_conflict_free_txn_count
+                                                ? b.batch_local_conflict_free_txn_count - a.batch_local_conflict_free_txn_count
+                                                : 0;
+    d.batch_local_conflicted_txn_count = b.batch_local_conflicted_txn_count >= a.batch_local_conflicted_txn_count
+                                            ? b.batch_local_conflicted_txn_count - a.batch_local_conflicted_txn_count
+                                            : 0;
     d.merge_and_construct_ipq_ms = b.merge_and_construct_ipq_ms - a.merge_and_construct_ipq_ms;
     d.process_conflicted_txn_ms = b.process_conflicted_txn_ms - a.process_conflicted_txn_ms;
     d.select_condidate_txns_ms = b.select_condidate_txns_ms - a.select_condidate_txns_ms;
@@ -446,6 +549,8 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.decide_txn_schedule_ms = b.decide_txn_schedule_ms - a.decide_txn_schedule_ms;
     d.add_txn_dependency_ms = b.add_txn_dependency_ms - a.add_txn_dependency_ms;
     d.push_prioritized_txns_ms = b.push_prioritized_txns_ms - a.push_prioritized_txns_ms;
+    d.push_prioritized_scan_register_ms = b.push_prioritized_scan_register_ms - a.push_prioritized_scan_register_ms;
+    d.push_prioritized_queue_push_ms = b.push_prioritized_queue_push_ms - a.push_prioritized_queue_push_ms;
     d.fill_pipeline_bubble_ms = b.fill_pipeline_bubble_ms - a.fill_pipeline_bubble_ms;
     d.push_end_txns_ms = b.push_end_txns_ms - a.push_end_txns_ms;
     d.final_push_to_queues_ms = b.final_push_to_queues_ms - a.final_push_to_queues_ms;

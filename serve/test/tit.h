@@ -13,21 +13,52 @@
 #include <unordered_set>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include "txn_entry.h"
 #include "Logger.h"
+#include "threadpool.h"
 
 class SlidingTransactionInforTable {
 public:
     SlidingTransactionInforTable(Logger* logger_ptr, size_t txnTableSize = 1000000)
         : txnTableSize_(txnTableSize),
           slots_(txnTableSize),
-          logger_(logger_ptr) {}
+          logger_(logger_ptr),
+          reclaim_threadpool_(1, *logger_ptr) {}
 
     enum class TxnStatus { Empty, InRouteringProgress, InExecutorProgress, Done, Evicted };
+
+    struct MarkDoneStats {
+        uint64_t calls = 0;
+        uint64_t notification_groups = 0;
+        uint64_t completed_groups = 0;
+        uint64_t notified_after_txns = 0;
+        uint64_t ready_txns = 0;
+        uint64_t ready_callback_calls = 0;
+        uint64_t deferred_reclaims = 0;
+    };
 
     // 将事务指针写入环形表。若覆盖的槽位中旧指针已完成，则删除；
     // 若未完成，则移入延迟删除集合，等待其 mark_done 后再删除。
     void push(TxnQueueEntry* entry) {
+        std::vector<TxnQueueEntry*> completed_to_reclaim;
+        push(entry, completed_to_reclaim);
+        reclaim_completed_async(std::move(completed_to_reclaim));
+    }
+
+    // Preserve registration order while moving destruction of overwritten,
+    // completed transactions off the caller's critical path.
+    void push_batch(const std::vector<TxnQueueEntry*>& entries) {
+        std::vector<TxnQueueEntry*> completed_to_reclaim;
+        completed_to_reclaim.reserve(entries.size());
+        for (auto* entry : entries) {
+            push(entry, completed_to_reclaim);
+        }
+        reclaim_completed_async(std::move(completed_to_reclaim));
+    }
+
+private:
+    void push(TxnQueueEntry* entry, std::vector<TxnQueueEntry*>& completed_to_reclaim) {
         if (!entry) return;
         // std::cout << "Pushing " << entry->tx_id << "." << std::endl;
         // 使用 tx_id 做环形槽定位
@@ -52,8 +83,8 @@ public:
             }
             bool was_done = old_ptr->done.load(std::memory_order_acquire);
             if (was_done) {
-                // 已完成，可安全删除
-                delete old_ptr;
+                // 已完成，可安全交给后台线程回收
+                completed_to_reclaim.push_back(old_ptr);
             } else {
                 // 未完成，放入延迟集合，等 mark_done 时删除
                 std::lock_guard<std::mutex> lk(defer_mutex_);
@@ -63,6 +94,19 @@ public:
         }
     }
 
+    void reclaim_completed_async(std::vector<TxnQueueEntry*> completed) {
+        if (completed.empty()) return;
+        if (reclaim_threadpool_.get_pending_task_count() >= kMaxPendingReclaimBatches) {
+            for (auto* entry : completed) delete entry;
+            return;
+        }
+        auto retired = std::make_shared<std::vector<TxnQueueEntry*>>(std::move(completed));
+        reclaim_threadpool_.enqueue([retired]() {
+            for (auto* entry : *retired) delete entry;
+        });
+    }
+
+public:
     // 将某个事务标记为完成。若它仍在表中，则仅置位完成标记；
     // 若它已被环形覆盖而进入延迟集合，则在此处删除并移除。
     // 设置当某个后续事务的入度(ref)变为0时的回调，用于立即调度
@@ -73,6 +117,7 @@ public:
 
     void mark_done(TxnQueueEntry* entry, int finish_call_id = -1) {
         if (!entry) return;
+        mark_done_calls_.fetch_add(1, std::memory_order_relaxed);
         // std::cout << "Marking done " << entry->tx_id << "." << std::endl;
         // 直接按 tx_id 定位槽位
         size_t idx = static_cast<size_t>(entry->tx_id % txnTableSize_);
@@ -85,11 +130,14 @@ public:
         
         // Notify dependency groups
         if (!entry->notification_groups.empty()) {
+            mark_done_notification_groups_.fetch_add(entry->notification_groups.size(), std::memory_order_relaxed);
             for (const auto& group : entry->notification_groups) {
                 // Decrement group ref count
                 int prev_count = group->unfinish_txn_count.fetch_sub(1);
                 if (prev_count == 1) { // reached 0
+                    mark_done_completed_groups_.fetch_add(1, std::memory_order_relaxed);
                     std::lock_guard<std::mutex> lock(group->notify_mutex);
+                    mark_done_notified_after_txns_.fetch_add(group->after_txns.size(), std::memory_order_relaxed);
                     for (auto* next_txn : group->after_txns) {
                         if (next_txn->ref.fetch_sub(1) == 1) { // reached 0
                             ready_txns.push_back(next_txn);
@@ -105,6 +153,8 @@ public:
         }
 
         if(!ready_txns.empty()){
+            mark_done_ready_txns_.fetch_add(ready_txns.size(), std::memory_order_relaxed);
+            mark_done_ready_callback_calls_.fetch_add(1, std::memory_order_relaxed);
             auto cb = on_ready_;
             if (cb) cb(ready_txns, finish_call_id);
         }
@@ -121,8 +171,21 @@ public:
         auto it = deferred_.find(entry);
         if (it != deferred_.end()) {
             deferred_.erase(it);
+            mark_done_deferred_reclaims_.fetch_add(1, std::memory_order_relaxed);
             delete entry;
         }
+    }
+
+    MarkDoneStats get_mark_done_stats() const {
+        MarkDoneStats stats;
+        stats.calls = mark_done_calls_.load(std::memory_order_relaxed);
+        stats.notification_groups = mark_done_notification_groups_.load(std::memory_order_relaxed);
+        stats.completed_groups = mark_done_completed_groups_.load(std::memory_order_relaxed);
+        stats.notified_after_txns = mark_done_notified_after_txns_.load(std::memory_order_relaxed);
+        stats.ready_txns = mark_done_ready_txns_.load(std::memory_order_relaxed);
+        stats.ready_callback_calls = mark_done_ready_callback_calls_.load(std::memory_order_relaxed);
+        stats.deferred_reclaims = mark_done_deferred_reclaims_.load(std::memory_order_relaxed);
+        return stats;
     }
 
     // 获取当前容量
@@ -200,4 +263,14 @@ private:
     std::function<void(std::vector<TxnQueueEntry*>, int)> on_ready_;
 
     Logger* logger_;
+    ThreadPool reclaim_threadpool_;
+    static constexpr size_t kMaxPendingReclaimBatches = 2;
+
+    std::atomic<uint64_t> mark_done_calls_{0};
+    std::atomic<uint64_t> mark_done_notification_groups_{0};
+    std::atomic<uint64_t> mark_done_completed_groups_{0};
+    std::atomic<uint64_t> mark_done_notified_after_txns_{0};
+    std::atomic<uint64_t> mark_done_ready_txns_{0};
+    std::atomic<uint64_t> mark_done_ready_callback_calls_{0};
+    std::atomic<uint64_t> mark_done_deferred_reclaims_{0};
 };

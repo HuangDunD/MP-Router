@@ -33,8 +33,8 @@ public:
         queue_cv_.notify_one();
     }
 
-    std::list<TxnQueueEntry*> pop_txn() {
-        std::list<TxnQueueEntry*> batch_entries; // ret
+    std::vector<TxnQueueEntry*> pop_txn() {
+        std::vector<TxnQueueEntry*> batch_entries; // ret
         std::unique_lock<std::mutex> lock(queue_mutex_);
         if(current_queue_size_ == 0) return {}; 
         auto entry = txn_queue_.front();
@@ -69,41 +69,58 @@ public:
         tit(_tit), logger_(log) {}
     ~DAGTxnQueue() = default;
 
+    struct PreparedReadyBatch {
+        int priority = 0;
+        std::vector<TxnQueueEntry*> entries;
+    };
+
+    static PreparedReadyBatch prepare_ready_batch(std::vector<TxnQueueEntry*> entries) {
+        PreparedReadyBatch prepared;
+        if (entries.empty()) return prepared;
+
+        for (auto* e : entries) {
+            if (!e) continue;
+            if (!e->notification_groups.empty()) {
+                for (const auto& group : e->notification_groups) {
+                    prepared.priority += static_cast<int>(group->after_txns.size());
+                }
+            }
+        }
+        prepared.priority += static_cast<int>(entries.size());
+        prepared.entries = std::move(entries);
+        if (prepared.entries.front() != nullptr) {
+            prepared.entries.front()->combine_txn_count = static_cast<int>(prepared.entries.size());
+        }
+        return prepared;
+    }
+
     // 将一批 DAG-ready 事务推入优先队列（批次为一个不可拆分单元）
     // 优先级定义：entries 中所有事务的 after_txns 数量之和，越大优先级越高
     void push_ready_batch(std::vector<TxnQueueEntry*> entries) {
-        if (entries.empty()) return;
-        // 计算优先级（后继事务总数）
-        int priority = 0;
-        for (auto* e : entries) {
-            if (!e) continue;
-            // 优先使用 Group 中的后续事务数量作为优先级
-            if (!e->notification_groups.empty()) {
-                for(const auto& group : e->notification_groups) {
-                    priority += static_cast<int>(group->after_txns.size());
-                }
-            } 
-        }
-        
-        priority += entries.size(); // 再加上批次大小, 越大越应该优先处理
-        // 组装批次（保留 combine 语义以便下游保持一致）
-        std::list<TxnQueueEntry*> batch_list(entries.begin(), entries.end());
-        if (batch_list.front() != nullptr) {
-            batch_list.front()->combine_txn_count = static_cast<int>(batch_list.size());
-        }
+        push_prepared_ready_batch(prepare_ready_batch(std::move(entries)));
+    }
+
+    void push_prepared_ready_batch(PreparedReadyBatch prepared) {
+        if (prepared.entries.empty()) return;
 
         std::unique_lock<std::mutex> lock(queue_mutex_);
-        Batch b;
-        b.priority = priority;
-        b.seq = seq_counter_++;
-        b.entries = std::move(batch_list);
-        pq_.push(std::move(b));
-        current_queue_size_ += static_cast<int>(entries.size());
+        push_prepared_ready_batch_unlocked(std::move(prepared));
         queue_cv_.notify_one();
     }
 
+    void push_prepared_ready_batch_unlocked(PreparedReadyBatch prepared) {
+        if (prepared.entries.empty()) return;
+        Batch b;
+        b.priority = prepared.priority;
+        b.seq = seq_counter_++;
+        const int size = static_cast<int>(prepared.entries.size());
+        b.entries = std::move(prepared.entries);
+        pq_.push(std::move(b));
+        current_queue_size_ += size;
+    }
+
     // 弹出最高优先级的一个完整批次
-    std::list<TxnQueueEntry*> pop_ready_batch() {
+    std::vector<TxnQueueEntry*> pop_ready_batch() {
         // auto start_wait = std::chrono::steady_clock::now();
         std::unique_lock<std::mutex> lock(queue_mutex_);
         // auto end_wait = std::chrono::steady_clock::now();
@@ -111,9 +128,15 @@ public:
         // if(wait_ms > 100) {
         //     logger_->info("[DAGQueue Pop] High lock wait time: " + std::to_string(wait_ms) + " ms");
         // }
+        return pop_ready_batch_unlocked();
+    }
+
+    std::vector<TxnQueueEntry*> pop_ready_batch_unlocked() {
         // 若存在 inflight 批次，则将其余量一次性弹出
         if (inflight_active_) {
-            auto batch_entries = std::move(inflight_.entries);
+            auto batch_entries = make_vector_from_range(inflight_.entries, inflight_pos_, inflight_.entries.size());
+            inflight_.entries.clear();
+            inflight_pos_ = 0;
             inflight_active_ = false;
             current_queue_size_ -= static_cast<int>(batch_entries.size());
             if (!batch_entries.empty() && batch_entries.front() != nullptr) {
@@ -136,8 +159,12 @@ public:
 
     // 弹出最高优先级批次的一部分（chunk) 
     // out_is_last 为 true 表示该批次已全部取完
-    std::list<TxnQueueEntry*> pop_ready_chunk(bool* out_is_last = nullptr) {
+    std::vector<TxnQueueEntry*> pop_ready_chunk(bool* out_is_last = nullptr) {
         std::unique_lock<std::mutex> lock(queue_mutex_);
+        return pop_ready_chunk_unlocked(out_is_last);
+    }
+
+    std::vector<TxnQueueEntry*> pop_ready_chunk_unlocked(bool* out_is_last = nullptr) {
         // 若当前没有在处理的 top 批次，则取出队首批次作为 inflight，不重新入队
         if (!inflight_active_) {
             if (pq_.empty()) {
@@ -147,29 +174,30 @@ public:
             inflight_ = std::move(const_cast<Batch&>(pq_.top()));
             pq_.pop();
             inflight_active_ = true;
+            inflight_pos_ = 0;
             chunk_size_ = std::max(1, static_cast<int>(inflight_.entries.size()) / worker_threads);
         }
 
         // 从 inflight_ 批次前端切分 chunk
-        std::list<TxnQueueEntry*> chunk;
-        int taken = 0;
-        while (taken < chunk_size_ && !inflight_.entries.empty()) {
-            TxnQueueEntry* e = inflight_.entries.front();
-            inflight_.entries.pop_front();
-            chunk.push_back(e);
-            taken++;
-        }
+        const size_t remaining = inflight_.entries.size() - inflight_pos_;
+        const size_t take = std::min<size_t>(chunk_size_, remaining);
+        std::vector<TxnQueueEntry*> chunk =
+            make_vector_from_range(inflight_.entries, inflight_pos_, inflight_pos_ + take);
+        inflight_pos_ += take;
         // 设置 chunk 的 combine
         assert(!chunk.empty());
         chunk.front()->combine_txn_count = static_cast<int>(chunk.size());
         // 更新剩余 inflight 的 combine（若还有剩余）
-        if (!inflight_.entries.empty() && inflight_.entries.front() != nullptr) {
-            inflight_.entries.front()->combine_txn_count = static_cast<int>(inflight_.entries.size());
+        if (inflight_pos_ < inflight_.entries.size() && inflight_.entries[inflight_pos_] != nullptr) {
+            inflight_.entries[inflight_pos_]->combine_txn_count =
+                static_cast<int>(inflight_.entries.size() - inflight_pos_);
         }
         // 若 inflight 耗尽，标记完成
-        bool finished_inflight = inflight_.entries.empty();
+        bool finished_inflight = inflight_pos_ >= inflight_.entries.size();
         if (finished_inflight) {
             inflight_active_ = false;
+            inflight_.entries.clear();
+            inflight_pos_ = 0;
         }
         if (out_is_last) *out_is_last = finished_inflight;
         current_queue_size_ -= static_cast<int>(chunk.size());
@@ -179,8 +207,12 @@ public:
     // 查看当前最高优先级批次大小（仅用于决策，不弹出）
     int top_batch_size() {
         std::unique_lock<std::mutex> lock(queue_mutex_);
+        return top_batch_size_unlocked();
+    }
+
+    int top_batch_size_unlocked() const {
         if (inflight_active_) {
-            return static_cast<int>(inflight_.entries.size());
+            return static_cast<int>(inflight_.entries.size() - inflight_pos_);
         }
         if (pq_.empty()) return 0;
         const Batch& top = pq_.top();
@@ -189,13 +221,15 @@ public:
 
     int size() { return current_queue_size_; }
     bool empty() { return current_queue_size_ == 0; }
+    bool empty_unlocked() const { return current_queue_size_.load(std::memory_order_relaxed) == 0; }
     bool is_inflight_active() { return inflight_active_; }
+    bool is_inflight_active_unlocked() const { return inflight_active_; }
 
 private:
     struct Batch {
         int priority = 0;         // 越大越优先
         uint64_t seq = 0;         // 先进先出用于同优先级打破平局
-        std::list<TxnQueueEntry*> entries; // 批次条目
+        std::vector<TxnQueueEntry*> entries; // 批次条目
     };
     struct BatchCmp {
         bool operator()(const Batch& a, const Batch& b) const {
@@ -208,6 +242,7 @@ private:
     uint64_t seq_counter_ = 0;
     Batch inflight_;
     bool inflight_active_ = false;
+    size_t inflight_pos_ = 0;
     int chunk_size_ = 0;
 
     std::mutex queue_mutex_;
@@ -216,6 +251,18 @@ private:
     SlidingTransactionInforTable* tit;
     std::atomic<int> current_queue_size_ = 0;
     Logger* logger_;
+
+    static std::vector<TxnQueueEntry*> make_vector_from_range(
+        const std::vector<TxnQueueEntry*>& entries,
+        size_t begin,
+        size_t end) {
+        std::vector<TxnQueueEntry*> out;
+        out.reserve(end - begin);
+        for (size_t i = begin; i < end; ++i) {
+            out.push_back(entries[i]);
+        }
+        return out;
+    }
 };
 
 // 这里存储着等待的事务集合
@@ -237,8 +284,18 @@ public:
         if(tx_entry->ref.load(std::memory_order_acquire) == 0) {
             return false;
         }
-        pending_target_node_[tx_entry] = node_id;
-        pending_txn_cnt_per_node_[node_id]++;
+        auto it = pending_target_node_.find(tx_entry);
+        if (it != pending_target_node_.end()) {
+            if (it->second != node_id) {
+                pending_txn_cnt_per_node_[it->second]--;
+                it->second = node_id;
+                pending_txn_cnt_per_node_[node_id]++;
+            }
+        } else {
+            pending_target_node_[tx_entry] = node_id;
+            pending_txn_cnt_per_node_[node_id]++;
+            total_pending_txn_count_.fetch_add(1, std::memory_order_release);
+        }
         return true;
     }
 
@@ -296,8 +353,13 @@ public:
         return pending_target_node_.empty();
     }
 
+    bool empty_fast() const {
+        return total_pending_txn_count_.load(std::memory_order_acquire) == 0;
+    }
+
     std::vector<std::vector<TxnQueueEntry*>> self_check_ref_is_zero(){
         std::vector<std::vector<TxnQueueEntry*>> ready_to_push;
+        if (empty_fast()) return ready_to_push;
         ready_to_push.resize(ComputeNodeCount);
         std::lock_guard<std::mutex> lk(pending_mutex_);
         for (auto it = pending_target_node_.begin(); it != pending_target_node_.end(); ) {
@@ -308,6 +370,7 @@ public:
                 ready_to_push[node_id].emplace_back(txn);
                 it = pending_target_node_.erase(it); // 安全地擦除当前迭代器
                 pending_txn_cnt_per_node_[node_id]--;
+                total_pending_txn_count_.fetch_sub(1, std::memory_order_release);
             } else {
                 ++it;
             }
@@ -337,6 +400,7 @@ public:
                 }
                 node_id_t node_id = it->second;
                 pending_txn_cnt_per_node_[node_id]--;
+                total_pending_txn_count_.fetch_sub(1, std::memory_order_release);
                 pending_target_node_.erase(it);
                 if(pending_target_node_.size() < 100) notify = true;
                 to_schedule[node_id].push_back(entry);
@@ -377,6 +441,7 @@ private:
     std::vector<int> pending_txn_cnt_per_node_;
     std::condition_variable pending_cv_;
     std::mutex pending_mutex_;
+    std::atomic<int> total_pending_txn_count_{0};
 
     SlidingTransactionInforTable* tit;
     Logger* logger_;
@@ -404,10 +469,10 @@ public:
         queue_cv_.notify_all();
     }
 
-    std::list<TxnQueueEntry*> pop_txn_chimera(int* ret_call_id = nullptr, int* ret_type = nullptr) {
+    std::vector<TxnQueueEntry*> pop_txn_chimera(int* ret_call_id = nullptr, int* ret_type = nullptr) {
         int call_id = rand();
         if(ret_call_id != nullptr) *ret_call_id = call_id;
-        std::list<TxnQueueEntry*> batch_entries;
+        std::vector<TxnQueueEntry*> batch_entries;
         std::unique_lock<std::mutex> lock(queue_mutex_);
 
         bool is_phase2_pop = false;
@@ -417,7 +482,7 @@ public:
                 if(ret_type != nullptr) *ret_type = 0;
                 return {};
             }
-            bool all_queues_empty = txn_queue_.empty() && dag_txn_queue_->empty() && phase2_txn_queue_.empty();
+            bool all_queues_empty = txn_queue_.empty() && dag_txn_queue_->empty_unlocked() && phase2_txn_queue_.empty();
             bool can_exit_completely = all_queues_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
 
             if (g_chimera_phase == 1) { // Phase 2: Global
@@ -433,13 +498,13 @@ public:
                     queue_cv_.wait(lock, [this]() { 
                         if (force_stopped_) return true;
                         bool has_txn = !phase2_txn_queue_.empty();
-                        bool all_empty = txn_queue_.empty() && dag_txn_queue_->empty() && phase2_txn_queue_.empty();
+                        bool all_empty = txn_queue_.empty() && dag_txn_queue_->empty_unlocked() && phase2_txn_queue_.empty();
                         bool can_exit = all_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
                         return has_txn || can_exit || g_chimera_phase != 1;
                     });
                 }
             } else { // Phase 1: Partition
-                if(!txn_queue_.empty() || !dag_txn_queue_->empty()) {
+                if(!txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
                     is_phase2_pop = false;
                     break; 
                 }
@@ -451,8 +516,8 @@ public:
                 else { 
                     queue_cv_.wait(lock, [this]() { 
                         if (force_stopped_) return true;
-                        bool has_txn = !txn_queue_.empty() || !dag_txn_queue_->empty();
-                        bool all_empty = txn_queue_.empty() && dag_txn_queue_->empty() && phase2_txn_queue_.empty();
+                        bool has_txn = !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked();
+                        bool all_empty = txn_queue_.empty() && dag_txn_queue_->empty_unlocked() && phase2_txn_queue_.empty();
                         bool can_exit = all_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
                         return has_txn || can_exit || g_chimera_phase == 1; 
                     });
@@ -471,9 +536,9 @@ public:
             return batch_entries;
         }
 
-        if(!dag_txn_queue_->empty()) {
+        if(!dag_txn_queue_->empty_unlocked()) {
             if(ret_type != nullptr) *ret_type = 1; // dag type
-            batch_entries = std::move(dag_txn_queue_->pop_ready_batch());
+            batch_entries = std::move(dag_txn_queue_->pop_ready_batch_unlocked());
             if (batch_entries.empty()) return {}; // double check for safety
             current_queue_size_ -= static_cast<int>(batch_entries.size()); // 只要保持队列长度大于0就行
 
@@ -494,12 +559,12 @@ public:
         return batch_entries;
     }
 
-    std::list<TxnQueueEntry*> pop_txn(int* ret_call_id = nullptr, int* ret_type = nullptr) {
+    std::vector<TxnQueueEntry*> pop_txn(int* ret_call_id = nullptr, int* ret_type = nullptr) {
         if (SYSTEM_MODE == 28) return pop_txn_chimera(ret_call_id, ret_type);
         
         int call_id = rand();
         if(ret_call_id != nullptr) *ret_call_id = call_id;
-        std::list<TxnQueueEntry*> batch_entries; // ret
+        std::vector<TxnQueueEntry*> batch_entries; // ret
         std::unique_lock<std::mutex> lock(queue_mutex_);
         
         // 计时
@@ -532,10 +597,10 @@ public:
                 if(ret_type != nullptr) *ret_type = 0;
                 return {};
             }
-            if(!txn_queue_.empty() || !dag_txn_queue_->empty()) {
+            if(!txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
                 break; // 有事务可弹出
             }
-            if(txn_queue_.empty() && dag_txn_queue_->empty() && pending_txn_queue_->empty_node(node_id_) && (finished_ || batch_finished_)) {
+            if(txn_queue_.empty() && dag_txn_queue_->empty_unlocked() && pending_txn_queue_->empty_node(node_id_) && (finished_ || batch_finished_)) {
             // batch end
                 if(ret_type != nullptr) *ret_type = 0; // finished type
                 // indicate finished or batch finished, pop one from shared_queue, if shared_queue is empty, will returen {}
@@ -551,22 +616,22 @@ public:
                 // 目前无事务, 等待
                 queue_cv_.wait(lock, [this]() { 
                     if (force_stopped_) return true;
-                    bool has_txn = !txn_queue_.empty() || !dag_txn_queue_->empty();
+                    bool has_txn = !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked();
                     bool can_exit = (finished_ || batch_finished_) && pending_txn_queue_->empty_node(node_id_);
                     return has_txn || can_exit;
                 });
             }
         }
 
-        if(!dag_txn_queue_->empty()){
+        if(!dag_txn_queue_->empty_unlocked()){
             if(ret_type != nullptr) *ret_type = 1; // dag type
             // 优先取 DAG-ready，若过大则分块，并与 regular 批次做混合以降低冲突
-            bool inflight_active = dag_txn_queue_->is_inflight_active();
+            bool inflight_active = dag_txn_queue_->is_inflight_active_unlocked();
             // if(inflight_active || dag_txn_queue_->top_batch_size() > worker_threads * 3) {
-            if(inflight_active || dag_txn_queue_->top_batch_size() > 10000) {
+            if(inflight_active || dag_txn_queue_->top_batch_size_unlocked() > 10000) {
                 // !get the inflight chunk
                 bool last_chunk = false;
-                auto dag_chunk = std::move(dag_txn_queue_->pop_ready_chunk(&last_chunk));
+                auto dag_chunk = std::move(dag_txn_queue_->pop_ready_chunk_unlocked(&last_chunk));
                 assert(!dag_chunk.empty());
                 assert(dag_chunk.front() != nullptr); 
                 if (last_chunk) {
@@ -577,12 +642,12 @@ public:
                 schedule_txn_cnt -= dag_sz;
 
                 // 从 txn_queue_ 中尝试混合多个 regular 批次，使用 splice 扁平化条目
-                std::list<TxnQueueEntry*> reg_part;
+                std::vector<TxnQueueEntry*> reg_part;
                 int popped_vec_cnt = 0;
                 for (int i = 0; i < 3 && !txn_queue_.empty(); ++i) {
                     // 取队首一个批次并将条目移动到 reg_part
                     auto& front_batch = txn_queue_.front();
-                    reg_part.splice(reg_part.end(), front_batch);
+                    reg_part.insert(reg_part.end(), front_batch.begin(), front_batch.end());
                     txn_queue_.pop_front();
                     popped_vec_cnt += 1;
                 }
@@ -606,7 +671,7 @@ public:
             #endif
 
                 // ! Fix: Notify waiting threads (producers or other consumers)
-                if(current_queue_size_ <= max_queue_size_ * 0.8 || !txn_queue_.empty() || !dag_txn_queue_->empty()) {
+                if(current_queue_size_ <= max_queue_size_ * 0.8 || !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
                     queue_cv_.notify_all();
                 }
 
@@ -622,20 +687,21 @@ public:
                 }
 
                 // 随机交替合并两个 list，避免总是首尾拼接
-                std::list<TxnQueueEntry*> mixed;
+                std::vector<TxnQueueEntry*> mixed;
+                mixed.reserve(dag_chunk.size() + reg_part.size());
                 int dag_rem = static_cast<int>(dag_chunk.size());
                 int reg_rem = static_cast<int>(reg_part.size());
-                while (!dag_chunk.empty() || !reg_part.empty()) {
-                    if (dag_chunk.empty()) {
-                        TxnQueueEntry* e = reg_part.front();
-                        reg_part.pop_front();
+                size_t dag_idx = 0;
+                size_t reg_idx = 0;
+                while (dag_idx < dag_chunk.size() || reg_idx < reg_part.size()) {
+                    if (dag_idx >= dag_chunk.size()) {
+                        TxnQueueEntry* e = reg_part[reg_idx++];
                         mixed.push_back(e);
                         reg_rem--;
                         continue;
                     }
-                    if (reg_part.empty()) {
-                        TxnQueueEntry* e = dag_chunk.front();
-                        dag_chunk.pop_front();
+                    if (reg_idx >= reg_part.size()) {
+                        TxnQueueEntry* e = dag_chunk[dag_idx++];
                         mixed.push_back(e);
                         dag_rem--;
                         continue;
@@ -643,13 +709,11 @@ public:
                     int total_rem = dag_rem + reg_rem;
                     int pick = rand() % total_rem;
                     if (pick < dag_rem) {
-                        TxnQueueEntry* e = dag_chunk.front();
-                        dag_chunk.pop_front();
+                        TxnQueueEntry* e = dag_chunk[dag_idx++];
                         mixed.push_back(e);
                         dag_rem--;
                     } else {
-                        TxnQueueEntry* e = reg_part.front();
-                        reg_part.pop_front();
+                        TxnQueueEntry* e = reg_part[reg_idx++];
                         mixed.push_back(e);
                         reg_rem--;
                     }
@@ -663,7 +727,7 @@ public:
             else {
                 // !get the full dag batch
                 // auto start_dag_pop_time = std::chrono::steady_clock::now();
-                batch_entries = std::move(dag_txn_queue_->pop_ready_batch());
+                batch_entries = std::move(dag_txn_queue_->pop_ready_batch_unlocked());
                 // auto end_dag_pop_time = std::chrono::steady_clock::now();
                 // double dag_pop_ms = std::chrono::duration<double, std::milli>(end_dag_pop_time - start_dag_pop_time).count();
                 // if(dag_pop_ms > 100) {
@@ -713,7 +777,7 @@ public:
         }
 
         // 通知可能阻塞的生产者线程或消费者线程
-        if(current_queue_size_ <= max_queue_size_ * 0.8 || !txn_queue_.empty() || !dag_txn_queue_->empty()) {
+        if(current_queue_size_ <= max_queue_size_ * 0.8 || !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
             queue_cv_.notify_all();
         }
         if(current_queue_size_ == 0) {
@@ -740,14 +804,14 @@ public:
             return;
         }
         if (txn_queue_.empty()) {
-            txn_queue_.emplace_back(1, entry);
+            txn_queue_.push_back(make_vector_batch(entry));
         } 
         else{
             auto it = txn_queue_.end() - 1;
             if((*it).size() < BatchExecutorPOPTxnSize) {
                 it->push_back(entry);
             }
-            else txn_queue_.emplace_back(1, entry); // 构造包含单元素的批
+            else txn_queue_.push_back(make_vector_batch(entry)); // 构造包含单元素的批
         }
         ++current_queue_size_;
         if(finished_) queue_cv_.notify_all();
@@ -756,16 +820,17 @@ public:
 
     // push 绑定到单线程的事务到队列前端
     void push_txn_dag_ready(std::vector<TxnQueueEntry*> entries, int type = 0) {
+        auto prepared = DAGTxnQueue::prepare_ready_batch(std::move(entries));
+        if (prepared.entries.empty()) return;
+        int size = static_cast<int>(prepared.entries.size());
         std::unique_lock<std::mutex> lock(queue_mutex_);
         if (force_stopped_) {
             return;
         }
-        assert(!entries.empty());
-        int size = static_cast<int>(entries.size());
         current_queue_size_ += size;
         schedule_txn_cnt += size;
         schedule_txn_vec_cnt += 1;
-        dag_txn_queue_->push_ready_batch(std::move(entries));
+        dag_txn_queue_->push_prepared_ready_batch_unlocked(std::move(prepared));
     #if LOG_QUEUE_STATUS
         logger_->info("[TxnQueue Push Front] Pushed combined txn batch of size " + 
                         std::to_string(size) + " to front of txn queue of compute node " + std::to_string(node_id_) + 
@@ -815,11 +880,17 @@ public:
             return;
         }
         
-        assert(entries.size() <= BatchExecutorPOPTxnSize);
-        current_queue_size_ += static_cast<int>(entries.size());
-        regular_txn_cnt += static_cast<int>(entries.size());
+        const int size = static_cast<int>(entries.size());
+        assert(size <= BatchExecutorPOPTxnSize);
+        std::vector<TxnQueueEntry*> batch;
+        batch.reserve(size);
+        for (auto* entry : entries) {
+            batch.push_back(entry);
+        }
+        current_queue_size_ += size;
+        regular_txn_cnt += size;
         regular_txn_vec_cnt += 1;
-        txn_queue_.emplace_back(std::move(entries)); // 构造包含单元素的批
+        txn_queue_.emplace_back(std::move(batch));
         if(finished_) queue_cv_.notify_all();
         else queue_cv_.notify_one();
     }
@@ -848,7 +919,8 @@ public:
 
         // 2. Create new batches for remaining entries
         while(i < entries.size()) {
-            std::list<TxnQueueEntry*> batch;
+            std::vector<TxnQueueEntry*> batch;
+            batch.reserve(BatchExecutorPOPTxnSize);
             for(int j = 0; j < BatchExecutorPOPTxnSize && i < entries.size(); j++, i++) {
                 // construct a batch
                 batch.push_back(entries[i]);
@@ -856,7 +928,7 @@ public:
             current_queue_size_ += static_cast<int>(batch.size());
             regular_txn_cnt += static_cast<int>(batch.size());
             regular_txn_vec_cnt += 1;
-            txn_queue_.emplace_back(std::move(batch)); // 构造包含单元素的批
+            txn_queue_.emplace_back(std::move(batch));
         }
         if(finished_) queue_cv_.notify_all();
         else queue_cv_.notify_one();
@@ -885,7 +957,8 @@ public:
 
         // 2. Create new batches for remaining entries
         while(i < entries.size()) {
-            std::list<TxnQueueEntry*> batch;
+            std::vector<TxnQueueEntry*> batch;
+            batch.reserve(BatchExecutorPOPTxnSize);
             for(int j = 0; j < BatchExecutorPOPTxnSize && i < entries.size(); j++, i++) {
                 batch.push_back(entries[i]);
             }
@@ -905,8 +978,14 @@ public:
             return;
         }
         
-        current_phase2_queue_size_ += static_cast<int>(entries.size());
-        phase2_txn_queue_.emplace_back(std::move(entries));
+        const int size = static_cast<int>(entries.size());
+        std::vector<TxnQueueEntry*> batch;
+        batch.reserve(size);
+        for (auto* entry : entries) {
+            batch.push_back(entry);
+        }
+        current_phase2_queue_size_ += size;
+        phase2_txn_queue_.emplace_back(std::move(batch));
         if(finished_) queue_cv_.notify_all();
         else queue_cv_.notify_one();
     }
@@ -1030,8 +1109,8 @@ public:
     }
 
 private:
-    std::deque<std::list<TxnQueueEntry*>> txn_queue_;
-    std::deque<std::list<TxnQueueEntry*>> phase2_txn_queue_; // 用于 Phase 2 跨区事务的独立积压队列
+    std::deque<std::vector<TxnQueueEntry*>> txn_queue_;
+    std::deque<std::vector<TxnQueueEntry*>> phase2_txn_queue_; // 用于 Phase 2 跨区事务的独立积压队列
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::condition_variable* batch_cv_ = nullptr;
@@ -1058,6 +1137,14 @@ private:
     int regular_txn_vec_cnt = 0;
     int schedule_txn_cnt = 0;
     int schedule_txn_vec_cnt = 0;
+
+    static std::vector<TxnQueueEntry*> make_vector_batch(TxnQueueEntry* entry) {
+        std::vector<TxnQueueEntry*> batch;
+        batch.reserve(1);
+        batch.push_back(entry);
+        return batch;
+    }
+
 };
 
 class MiniTxnPool{
@@ -1113,9 +1200,7 @@ public:
         }
         current_pool_size_ -= batch_size;
         if (register_with_tit) {
-            for (auto& entry : *batch_txns) {
-                tit->push(entry); // 即将调度这个事务， 从池中取出，放入事务信息表
-            }
+            tit->push_batch(*batch_txns); // 即将调度这个batch，放入事务信息表
         }
         if(current_pool_size_ <= max_pool_size_ * 0.8) {
             pool_cv_.notify_all();
@@ -1129,9 +1214,7 @@ public:
     }
 
     void register_batch_with_tit(const std::vector<TxnQueueEntry*>& batch_txns) {
-        for (auto* entry : batch_txns) {
-            tit->push(entry);
-        }
+        tit->push_batch(batch_txns);
     }
 
     int size() {

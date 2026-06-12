@@ -7,6 +7,7 @@ std::vector<std::string> DBConnection;
 std::vector<YashanConnInfo> YashanDBConnections;
 std::vector<MySQLConnInfo> MySQLConnections;
 int worker_threads = 16; 
+int RouterInternalThreads = -1;
 int ComputeNodeCount = 2;
 uint64_t ATTEMPTED_NUM = 10000000;
 int REGION_SIZE = 1000;
@@ -20,6 +21,8 @@ bool WarmupEnd = false;
 int TxnPoolMaxSize = 500000;
 int TxnQueueMaxSize = 50000;
 int BatchRouterProcessSize = 10000;
+int PreprocessBatchConcurrency = 1;
+int PreprocessInternalThreads = -1;
 int BatchExecutorPOPTxnSize = 20;
 int PreExtendPageSize = 300000; // 预分配页面大小
 int PreExtendIndexPageSize = 50000; // 预分配索引页面大小
@@ -33,6 +36,7 @@ bool Enable_Long_Txn = false; // 是否启用长事务
 int Long_Txn_Length = 2; // 长事务的长度
 double Key_Page_Map_Cache_Ratio = 1.1; // 默认情况可以存的下
 bool Enable_Fill_Pipeline_Bubble = true; // 默认保持原有行为
+bool Enable_Important_Router_Batch_Log = true; // 默认保持原有重要逐batch日志
 
 
 // global variables
