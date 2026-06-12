@@ -262,16 +262,32 @@ class ZipfGen {
 
 class FiniteZipfGen {
  public:
-  FiniteZipfGen(uint64_t n, double sigma, uint64_t rand_seed, double epsilon = 0.001)
+  FiniteZipfGen(uint64_t n,
+                double sigma,
+                uint64_t rand_seed,
+                uint64_t num_buckets = 1,
+                std::vector<uint64_t>* hottest_keys_ptr = nullptr,
+                double epsilon = 0.001)
       : rand_(rand_seed) {
     if (n == 0 || sigma < 0.0 || epsilon <= 0.0 || epsilon >= 0.5) {
       throw std::invalid_argument("FiniteZipfGen requires n > 0, sigma >= 0, and 0 < epsilon < 0.5");
     }
 
+    num_buckets_ = num_buckets > 0 ? num_buckets : 1;
+    if (n < num_buckets_) num_buckets_ = 1;
+    n_ = n / num_buckets_;
+    if (n_ == 0) n_ = 1;
+
+    for (uint64_t i = 0; i < num_buckets_; ++i) {
+      if (hottest_keys_ptr) {
+        hottest_keys_ptr->push_back(i * n_ + 1);
+      }
+    }
+
     double sum = 0.0;
     uint64_t last = UINT64_MAX;
 
-    for (uint64_t i = 0; i < n; ++i) {
+    for (uint64_t i = 0; i < n_; ++i) {
       sum += std::exp(-sigma * std::log(static_cast<double>(i + 1)));
       if (last == UINT64_MAX ||
           static_cast<double>(i) * (1.0 - epsilon) > static_cast<double>(last)) {
@@ -281,8 +297,8 @@ class FiniteZipfGen {
       }
     }
 
-    if (keys_.empty() || keys_.back() != n - 1) {
-      keys_.push_back(n - 1);
+    if (keys_.empty() || keys_.back() != n_ - 1) {
+      keys_.push_back(n_ - 1);
       cdf_.push_back(sum);
     }
 
@@ -293,6 +309,19 @@ class FiniteZipfGen {
   }
 
   uint64_t next() {
+    uint64_t val = next_in_bucket();
+    if (num_buckets_ > 1) {
+      uint64_t bucket = static_cast<uint64_t>(rand_.next_f64() * static_cast<double>(num_buckets_));
+      if (bucket >= num_buckets_) {
+        bucket = num_buckets_ - 1;
+      }
+      return bucket * n_ + val;
+    }
+    return val;
+  }
+
+ private:
+  uint64_t next_in_bucket() {
     double u = rand_.next_f64();
     auto it = std::lower_bound(cdf_.begin(), cdf_.end(), u);
     size_t idx = static_cast<size_t>(it - cdf_.begin());
@@ -322,4 +351,6 @@ class FiniteZipfGen {
   std::vector<uint64_t> keys_;
   std::vector<double> cdf_;
   Rand rand_;
+  uint64_t n_;
+  uint64_t num_buckets_;
 } __attribute__((aligned(128)));

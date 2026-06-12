@@ -12,9 +12,9 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
     uint64_t zipf_seed = 2 * thread_id * GetCPUCycle();
     uint64_t zipf_seed_mask = (uint64_t(1) << 48) - 1;
     if (use_finite_zipfian_) {
-        finite_zipfian_gen = new FiniteZipfGen(get_record_count(), zipfian_theta_, zipf_seed & zipf_seed_mask);
+        finite_zipfian_gen = new FiniteZipfGen(get_record_count(), zipfian_theta_, zipf_seed & zipf_seed_mask, NumBucket);
     } else {
-        zipfian_gen = new ZipfGen(get_record_count(), zipfian_theta_, zipf_seed & zipf_seed_mask);
+        zipfian_gen = new ZipfGen(get_record_count(), zipfian_theta_, zipf_seed & zipf_seed_mask, NumBucket);
     }
 
     // 全局一共进行 MetisWarmupRound * PARTITION_INTERVAL的冷启动事务生成，每个工作节点具有worker_threads个线程，每个线程生成try_count个事务
