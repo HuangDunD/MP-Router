@@ -16,7 +16,7 @@ import shutil
 import argparse
 
 # Set LD_LIBRARY_PATH for YashanDB client
-lib_path = "/root/yashandb-client/lib"
+lib_path = os.path.expanduser("~/yashandb-client/lib")
 if "LD_LIBRARY_PATH" in os.environ:
     os.environ["LD_LIBRARY_PATH"] = lib_path + ":" + os.environ["LD_LIBRARY_PATH"]
 else:
@@ -57,7 +57,7 @@ def run_remote_cmd(cmd, check=True, max_retries=3, allowed_exit_codes=[0]):
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             # 增加 timeout 防止连接卡死
-            ssh.connect(kwr_report_ip, username="root", password="20001010@@HcY", timeout=30)
+            ssh.connect(kwr_report_ip, username="root", password=kwr_ip_password, timeout=30)
             # 开启 keepalive 防止长时间无数据传输导致连接断开 (特别是在 rsync 过程中)
             ssh.get_transport().set_keepalive(60)
             
@@ -237,7 +237,8 @@ output = workspace + "/build/output.txt"
 result = workspace + "/build/serve/test/result.txt"
 log = workspace + "/build/serve/test/partitioning_log.log"
 Run_Path = workspace + "/build/serve/test/"
-kwr_report_ip = "10.10.2.41"
+kwr_report_ip = "47.111.27.99"
+kwr_ip_password = "Wljwlj123."
 kwr_report_path = "/home/kingbase/MP-Router/kwr/"
 database_data_path = "/sharedata/kingbase/data-hot/"
 
@@ -246,9 +247,9 @@ database_data_path = "/sharedata/kingbase/data-hot/"
 # dynamic
 # RunModeType = [0, 3, 8, 11, 4, 13]
 # RunModeType = [0, 3, 11, 13]
-# RunModeType = [0, 2, 11, 13, 23, 25]
+RunModeType = [0, 2, 11, 13, 23, 25]
 # RunModeType = [11, 13, 2]
-RunModeType = [28]
+# RunModeType = [28]
 # ! system: 0 随机路由, 2 page hash 11 MP-Router 13 MP-Router without scheduling 23 metis 24 ownership + load 25 load
 # RunModeType = [13]
 # RunModeType = [1]
@@ -265,6 +266,11 @@ AccountCount = [5000000]
 # WorkerThreadCount = [16]
 WorkerThreadCount = [16]
 try_count = 35000
+TimeRun = 1 # 0:disable, 1:enable
+WarmupSeconds = 10
+RunSeconds = 30
+FillPipelineBubble = 0
+Unlog = 1
 workload = "smallbank"
 sys_extend_size = 300000
 sys_index_extend_size = 30000
@@ -417,9 +423,6 @@ if __name__ == "__main__":
                                                 elif access_pattern == 2:
                                                     extra_arg = f" --hotspot-fraction {hotspot_fraction} --hotspot-prob {hotspot_prob}"
 
-                                                if EnableLongTxn:
-                                                    try_count = 35000 // long_txn_length
-                                                
                                                 # 注意：这里添加 --skip-load-data，因为我们已经通过 reset_db_data 恢复了数据
                                                 # cmd = (
                                                 #     f"./run --workload {workload} --system-mode {run_mode} --access-pattern {access_pattern}{extra_arg} "
@@ -428,9 +431,20 @@ if __name__ == "__main__":
                                                 # )
                                                 cmd = (
                                                     f"./run --workload {workload} --system-mode {run_mode} --access-pattern {access_pattern}{extra_arg} "
-                                                    f"--account-count {account_count} --worker-threads {worker_thread_count} --try-count {try_count} --kwr-name {kwr_report_name}"
-                                                    f" --sys_extend_size {sys_extend_size} --sys_index_extend_size {sys_index_extend_size} --affinity-txn-ratio {affinity_ratio} --batch-size {batch_size} --num-bucket {num_bucket}"
+                                                    f"--account-count {account_count} --worker-threads {worker_thread_count} --kwr-name {kwr_report_name}"
+                                                    f" --sys_extend_size {sys_extend_size} --sys_index_extend_size {sys_index_extend_size} --affinity-txn-ratio {affinity_ratio} "
+                                                    f" --batch-size {batch_size} --num-bucket {num_bucket}"
                                                 )
+
+                                                if TimeRun:
+                                                    cmd += f" --time-run --warmup-seconds {WarmupSeconds} --run-seconds {RunSeconds} --fill-pipeline-bubble {FillPipelineBubble}"
+                                                    if Unlog:
+                                                        cmd += " --unlog"
+                                                else:
+                                                    current_try_count = try_count
+                                                    if EnableLongTxn:
+                                                        current_try_count = 35000 // long_txn_length
+                                                    cmd += f" --try-count {current_try_count}"
 
                                                 if EnableLongTxn:
                                                     cmd += f" --enable-long-txn --long-txn-length {long_txn_length}"
@@ -463,33 +477,32 @@ if __name__ == "__main__":
                                                     dest_dir = (
                                                         f"{figure_path}/result_m{run_mode}_p{access_pattern}{extra_part_file}_c{account_count}_t{worker_thread_count}_r{affinity_ratio}_b{batch_size}_nb{num_bucket}{extra_part_file_txn}{extra_part_file_key_ratio}/"
                                                     )
-                                                os.makedirs(dest_dir, exist_ok=True)
+                                                    os.makedirs(dest_dir, exist_ok=True)
 
-                                                # 使用shutil复制文件，保持内容一致
-                                                dest_file = f"{dest_dir}result.txt"
-                                                shutil.copy2(result, dest_file)
-                                                log_file = f"{dest_dir}partitioning_log.log"
-                                                shutil.copy2(log, log_file)
+                                                    # 使用shutil复制文件，保持内容一致
+                                                    dest_file = f"{dest_dir}result.txt"
+                                                    shutil.copy2(result, dest_file)
+                                                    log_file = f"{dest_dir}partitioning_log.log"
+                                                    shutil.copy2(log, log_file)
 
-                                                # scp 将远程服务器的 kwr 报告文件复制到本地对应的结果文件夹中
-                                                ssh = paramiko.SSHClient()
-                                                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                                                ssh.connect(kwr_report_ip, username="root", password="20001010@@HcY")
-                                                sftp = ssh.open_sftp()
-                                                remote_warm_report = os.path.join(kwr_report_path, f"{kwr_report_name}_fisrt.html")
-                                                remote_run_report = os.path.join(kwr_report_path, f"{kwr_report_name}_end.html")
-                                                local_warm_report = os.path.join(dest_dir, f"{kwr_report_name}_fisrt.html")
-                                                local_run_report = os.path.join(dest_dir, f"{kwr_report_name}_end.html")
-                                                try:
-                                                    # sftp.get(remote_warm_report, local_warm_report)
-                                                    sftp.get(remote_run_report, local_run_report)
-                                                except Exception as e:
-                                                    logging.error(f"\033[31m Failed to retrieve KWR report files: {e} \033[0m")
-                                                sftp.close()
-                                                ssh.close()
-                                                
-                                            else:
-                                                logging.warning("Result file not found, retrying...")
+                                                    # scp 将远程服务器的 kwr 报告文件复制到本地对应的结果文件夹中
+                                                    ssh = paramiko.SSHClient()
+                                                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                                                    ssh.connect(kwr_report_ip, username="root", password=kwr_ip_password)
+                                                    sftp = ssh.open_sftp()
+                                                    remote_warm_report = os.path.join(kwr_report_path, f"{kwr_report_name}_fisrt.html")
+                                                    remote_run_report = os.path.join(kwr_report_path, f"{kwr_report_name}_end.html")
+                                                    local_warm_report = os.path.join(dest_dir, f"{kwr_report_name}_fisrt.html")
+                                                    local_run_report = os.path.join(dest_dir, f"{kwr_report_name}_end.html")
+                                                    try:
+                                                        # sftp.get(remote_warm_report, local_warm_report)
+                                                        sftp.get(remote_run_report, local_run_report)
+                                                    except Exception as e:
+                                                        logging.error(f"\033[31m Failed to retrieve KWR report files: {e} \033[0m")
+                                                    sftp.close()
+                                                    ssh.close()
+                                                else:
+                                                    logging.warning("Result file not found, retrying...")
                                         if not success:
                                             theta_err = f", ZipfianTheta={zipfian_theta}" if access_pattern == 1 else ""
                                             logging.error(

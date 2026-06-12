@@ -215,7 +215,7 @@ static bool warmup_end_supported_mode() {
            SYSTEM_MODE == 30;
 }
 
-static void reset_pg_runtime_stats_after_warmup(Logger* logger_) {
+static void reset_pg_runtime_stats_before_benchmark(Logger* logger_) {
     if (DB_TYPE != 0 || DBConnection.empty()) {
         return;
     }
@@ -228,14 +228,14 @@ static void reset_pg_runtime_stats_after_warmup(Logger* logger_) {
         txn.exec("SELECT pg_stat_reset_shared('wal')");
         txn.exec("SELECT pg_stat_reset_shared('bgwriter')");
         txn.commit();
-        std::cout << "PostgreSQL runtime stats reset after warmup." << std::endl;
+        std::cout << "PostgreSQL runtime stats reset before benchmark." << std::endl;
         if (logger_) {
-            logger_->info("PostgreSQL runtime stats reset after warmup.");
+            logger_->info("PostgreSQL runtime stats reset before benchmark.");
         }
     } catch (const std::exception &e) {
-        std::cerr << "Failed to reset PostgreSQL runtime stats after warmup: " << e.what() << std::endl;
+        std::cerr << "Failed to reset PostgreSQL runtime stats before benchmark: " << e.what() << std::endl;
         if (logger_) {
-            logger_->warning("Failed to reset PostgreSQL runtime stats after warmup: " + std::string(e.what()));
+            logger_->warning("Failed to reset PostgreSQL runtime stats before benchmark: " + std::string(e.what()));
         }
     }
 }
@@ -259,7 +259,6 @@ static void maybe_finish_warmup(Logger* logger_) {
         return;
     }
 
-    reset_pg_runtime_stats_after_warmup(logger_);
     WarmupEnd = true;
 
     std::ostringstream os;
@@ -281,7 +280,6 @@ static void finish_warmup_now(Logger* logger_, const std::string& reason) {
         return;
     }
 
-    reset_pg_runtime_stats_after_warmup(logger_);
     WarmupEnd = true;
 
     std::ostringstream os;
@@ -3177,10 +3175,10 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
 
         // kes 四机, 新版本
-        // DBConnection.push_back("host=10.10.2.41 port=44321 user=system password=123456 dbname=smallbank");
-        // DBConnection.push_back("host=10.10.2.42 port=44321 user=system password=123456 dbname=smallbank");
-        // DBConnection.push_back("host=10.10.2.44 port=44321 user=system password=123456 dbname=smallbank");
-        // DBConnection.push_back("host=10.10.2.45 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=172.16.0.105 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=172.16.0.109 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=172.16.0.111 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=172.16.0.110 port=44321 user=system password=123456 dbname=smallbank");
 
         // ali 双机
         // DBConnection.push_back("host=172.16.0.39 port=44321 user=system password=123456 dbname=smallbank");
@@ -3209,8 +3207,8 @@ int main(int argc, char *argv[]) {
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
         // DBConnection.push_back("host=10.77.110.147 port=5432 user=hcy password=123456 dbname=smallbank");
 
-        DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=postgres");
-        DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=postgres");
+        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=postgres");
+        // DBConnection.push_back("host=127.0.0.1 port=5432 user=hcy password=123456 dbname=postgres");
 
         if (!cli_db_connections.empty()) {
             std::cout << "Using PostgreSQL connection strings provided via command line:" << std::endl;
@@ -3630,9 +3628,14 @@ int main(int argc, char *argv[]) {
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
-    // Create a performance snapshot
+    // Reset statistics and create the KWR start snapshot before starting load.
+    // KWR therefore covers warmup and measurement without snapshot overhead
+    // or a statistics reset occurring while the workload is running.
     int start_snapshot_id = -1;
-    if(DB_TYPE == 0 && !router_only) start_snapshot_id = create_perf_kwr_snapshot();
+    if(DB_TYPE == 0 && !router_only) {
+        reset_pg_runtime_stats_before_benchmark(logger_);
+        start_snapshot_id = create_perf_kwr_snapshot();
+    }
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
     // --- Start Transaction Threads ---
