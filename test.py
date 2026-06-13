@@ -598,35 +598,72 @@ def dedupe_case_configs(configs):
             deduped.append(case)
     return deduped
 
+def values_except_default(values, default_value):
+    return [value for value in values if value != default_value]
+
+def access_config_key(config):
+    return (
+        config["access_pattern"],
+        config.get("zipfian_theta"),
+        config.get("zipfian_generator"),
+        config.get("hotspot_fraction"),
+        config.get("hotspot_prob"),
+    )
+
 def build_axis_case_configs(workload_name, account_count=None, warehouse_count=None):
     base = base_case_config(workload_name, account_count, warehouse_count)
-    configs = []
+    configs = [base]
 
+    default_access_key = access_config_key(default_access_config(workload_name))
     for access_config in access_configs_for_workload(workload_name):
+        if access_config_key(access_config) == default_access_key:
+            continue
         case = dict(base)
         case.update(access_config)
         case["scan_axis"] = "access"
         configs.append(case)
 
-    for worker_threads in WorkerThreadCount:
+    if workload_name != "smallbank":
+        return dedupe_case_configs(configs)
+
+    for worker_threads in values_except_default(WorkerThreadCount, DefaultWorkerThreads):
         case = dict(base)
         case["worker_threads"] = worker_threads
         case["scan_axis"] = "worker_threads"
         configs.append(case)
 
-    for batch_size in BatchSize:
+    for affinity_ratio in values_except_default(AffinityTxnRatio, DefaultAffinityTxnRatio):
+        case = dict(base)
+        case["affinity_txn_ratio"] = affinity_ratio
+        case["scan_axis"] = "affinity_txn_ratio"
+        configs.append(case)
+
+    for batch_size in values_except_default(BatchSize, DefaultBatchSize):
         case = dict(base)
         case["batch_size"] = batch_size
         case["scan_axis"] = "batch_size"
         configs.append(case)
 
-    for key_page_ratio in KeyPageMapCapacity:
+    for num_bucket in values_except_default(NumBucket, DefaultNumBucket):
+        case = dict(base)
+        case["num_bucket"] = num_bucket
+        case["scan_axis"] = "num_bucket"
+        configs.append(case)
+
+    if EnableLongTxn:
+        for long_txn_length in values_except_default(LongTxnSize, DefaultLongTxnLength):
+            case = dict(base)
+            case["long_txn_length"] = long_txn_length
+            case["scan_axis"] = "long_txn_length"
+            configs.append(case)
+
+    for key_page_ratio in values_except_default(KeyPageMapCapacity, DefaultKeyPageMapCapacity):
         case = dict(base)
         case["key_page_ratio"] = key_page_ratio
         case["scan_axis"] = "key_page_capacity"
         configs.append(case)
 
-    for mlp_enabled in EnableMLP:
+    for mlp_enabled in values_except_default(EnableMLP, DefaultEnableMLP):
         case = dict(base)
         case["mlp_enabled"] = mlp_enabled
         case["scan_axis"] = "mlp"
@@ -676,6 +713,7 @@ def build_case_plan():
     seen = set()
     baseline_mlp = int(DefaultEnableMLP)
     mlp_run_modes = MLPRunModeType if MLPRunModeType else RunModeType
+    key_page_capacity_run_modes = KeyPageCapacityRunModeType if KeyPageCapacityRunModeType else RunModeType
 
     def case_key(case_config, run_mode):
         return (
@@ -705,7 +743,12 @@ def build_case_plan():
                     case_config.get("scan_axis") == "mlp"
                     and int(case_config.get("mlp_enabled", baseline_mlp)) != baseline_mlp
                 )
-                run_modes = mlp_run_modes if is_mlp_delta else RunModeType
+                if case_config.get("scan_axis") == "key_page_capacity":
+                    run_modes = key_page_capacity_run_modes
+                elif is_mlp_delta:
+                    run_modes = mlp_run_modes
+                else:
+                    run_modes = RunModeType
                 for run_mode in run_modes:
                     key = case_key(case_config, run_mode)
                     if key in seen:
@@ -889,7 +932,7 @@ db_ready_probe_conninfos = [
 # dynamic
 # RunModeType = [0, 3, 8, 11, 4, 13]
 # RunModeType = [0, 3, 11, 13]
-RunModeType = [0, 2, 11, 13, 23, 25]
+RunModeType = [0, 2, 11, 13, 23, 25, 28]
 # RunModeType = [11, 13, 2]
 # RunModeType = [28]
 # ! system: 0 随机路由, 2 page hash 11 MP-Router 13 MP-Router without scheduling 23 metis 24 ownership + load 25 load
@@ -897,8 +940,8 @@ RunModeType = [0, 2, 11, 13, 23, 25]
 # RunModeType = [1]
 Workloads = ["smallbank", "tpcc"] # one script run can cover multiple workloads
 WorkloadAccessPatterns = {
-    "smallbank": [1, 2, 0],
-    "tpcc": [1, 2, 0],
+    "smallbank": [1, 2],
+    "tpcc": [0],
 }
 SweepMode = "axis" # axis: vary one dimension from defaults; full: Cartesian product
 AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
@@ -908,17 +951,17 @@ AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
 ZipfianTheta = [0.1, 0.3, 0.7, 0.9, 1.1, 1.3] 
 # ZipfianTheta = [0.8, 0.9, 0.95, 0.7, 0.6]
 ZipfianGenerator = "finite" # options: finite, legacy
-HotspotFraction = [0.1, 0.01, 0.001]
+HotspotFraction = [1, 0.1, 0.01, 0.001]
 HotspotProb = [0.8]
 # HotspotProb = [0.8, 0.9, 0.95]
 # account = 100W, 单个表大概14W个页面, 每个页面8KB, 大小约1.1GB
-AccountCount = [5000000]
+AccountCount = [10000000]
 WarehouseCount = [200]
 # WorkerThreadCount = [16]
-WorkerThreadCount = [16]
+WorkerThreadCount = [16, 2, 4, 8, 32, 64, 128]
 try_count = 35000
 TimeRun = 1 # 0:disable, 1:enable
-WarmupSeconds = 10
+WarmupSeconds = 15
 RunSeconds = 30
 FillPipelineBubble = 0
 Unlog = 1
@@ -926,22 +969,23 @@ UseDataCache = False # True: restore workload data cache before each case; False
 workload = Workloads[0]
 sys_extend_size = 300000
 sys_index_extend_size = 30000
-AffinityTxnRatio = [0.8]
+AffinityTxnRatio = [0.8, 1, 0.6, 0.4, 0.2, 0]
 # AffinityTxnRatio = [1, 0.8, 0.6, 0.4, 0.2, 0]
 BatchSize = [10000] # default 10000
 # BatchSize = [1000]
 NumBucket = [4]
 EnableLongTxn = 0 # 0:disable, 1:enable
 LongTxnSize = [4, 8, 12, 14, 16, 20] # only valid when EnableLongTxn=1
-KeyPageMapCapacity = [1.1] # passed to --key-page-ratio
+KeyPageMapCapacity = [1.1, 1.0, 0.8, 0.6, 0.4, 0.2] # passed to --key-page-ratio
 EnableMLP = [0] # 0:disable, 1:enable; changing this requires rebuilding with MLP_PREDICTION
 MLPRunModeType = [11] # MLP-delta cases run only these modes; baseline MLP=0 reuses normal sweep results
+KeyPageCapacityRunModeType = [1, 23, 11, 28] # KeyPageMapCapacity axis runs only these modes
 RebuildForMLP = True
 RestoreConfigAfterRun = True
 
 DefaultAccessPattern = {
     "smallbank": 1,
-    "tpcc": 1,
+    "tpcc": 0,
 }
 DefaultZipfianTheta = 0.7
 DefaultHotspotFraction = 0.01
