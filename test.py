@@ -916,14 +916,14 @@ db_tcp_probe_timeout_seconds = 2
 db_pg_isready_timeout_seconds = 2
 db_sql_probe_timeout_seconds = 5
 use_local_db_readiness_probe = True
-enable_sql_readiness_probe = False
+enable_sql_readiness_probe = True
 data_path_wait_timeout_seconds = 30
 test_interval_seconds = 1
 db_ready_probe_conninfos = [
     "host=172.16.0.105 port=44321 user=system password=123456 dbname=smallbank",
-    "host=172.16.0.109 port=44321 user=system password=123456 dbname=smallbank",
-    "host=172.16.0.111 port=44321 user=system password=123456 dbname=smallbank",
-    "host=172.16.0.110 port=44321 user=system password=123456 dbname=smallbank",
+    "host=172.16.0.113 port=44321 user=system password=123456 dbname=smallbank",
+    "host=172.16.0.114 port=44321 user=system password=123456 dbname=smallbank",
+    "host=172.16.0.115 port=44321 user=system password=123456 dbname=smallbank",
 ]
 
 
@@ -1126,6 +1126,8 @@ if __name__ == "__main__":
 
             if EnableLongTxn and case.get("long_txn_length"):
                 cmd += f" --enable-long-txn --long-txn-length {case['long_txn_length']}"
+
+            wait_for_db_start()
 
             with open(output, "w", encoding="utf-8") as outfile:
                 process = subprocess.Popen(cmd, shell=True)
