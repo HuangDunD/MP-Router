@@ -3219,9 +3219,9 @@ int main(int argc, char *argv[]) {
 
         // kes 四机, 新版本
         DBConnection.push_back("host=172.16.0.105 port=44321 user=system password=123456 dbname=smallbank");
-        DBConnection.push_back("host=172.16.0.109 port=44321 user=system password=123456 dbname=smallbank");
-        DBConnection.push_back("host=172.16.0.111 port=44321 user=system password=123456 dbname=smallbank");
-        DBConnection.push_back("host=172.16.0.110 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=172.16.0.113 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=172.16.0.114 port=44321 user=system password=123456 dbname=smallbank");
+        DBConnection.push_back("host=172.16.0.115 port=44321 user=system password=123456 dbname=smallbank");
 
         // ali 双机
         // DBConnection.push_back("host=172.16.0.39 port=44321 user=system password=123456 dbname=smallbank");
