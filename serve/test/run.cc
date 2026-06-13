@@ -298,6 +298,20 @@ static void finish_warmup_now(Logger* logger_, const std::string& reason) {
     }
 }
 
+static void enqueue_metis_partition_before_warmup_end(SmartRouter* smart_router,
+                                                      ThreadPool* thread_pool,
+                                                      Logger* logger_) {
+    std::cout << "\033[33m[Time-based Warmup] Triggering Metis Partition 1s before warmup ends...\033[0m" << std::endl;
+    if (logger_) {
+        logger_->info("[Time-based Warmup] Triggering Metis Partition 1s before warmup ends...");
+    }
+    if (smart_router && thread_pool) {
+        thread_pool->enqueue([smart_router]{
+            smart_router->get_metis_partitioner()->partition_internal_graph("dynamic_partition.csv", ComputeNodeCount);
+        });
+    }
+}
+
 void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* ycsb, TPCC* tpcc) {
     int keys_num;
     if(Workload_Type == 0){
@@ -3778,7 +3792,13 @@ int main(int argc, char *argv[]) {
     if (time_based_run) {
         std::cout << "Time-based run: warmup_seconds=" << warmup_seconds
                   << " run_seconds=" << run_seconds << std::endl;
-        if (warmup_seconds > 0) {
+        if (SYSTEM_MODE == 23 && warmup_seconds > 0) {
+            if (warmup_seconds > 1) {
+                std::this_thread::sleep_for(std::chrono::seconds(warmup_seconds - 1));
+            }
+            enqueue_metis_partition_before_warmup_end(smart_router, &smart_router->get_threadpool(), logger_);
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        } else if (warmup_seconds > 0) {
             std::this_thread::sleep_for(std::chrono::seconds(warmup_seconds));
         }
         finish_warmup_now(logger_, "time-based warmup");
