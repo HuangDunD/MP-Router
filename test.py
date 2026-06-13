@@ -97,8 +97,9 @@ def run_cmd(cmd, check=True):
         raise Exception(f"Command failed: {cmd}")
     return result
 
-def run_remote_cmd(cmd, check=True, max_retries=3, allowed_exit_codes=[0], display_cmd=None):
-    logging.info(f"Executing Remote on {kwr_report_ip}: {display_cmd or cmd}")
+def run_remote_cmd(cmd, check=True, max_retries=3, allowed_exit_codes=[0], display_cmd=None, host=None):
+    remote_host = host or kwr_report_ip
+    logging.info(f"Executing Remote on {remote_host}: {display_cmd or cmd}")
     last_exception = None
     
     for attempt in range(1, max_retries + 1):
@@ -106,7 +107,7 @@ def run_remote_cmd(cmd, check=True, max_retries=3, allowed_exit_codes=[0], displ
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             # 增加 timeout 防止连接卡死
-            ssh.connect(kwr_report_ip, username="root", password=kwr_ip_password, timeout=30)
+            ssh.connect(remote_host, username="root", password=kwr_ip_password, timeout=30)
             # 开启 keepalive 防止长时间无数据传输导致连接断开 (特别是在 rsync 过程中)
             ssh.get_transport().set_keepalive(60)
             
@@ -200,6 +201,62 @@ def parse_conninfo(conninfo):
         parsed[key] = value
     return parsed
 
+def sync_remote_servers_after_case():
+    hosts = []
+    seen = set()
+    for conninfo in db_ready_probe_conninfos:
+        host = parse_conninfo(conninfo).get("host")
+        if host and host not in seen:
+            hosts.append(host)
+            seen.add(host)
+
+    if not hosts:
+        hosts = [kwr_report_ip]
+
+    for host in hosts:
+        run_remote_cmd("sync", check=False, max_retries=1, host=host, display_cmd="sync")
+
+def drop_public_tables_after_config_group():
+    if not shutil.which("psql"):
+        raise RuntimeError("psql is required to drop tables after each config group.")
+
+    drop_tables_sql = """
+DO $$
+DECLARE
+    r record;
+BEGIN
+    FOR r IN
+        SELECT schemaname, tablename
+        FROM pg_tables
+        WHERE schemaname = 'public'
+    LOOP
+        EXECUTE format('DROP TABLE IF EXISTS %I.%I CASCADE', r.schemaname, r.tablename);
+    END LOOP;
+END $$;
+"""
+
+    for conninfo in db_ready_probe_conninfos:
+        parsed = parse_conninfo(conninfo)
+        env = os.environ.copy()
+        if parsed.get("password"):
+            env["PGPASSWORD"] = parsed["password"]
+
+        logging.info(f"Dropping public tables on {mask_conninfo_password(conninfo)}")
+        res = subprocess.run(
+            build_local_sql_exec_command(conninfo, drop_tables_sql),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            timeout=db_drop_tables_timeout_seconds,
+        )
+        if res.returncode != 0:
+            logging.error(
+                f"Failed to drop public tables on {mask_conninfo_password(conninfo)}: "
+                f"stdout={res.stdout.strip()}, stderr={res.stderr.strip()}"
+            )
+            raise RuntimeError("Failed to drop public tables after config group.")
+
 def build_db_probe_command(conninfo):
     parsed = parse_conninfo(conninfo)
     host = parsed.get("host", "127.0.0.1")
@@ -245,6 +302,22 @@ def build_local_sql_probe_command(conninfo):
         "-U", user,
         "-d", dbname,
         "-Atqc", "select 1",
+    ]
+
+def build_local_sql_exec_command(conninfo, sql):
+    parsed = parse_conninfo(conninfo)
+    host = parsed.get("host", "127.0.0.1")
+    port = parsed.get("port", "5432")
+    user = parsed.get("user", "system")
+    dbname = parsed.get("dbname", parsed.get("database", workload))
+    return [
+        "psql",
+        "-v", "ON_ERROR_STOP=1",
+        "-h", host,
+        "-p", str(port),
+        "-U", user,
+        "-d", dbname,
+        "-Atqc", sql,
     ]
 
 def build_tcp_probe_command(conninfo):
@@ -372,6 +445,15 @@ def wait_for_db_stop(timeout=3000):
             return
         time.sleep(db_status_poll_seconds)
     raise Exception("Database failed to stop within timeout")
+
+def restart_database_resource():
+    logging.info("Restarting database resource between config groups...")
+    run_remote_cmd(f"crm resource stop {db_resource_name}")
+    wait_for_db_stop()
+    sync_remote_servers_after_case()
+    run_remote_cmd(f"crm resource start {db_resource_name}")
+    wait_for_db_start()
+    logging.info("Database resource restart completed.")
 
 def reset_db_data(backup_path):
     logging.info(f">>> Resetting Database Data from {backup_path} <<<")
@@ -735,10 +817,19 @@ def build_case_plan():
             run_mode,
         )
 
+    def case_group_key(case_config):
+        return case_key(case_config, None)[:-1]
+
     case_id = 0
+    case_group_id = 0
+    case_group_ids = {}
     for workload_name in Workloads:
         for account_count, warehouse_count in scale_values_for_workload(workload_name):
             for case_config in build_case_configs_for_workload(workload_name, account_count, warehouse_count):
+                group_key = case_group_key(case_config)
+                if group_key not in case_group_ids:
+                    case_group_id += 1
+                    case_group_ids[group_key] = case_group_id
                 is_mlp_delta = (
                     case_config.get("scan_axis") == "mlp"
                     and int(case_config.get("mlp_enabled", baseline_mlp)) != baseline_mlp
@@ -756,6 +847,7 @@ def build_case_plan():
                     seen.add(key)
                     case = dict(case_config)
                     case["run_mode"] = run_mode
+                    case["case_group_id"] = case_group_ids[group_key]
                     case["data_cache_path"] = data_cache_path(workload_name, account_count, warehouse_count)
                     if is_mlp_delta:
                         mlp_case_pairs.append(case)
@@ -783,6 +875,46 @@ def write_case_plan(cases, plan_path):
             for case in cases:
                 f.write("| " + " | ".join(str(case.get(column, "")) for column in columns) + " |\n")
     logging.info(f"Case plan written: {plan_path} ({len(cases)} cases)")
+
+def parse_optional_value(value, parser):
+    if value is None or value == "" or value == "None":
+        return None
+    return parser(value)
+
+def parse_bool_value(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "y")
+
+def normalize_case_from_plan(row):
+    case = dict(row)
+    int_fields = [
+        "case_id", "case_group_id", "run_mode", "access_pattern",
+        "worker_threads", "batch_size", "num_bucket", "mlp_enabled",
+        "account_count", "warehouse_count", "long_txn_length",
+    ]
+    float_fields = [
+        "zipfian_theta", "hotspot_fraction", "hotspot_prob",
+        "affinity_txn_ratio", "key_page_ratio",
+    ]
+    none_string_fields = ["zipfian_generator"]
+
+    for field in int_fields:
+        if field in case:
+            case[field] = parse_optional_value(case[field], int)
+    for field in float_fields:
+        if field in case:
+            case[field] = parse_optional_value(case[field], float)
+    for field in none_string_fields:
+        if field in case and (case[field] == "" or case[field] == "None"):
+            case[field] = None
+    if "use_data_cache" in case:
+        case["use_data_cache"] = parse_bool_value(case["use_data_cache"])
+    return case
+
+def read_case_plan(plan_path):
+    with open(plan_path, newline="", encoding="utf-8") as f:
+        return [normalize_case_from_plan(row) for row in csv.DictReader(f, delimiter="\t")]
 
 def write_case_metadata(case, dest_dir, kwr_report_name, command):
     metadata = dict(case)
@@ -915,10 +1047,12 @@ db_start_probe_fallback_sleep_seconds = 5
 db_tcp_probe_timeout_seconds = 2
 db_pg_isready_timeout_seconds = 2
 db_sql_probe_timeout_seconds = 5
+db_drop_tables_timeout_seconds = 300
 use_local_db_readiness_probe = True
 enable_sql_readiness_probe = True
 data_path_wait_timeout_seconds = 30
 test_interval_seconds = 5
+config_group_interval_seconds = 30
 db_ready_probe_conninfos = [
     "host=172.16.0.105 port=44321 user=system password=123456 dbname=smallbank",
     "host=172.16.0.113 port=44321 user=system password=123456 dbname=smallbank",
@@ -948,7 +1082,7 @@ AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
 # AccessPattern = [1]
 # ZipfianTheta = [0.4]
 # ZipfianTheta = [0.8]
-ZipfianTheta = [0.1, 0.3, 0.7, 0.9, 1.1, 1.3] 
+ZipfianTheta = [1.1, 1.3, 0.1, 0.3, 0.7, 0.9] 
 # ZipfianTheta = [0.8, 0.9, 0.95, 0.7, 0.6]
 ZipfianGenerator = "finite" # options: finite, legacy
 HotspotFraction = [1, 0.1, 0.01, 0.001]
@@ -1016,6 +1150,17 @@ if __name__ == "__main__":
     parser.add_argument("--enable-long-txn", action="store_true", help="Enable long transactions")
     parser.add_argument("--long-txn-length", type=int, default=None, help="Length of long transactions")
     parser.add_argument("--zipfian-generator", choices=("finite", "legacy"), default=None, help="Zipfian generator type")
+    parser.add_argument(
+        "--resume-result-dir",
+        default=None,
+        help="Resume into an existing result directory and reuse its case_plan.tsv.",
+    )
+    parser.add_argument(
+        "--resume-from-case",
+        type=int,
+        default=None,
+        help="Resume from this case_id in the selected case plan.",
+    )
     args = parser.parse_args()
 
     # Handle LongTxnSize override
@@ -1024,6 +1169,7 @@ if __name__ == "__main__":
     if args.zipfian_generator is not None:
         ZipfianGenerator = args.zipfian_generator
     UseDataCache = UseDataCache and not args.no_data_cache
+    resume_result_dir = os.path.abspath(args.resume_result_dir) if args.resume_result_dir else None
     logging.info(f"UseDataCache = {UseDataCache}")
     logging.info(f"ZipfianGenerator = {ZipfianGenerator}")
 
@@ -1034,20 +1180,38 @@ if __name__ == "__main__":
     if not os.path.exists("./result"):
         os.mkdir("./result")
     os.chdir("./result")
-    # 创建此次测试的结果文件夹，以时间命名
-    base_time_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
-    for suffix in range(1000):
-        time_str = base_time_str if suffix == 0 else f"{base_time_str}_{suffix}"
-        try:
-            os.mkdir(time_str)
-            break
-        except FileExistsError:
-            continue
+    if resume_result_dir:
+        figure_path = resume_result_dir
+        time_str = os.path.basename(os.path.normpath(figure_path))
+        plan_path = os.path.join(figure_path, "case_plan.tsv")
+        if not os.path.exists(plan_path):
+            raise FileNotFoundError(f"Cannot resume: case_plan.tsv not found in {figure_path}")
+        planned_cases = read_case_plan(plan_path)
+        logging.info(f"Resuming from existing result directory: {figure_path}")
     else:
-        raise RuntimeError(f"Unable to create unique result directory for {base_time_str}")
-    figure_path = os.path.join(os.getcwd(), time_str)
-    planned_cases = build_case_plan()
-    write_case_plan(planned_cases, os.path.join(figure_path, "case_plan.tsv"))
+        # 创建此次测试的结果文件夹，以时间命名
+        base_time_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
+        for suffix in range(1000):
+            time_str = base_time_str if suffix == 0 else f"{base_time_str}_{suffix}"
+            try:
+                os.mkdir(time_str)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise RuntimeError(f"Unable to create unique result directory for {base_time_str}")
+        figure_path = os.path.join(os.getcwd(), time_str)
+        planned_cases = build_case_plan()
+        write_case_plan(planned_cases, os.path.join(figure_path, "case_plan.tsv"))
+
+    if args.resume_from_case is not None:
+        planned_cases = [case for case in planned_cases if int(case["case_id"]) >= args.resume_from_case]
+        if not planned_cases:
+            raise ValueError(f"No cases found with case_id >= {args.resume_from_case}")
+        logging.info(
+            f"Resume filter applied: starting from case {planned_cases[0]['case_id']} "
+            f"({len(planned_cases)} cases remaining)."
+        )
     if args.plan_only:
         logging.info(f"Plan-only mode completed: {figure_path}")
         raise SystemExit(0)
@@ -1059,7 +1223,7 @@ if __name__ == "__main__":
     # 标记是否已经准备好备份数据
     current_backup_key = None 
 
-    for case in planned_cases:
+    for case_index, case in enumerate(planned_cases):
         ensure_build_for_mlp(case["mlp_enabled"])
         backup_path = case["data_cache_path"]
         if UseDataCache and backup_path != current_backup_key:
@@ -1174,7 +1338,20 @@ if __name__ == "__main__":
                 f"Scale={workload_scale_label(case['workload'], case.get('account_count'), case.get('warehouse_count'))}"
             )
 
+        sync_remote_servers_after_case()
         time.sleep(test_interval_seconds)
+        next_case = planned_cases[case_index + 1] if case_index + 1 < len(planned_cases) else None
+        if next_case is not None and next_case.get("case_group_id") != case.get("case_group_id"):
+            logging.info(
+                f"Completed config group {case.get('case_group_id')}; "
+                f"sleeping {config_group_interval_seconds}s before the next config group."
+            )
+            if not UseDataCache:
+                wait_for_db_start()
+                drop_public_tables_after_config_group()
+                sync_remote_servers_after_case()
+                restart_database_resource()
+            time.sleep(config_group_interval_seconds)
     kill_server()
     summarize_result_dir(figure_path)
     logging.info("All tests completed.")

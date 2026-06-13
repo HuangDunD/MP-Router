@@ -318,6 +318,23 @@ def load_metadata(case_dir):
         return json.load(f)
 
 
+def case_id_sort_value(row):
+    try:
+        return int(row.get("case_id", ""))
+    except (TypeError, ValueError):
+        return 10**12
+
+
+def sort_rows(rows):
+    return sorted(
+        rows,
+        key=lambda row: (
+            case_id_sort_value(row),
+            str(row.get("result_file", "")),
+        ),
+    )
+
+
 def collect_rows(result_dir):
     rows = []
     for result_path in sorted(result_dir.rglob("result.txt")):
@@ -334,7 +351,7 @@ def collect_rows(result_dir):
         row["result_file"] = str(result_path)
         row["kwr_file"] = str(kwr_path) if kwr_files else ""
         rows.append(row)
-    return rows
+    return sort_rows(rows)
 
 
 def write_csv(path, rows):
