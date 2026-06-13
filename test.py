@@ -918,7 +918,7 @@ db_sql_probe_timeout_seconds = 5
 use_local_db_readiness_probe = True
 enable_sql_readiness_probe = True
 data_path_wait_timeout_seconds = 30
-test_interval_seconds = 1
+test_interval_seconds = 5
 db_ready_probe_conninfos = [
     "host=172.16.0.105 port=44321 user=system password=123456 dbname=smallbank",
     "host=172.16.0.113 port=44321 user=system password=123456 dbname=smallbank",
