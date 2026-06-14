@@ -339,7 +339,7 @@ public:
         #endif
 
         // start the router thread
-        if(SYSTEM_MODE <= 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
+        if(SYSTEM_MODE <= 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25) || SYSTEM_MODE == 31) {
             router_worker_threads_ = std::min(worker_threads_, 32); // SYSTEM_MODE 0-8, 13, 23-25 启动与工作线程数量相同的路由线程，但上限为32
             std::cout << "Starting SmartRouter with " << router_worker_threads_ << " worker threads." << std::endl;
             // router_worker_threads_ = worker_threads_;
@@ -1082,7 +1082,7 @@ public:
     
     // ! 这个函数是run_router_worker 的对应, 相比之下, 我们把他和run_router_batch_worker_pipeline 的模式对应, 都是一次拿一个batch的事务, 然后在这里交给多线程来处理
     void run_router_worker_new() {
-        assert((SYSTEM_MODE >=0 && SYSTEM_MODE <=8) || SYSTEM_MODE == 13 || (SYSTEM_MODE >=23 && SYSTEM_MODE <=25)); 
+        assert((SYSTEM_MODE >=0 && SYSTEM_MODE <=8) || SYSTEM_MODE == 13 || (SYSTEM_MODE >=23 && SYSTEM_MODE <=25) || SYSTEM_MODE == 31);
 
         // wait for router start work
         std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
@@ -1206,7 +1206,7 @@ public:
                             table_ids = ycsb_->get_table_ids_by_txn_type();
                             keys = txn_entry->ycsb_keys;
                             rw = ycsb_->get_rw_flags();
-                        } else if (Workload_Type == 2) {
+                        } else if (Workload_Type == 2 || Workload_Type == 3) {
                             keys = txn_entry->tpcc_keys;
                             table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, keys.size());
                             rw = tpcc_->get_rw_flags_by_txn_type(txn_type, keys.size());
@@ -1282,7 +1282,7 @@ public:
                         //         routed_node_id = candidates[rand() % candidates.size()];
                         //     }
                         // }
-                        else if(SYSTEM_MODE == 2 ||  SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
+                        else if(SYSTEM_MODE == 2 ||  SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25) || SYSTEM_MODE == 31) {
                             SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, rw);
                             if(result.success) {
                                 routed_node_id = result.smart_router_id;

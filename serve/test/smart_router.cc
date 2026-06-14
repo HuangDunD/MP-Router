@@ -132,6 +132,21 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
     #if LOG_METIS_OWNERSHIP_DECISION
     debug_info = "txn_type: " + std::to_string(txn->txn_type) + "; ";
     #endif
+    if (SYSTEM_MODE == 31) {
+        if ((Workload_Type != 2 && Workload_Type != 3) || tpcc_ == nullptr || txn->tpcc_params.empty()) {
+            result.error_message = "Mode 31 is only supported for TPC-C transactions with warehouse parameters";
+            return result;
+        }
+        const int w_id = static_cast<int>(txn->tpcc_params[0]);
+        const int warehouse_count = std::max(1, tpcc_->get_num_warehouses());
+        const int partition_count = std::max(1, ComputeNodeCount);
+        const int warehouses_per_partition =
+            std::max(1, (warehouse_count + partition_count - 1) / partition_count);
+        result.smart_router_id =
+            std::min(partition_count - 1, std::max(0, (w_id - 1) / warehouses_per_partition));
+        result.success = true;
+        return result;
+    }
     page_to_node_map.reserve(keys.size());
     for (size_t i = 0; i < keys.size(); ++i) {
         if(SYSTEM_MODE == 2) {

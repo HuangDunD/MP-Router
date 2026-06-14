@@ -362,7 +362,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     // time breakdown
     clock_gettime(CLOCK_MONOTONIC, &snap.snapshot_ts);
     router->sum_worker_thread_stat_time(); // update the sum
-    if(SYSTEM_MODE >= 0 && SYSTEM_MODE <= 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
+    if((SYSTEM_MODE >= 0 && SYSTEM_MODE <= 8) || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25) || SYSTEM_MODE == 31) {
         // 对于这些模式, 是使用多线程router的，因此需要计算平均
         router->Record_time_ms(false, true, true);
     } else if(SYSTEM_MODE == 11 || SYSTEM_MODE == 26 || SYSTEM_MODE == 27 || SYSTEM_MODE == 28 || SYSTEM_MODE == 30) {

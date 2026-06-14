@@ -218,7 +218,7 @@ void generate_perf_kwr_report(int start_snapshot_id, int end_snapshot_id, std::s
 static bool warmup_end_supported_mode() {
     return SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 4 || SYSTEM_MODE == 11 || SYSTEM_MODE == 13 ||
            SYSTEM_MODE == 26 || SYSTEM_MODE == 27 || SYSTEM_MODE == 28 || SYSTEM_MODE == 29 ||
-           SYSTEM_MODE == 30;
+           SYSTEM_MODE == 30 || SYSTEM_MODE == 31;
 }
 
 static void reset_pg_runtime_stats_before_benchmark(Logger* logger_) {
@@ -1904,6 +1904,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --workload <name>           Workload (smallbank, ycsb, tpcc, tpcc-standard) [default: smallbank]" << std::endl;
     std::cout << "  --system-mode <mode>        System mode (0=random node, 1=account-based, 2=page-based) [default: 0]" << std::endl;
     std::cout << "  --access-pattern <pattern>  Data access pattern (0=uniform, 1=zipfian, 2=hotspot) [default: 0]" << std::endl;
+    std::cout << "  --tpcc-partition-warehouses Partition TPC-C warehouse table by w_id ranges [default: off]" << std::endl;
     std::cout << "  --zipfian-theta <theta>     Zipfian parameter: legacy theta [0,1), finite exponent >= 0 [default: 0.99]" << std::endl;
     std::cout << "  --zipfian-generator <mode>  Zipfian generator (legacy, finite) [default: legacy]" << std::endl;
     std::cout << "  --hotspot-fraction <frac>   Fraction of hot accounts (0.0-1.0) [default: 0.1]" << std::endl;
@@ -2658,6 +2659,10 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--tpcc-partition-warehouses") {
+            TPCCPartitionWarehouses = true;
+            std::cout << "TPC-C warehouse partitioning enabled." << std::endl;
+        }
         else if (arg == "--worker-threads") {
             if (i + 1 < argc) {
                 worker_threads = std::stoi(argv[++i]);
@@ -3101,6 +3106,9 @@ int main(int argc, char *argv[]) {
         break;
     case 30:
         std::cout << "\033[31m  MP-Router w/o critical path (with page barrier) \033[0m" << std::endl;
+        break;
+    case 31:
+        std::cout << "\033[31m  TPC-C warehouse rule router \033[0m" << std::endl;
         break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
@@ -3604,6 +3612,9 @@ int main(int argc, char *argv[]) {
     if (without_kpmap) {
         std::cout << "Skipping key-page map initialization (--without-kpmap)." << std::endl;
     }
+    else if (SYSTEM_MODE == 31) {
+        std::cout << "Skipping key-page map initialization for TPC-C warehouse rule router." << std::endl;
+    }
     else if (!SKIP_LOAD_DATA && Workload_Type == 0) {
         int N = smallbank->get_account_count();
         for (int id = 1; id <= N; ++id) {
@@ -3910,6 +3921,8 @@ int main(int argc, char *argv[]) {
     else if (Workload_Type == 2 || Workload_Type == 3) {
         std::cout << "Warehouse count: " << warehouse_num << std::endl;
         std::cout << "Access pattern used: " << access_pattern_name << std::endl;
+        std::cout << "TPC-C warehouse partitioning: "
+                  << (TPCCPartitionWarehouses ? "enabled" : "disabled") << std::endl;
     }
 
     const uint64_t final_attempts = static_cast<uint64_t>(exe_count.load(std::memory_order_relaxed));

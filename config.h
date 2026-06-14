@@ -85,6 +85,7 @@ extern bool Enable_Important_Router_Batch_Log; // 是否启用mode 11重要逐ba
 
 // for TPC-C
 extern int TPCC_WAREHOUSE_NUM;
+extern bool TPCCPartitionWarehouses;
 
 // global variables
 extern int try_count;

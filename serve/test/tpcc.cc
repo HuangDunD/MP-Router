@@ -162,7 +162,41 @@ void TPCC::create_table(pqxx::connection *conn) {
         txn.exec("DROP TABLE IF EXISTS warehouse CASCADE");
         
         // Warehouse
-        txn.exec(table_keyword + R"SQL(warehouse (
+        if (TPCCPartitionWarehouses) {
+            txn.exec(table_keyword + R"SQL(warehouse (
+                w_id INT PRIMARY KEY,
+                w_name VARCHAR(10),
+                w_street_1 VARCHAR(20),
+                w_street_2 VARCHAR(20),
+                w_city VARCHAR(20),
+                w_state CHAR(2),
+                w_zip CHAR(9),
+                w_tax DECIMAL(4,4),
+                w_ytd DECIMAL(12,2)
+            ) PARTITION BY RANGE (w_id);
+            )SQL");
+
+            const int partition_count = std::max(1, ComputeNodeCount);
+            const int warehouses_per_partition =
+                (num_warehouses_ + partition_count - 1) / partition_count;
+            for (int partition_id = 0; partition_id < partition_count; ++partition_id) {
+                const int start_w_id = partition_id * warehouses_per_partition + 1;
+                if (start_w_id > num_warehouses_) break;
+                const int end_w_id_exclusive =
+                    std::min(num_warehouses_ + 1, start_w_id + warehouses_per_partition);
+                const std::string partition_name = "warehouse_p" + std::to_string(partition_id);
+                txn.exec(
+                    table_keyword + partition_name +
+                    " PARTITION OF warehouse FOR VALUES FROM (" +
+                    std::to_string(start_w_id) + ") TO (" +
+                    std::to_string(end_w_id_exclusive) + ")"
+                );
+                txn.exec("ALTER TABLE " + partition_name + " SET (FILLFACTOR = 50)");
+            }
+            std::cout << "TPC-C warehouse table partitioned by w_id into up to "
+                      << partition_count << " range partitions." << std::endl;
+        } else {
+            txn.exec(table_keyword + R"SQL(warehouse (
                 w_id INT PRIMARY KEY,
                 w_name VARCHAR(10),
                 w_street_1 VARCHAR(20),
@@ -173,7 +207,8 @@ void TPCC::create_table(pqxx::connection *conn) {
                 w_tax DECIMAL(4,4),
                 w_ytd DECIMAL(12,2)
             ) WITH (FILLFACTOR = 50);
-        )SQL");
+            )SQL");
+        }
 
         // District
         txn.exec(table_keyword + R"SQL(district (
@@ -321,9 +356,25 @@ void TPCC::create_table(pqxx::connection *conn) {
 
         // Pre-extend tables
         std::cout << "Pre-extending TPC-C tables..." << std::endl;
-        std::vector<std::string> extend_tables = {"warehouse", "district", "customer", "history", "new_order", "orders", "order_line", "item", "stock"};
+        std::vector<std::string> extend_tables;
+        if (TPCCPartitionWarehouses) {
+            const int partition_count = std::max(1, ComputeNodeCount);
+            for (int partition_id = 0; partition_id < partition_count; ++partition_id) {
+                const int start_w_id =
+                    partition_id * ((num_warehouses_ + partition_count - 1) / partition_count) + 1;
+                if (start_w_id > num_warehouses_) break;
+                extend_tables.push_back("warehouse_p" + std::to_string(partition_id));
+            }
+        } else {
+            extend_tables.push_back("warehouse");
+        }
+        extend_tables.insert(extend_tables.end(), {"district", "customer", "history", "new_order", "orders", "order_line", "item", "stock"});
         // Custom sizes for each table (number of pages) - adjust as needed
-        std::vector<int> extend_sizes = {1000, 30000, 500000, 100000, 100000, 50000, 500000, 5000, 1000000}; 
+        std::vector<int> extend_sizes(extend_tables.size(), 1000);
+        std::vector<int> non_warehouse_extend_sizes = {30000, 500000, 100000, 100000, 50000, 500000, 5000, 1000000};
+        for (size_t i = 0; i < non_warehouse_extend_sizes.size(); ++i) {
+            extend_sizes[extend_sizes.size() - non_warehouse_extend_sizes.size() + i] = non_warehouse_extend_sizes[i];
+        }
         
         std::vector<std::thread> extend_threads;
         for (size_t i = 0; i < extend_tables.size(); ++i) {
