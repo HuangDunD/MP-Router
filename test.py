@@ -216,7 +216,7 @@ def sync_remote_servers_after_case():
     for host in hosts:
         run_remote_cmd("sync", check=False, max_retries=1, host=host, display_cmd="sync")
 
-def drop_public_tables_after_config_group():
+def drop_public_tables():
     if not shutil.which("psql"):
         raise RuntimeError("psql is required to drop tables after each config group.")
 
@@ -1113,7 +1113,7 @@ LongTxnSize = [4, 8, 12, 14, 16, 20] # only valid when EnableLongTxn=1
 KeyPageMapCapacity = [1.1, 1.0, 0.8, 0.6, 0.4, 0.2] # passed to --key-page-ratio
 EnableMLP = [0] # 0:disable, 1:enable; changing this requires rebuilding with MLP_PREDICTION
 MLPRunModeType = [11] # MLP-delta cases run only these modes; baseline MLP=0 reuses normal sweep results
-KeyPageCapacityRunModeType = [1, 23, 11, 28] # KeyPageMapCapacity axis runs only these modes
+KeyPageCapacityRunModeType = [2, 23, 11, 28] # KeyPageMapCapacity axis runs only these modes
 RebuildForMLP = True
 RestoreConfigAfterRun = True
 
@@ -1219,6 +1219,11 @@ if __name__ == "__main__":
     # !开始本次的测试
     os.chdir(workspace)
     atexit.register(restore_config_h)
+    if not resume_result_dir:
+        logging.info("Dropping public tables once before starting this script run.")
+        wait_for_db_start()
+        drop_public_tables()
+        sync_remote_servers_after_case()
     
     # 标记是否已经准备好备份数据
     current_backup_key = None 
@@ -1348,7 +1353,7 @@ if __name__ == "__main__":
             )
             if not UseDataCache:
                 wait_for_db_start()
-                drop_public_tables_after_config_group()
+                drop_public_tables()
                 sync_remote_servers_after_case()
                 restart_database_resource()
             time.sleep(config_group_interval_seconds)

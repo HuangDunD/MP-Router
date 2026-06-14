@@ -2893,6 +2893,7 @@ int main(int argc, char *argv[]) {
                 print_usage(argv[0]);
                 return -1;
             }
+            TxnQueueMaxSize = BatchRouterProcessSize;
         }
         else if (arg == "--preprocess-batch-concurrency") {
             if (i + 1 < argc) {
