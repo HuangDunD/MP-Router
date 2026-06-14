@@ -1288,13 +1288,15 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
         const bool page_has_rw_conflict = has_writer && has_distinct_txn;
         while (i < range_end_idx) {
             SchedulingCandidateTxn* sc = &prepared->candidates[all_page_pairs[i].txn_idx];
-            if (page_has_rw_conflict && sc->is_conflicted) {
+            // Mode 11 scheduling may transfer any page touched by a conflicted txn,
+            // not only pages that directly caused the RW conflict.
+            if (sc->is_conflicted) {
                 prepared->global_page_pairs.emplace_back(page, sc);
             }
             ++i;
         }
-        if (page_has_rw_conflict) {
-            const size_t range_end = prepared->global_page_pairs.size();
+        const size_t range_end = prepared->global_page_pairs.size();
+        if (range_end > range_begin) {
             const uint32_t page_index = static_cast<uint32_t>(prepared->unique_conflict_pages.size());
             prepared->page_to_txn_range_map[page] = {
                 static_cast<uint32_t>(range_begin),

@@ -351,7 +351,7 @@ void TPCC::create_table(pqxx::connection *conn) {
         }
 
         txn.commit();
-        std::cout << "TPC-C tables created." << std::endl;
+        std::cout << "TPC-C tables and primary-key indexes created." << std::endl;
         print_tpcc_table_sizes("before pre-extension");
 
         // Pre-extend tables

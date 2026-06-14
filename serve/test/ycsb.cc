@@ -112,17 +112,6 @@ void YCSB::load_data(pqxx::connection* conn0) {
     for (auto& th : threads) th.join();
     std::cout << "YCSB data loaded." << std::endl;
 
-    try {
-        pqxx::work txn_index(*conn0);
-        std::cout << "Creating YCSB index after data load..." << std::endl;
-        txn_index.exec("CREATE UNIQUE INDEX idx_usertable_id ON usertable(id)");
-        txn_index.commit();
-        std::cout << "YCSB index created successfully." << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "Error while creating YCSB index after data load: "
-                  << e.what() << std::endl;
-    }
-
     // 输出一些导入数据的统计信息
     try{
         auto txn = pqxx::work(*conn0);

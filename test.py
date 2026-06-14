@@ -26,6 +26,7 @@ else:
     os.environ["LD_LIBRARY_PATH"] = lib_path
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logging.getLogger("paramiko").setLevel(logging.WARNING)
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
 
 
@@ -332,7 +333,7 @@ def build_tcp_probe_command(conninfo):
 def mask_conninfo_password(conninfo):
     return re.sub(r"password=[^ ]+", "password=***", conninfo)
 
-def local_database_probe_ready(conninfo):
+def local_database_probe_ready(conninfo, verbose=False):
     parsed = parse_conninfo(conninfo)
     password = parsed.get("password", "")
     env = os.environ.copy()
@@ -341,7 +342,8 @@ def local_database_probe_ready(conninfo):
 
     if shutil.which("pg_isready"):
         cmd = build_local_pg_isready_command(conninfo)
-        logging.info(f"Local pg_isready probe: {mask_conninfo_password(conninfo)}")
+        if verbose:
+            logging.info(f"Local pg_isready probe: {mask_conninfo_password(conninfo)}")
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         if res.returncode != 0:
             logging.info(f"pg_isready not ready yet: rc={res.returncode}, stdout={res.stdout.strip()}, stderr={res.stderr.strip()}")
@@ -349,7 +351,8 @@ def local_database_probe_ready(conninfo):
 
     if shutil.which("psql"):
         cmd = build_local_sql_probe_command(conninfo)
-        logging.info(f"Local SQL readiness probe: {mask_conninfo_password(conninfo)}")
+        if verbose:
+            logging.info(f"Local SQL readiness probe: {mask_conninfo_password(conninfo)}")
         res = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
@@ -365,14 +368,14 @@ def local_database_probe_ready(conninfo):
 
     return False, False
 
-def probe_database_ready():
+def probe_database_ready(verbose=False):
     if not db_ready_probe_conninfos:
         logging.warning("No db_ready_probe_conninfos configured; using CRM status only.")
         return True, True
 
     if use_local_db_readiness_probe:
         for conninfo in db_ready_probe_conninfos:
-            ready, probe_available = local_database_probe_ready(conninfo)
+            ready, probe_available = local_database_probe_ready(conninfo, verbose=verbose)
             if not probe_available:
                 logging.warning("Neither pg_isready nor psql was found locally; falling back to remote TCP readiness probe.")
                 break
@@ -414,15 +417,17 @@ def probe_database_ready():
 def wait_for_db_start(timeout=3000):
     logging.info("Waiting for database to start...")
     start_time = time.time()
+    probe_attempt = 0
     while time.time() - start_time < timeout:
         # 检查数据库资源状态
         res = run_remote_cmd(f"crm resource status {db_resource_name}", check=False)
         # 根据实际 crm 输出调整，通常 running 表示已启动
         status_text = res.stdout + res.stderr
         if res.returncode == 0 and "is NOT running" not in status_text and "not found" not in status_text.lower():
-            ready, probe_available = probe_database_ready()
+            probe_attempt += 1
+            ready, probe_available = probe_database_ready(verbose=False)
             if ready:
-                logging.info("Database connection probe succeeded.")
+                logging.info(f"Database connection probe succeeded ({len(db_ready_probe_conninfos)} endpoints).")
                 return
             if not probe_available:
                 logging.warning("Neither ksql nor psql was found on remote host; falling back to a short grace wait after CRM start.")
@@ -973,6 +978,30 @@ def case_group_dir_name(case):
         parts.append(f"lt{case['long_txn_length']}")
     return "_".join(parts)
 
+def case_progress_label(case, case_index, total_cases, attempt):
+    scale_label = workload_scale_label(case["workload"], case.get("account_count"), case.get("warehouse_count"))
+    extras = []
+    if case["access_pattern"] == 1:
+        extras.append(f"zipf={case['zipfian_theta']}/{case['zipfian_generator']}")
+    elif case["access_pattern"] == 2:
+        extras.append(f"hotspot={case['hotspot_fraction']}/{case['hotspot_prob']}")
+    extras.extend([
+        f"threads={case['worker_threads']}",
+        f"batch={case['batch_size']}",
+        f"affinity={case['affinity_txn_ratio']}",
+        f"kp={case['key_page_ratio']}",
+    ])
+    if case.get("tpcc_partition_warehouses"):
+        extras.append("tpcc_wh_part=1")
+    if case.get("long_txn_length") is not None:
+        extras.append(f"long={case['long_txn_length']}")
+    return (
+        f"Case {case_index + 1}/{total_cases} "
+        f"(id={case['case_id']}, attempt={attempt}/{max_try}) "
+        f"{case['workload']} {scale_label} mode={case['run_mode']} access={case['access_pattern']} "
+        f"{', '.join(extras)}"
+    )
+
 def summarize_result_dir(result_dir):
     summary_script = os.path.join(workspace, "scripts", "summarize_mp_router_results.py")
     subprocess.run([sys.executable, summary_script, result_dir], check=False)
@@ -1167,7 +1196,7 @@ HotspotFraction = [1, 0.1, 0.01, 0.001]
 HotspotProb = [0.8]
 # HotspotProb = [0.8, 0.9, 0.95]
 # account = 100W, 单个表大概14W个页面, 每个页面8KB, 大小约1.1GB
-AccountCount = [20000000]
+AccountCount = [10000000]
 WarehouseCount = [200]
 # WorkerThreadCount = [16]
 WorkerThreadCount = [16, 2, 4, 8, 32, 64, 128]
@@ -1341,13 +1370,7 @@ if __name__ == "__main__":
                 extra_part_log = f", HotspotFraction={case['hotspot_fraction']}, HotspotProb={case['hotspot_prob']}"
 
             scale_label = workload_scale_label(case["workload"], case.get("account_count"), case.get("warehouse_count"))
-            logging.info(
-                f"Running case {case['case_id']} with Workload={case['workload']}, RunMode={case['run_mode']}, "
-                f"AccessPattern={case['access_pattern']}{extra_part_log}, Scale={scale_label}, "
-                f"WorkerThreads={case['worker_threads']}, BatchSize={case['batch_size']}, "
-                f"KeyPageCapacity={case['key_page_ratio']}, MLP={case['mlp_enabled']}, "
-                f"TPCCPartitionWarehouses={case.get('tpcc_partition_warehouses', 0)}, Attempt={attempt}"
-            )
+            logging.info(case_progress_label(case, case_index, len(planned_cases), attempt))
             kwr_report_name = (
                 f"kwr_{time_str}_case{case['case_id']:03d}"
                 f"_mode{case['run_mode']}_access{case['access_pattern']}"
@@ -1390,7 +1413,7 @@ if __name__ == "__main__":
                 return_code = process.wait()
             if return_code == 0 and os.path.exists(result):
                 success = True
-                logging.info("Test completed successfully.")
+                logging.info(f"Case {case['case_id']} completed successfully.")
 
                 # 同一组负载参数放在一个目录下，mode 作为下一层目录，避免顶层结果过散。
                 dest_dir = os.path.join(
