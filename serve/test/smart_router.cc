@@ -994,6 +994,8 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
         std::max<size_t>(1, std::min<size_t>(std::min<size_t>(std::max(1, PreprocessInternalThreads), 8), n));
     const size_t chunk = (n + preprocess_thread_count - 1) / preprocess_thread_count;
     std::vector<std::vector<std::pair<uint64_t, uint32_t>>> local_page_pairs(preprocess_thread_count);
+    std::vector<uint64_t> local_hot_hits(preprocess_thread_count, 0);
+    std::vector<uint64_t> local_hot_misses(preprocess_thread_count, 0);
     std::vector<std::future<void>> futs;
     futs.reserve(preprocess_thread_count);
 
@@ -1003,9 +1005,11 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
         const size_t begin = t * chunk;
         const size_t end = std::min(n, begin + chunk);
         futs.push_back(preprocess_threadpool.enqueue(
-            [this, &prepared, begin, end, t, &local_page_pairs]() {
+            [this, &prepared, begin, end, t, &local_page_pairs, &local_hot_hits, &local_hot_misses]() {
                 auto& page_pairs = local_page_pairs[t];
                 page_pairs.reserve((end - begin) * 4);
+                uint64_t hot_hits = 0;
+                uint64_t hot_misses = 0;
 
                 for (size_t idx = begin; idx < end; ++idx) {
                     TxnQueueEntry* txn = prepared->txn_batch->at(idx);
@@ -1038,6 +1042,11 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
 
                     for (size_t access_idx = 0; access_idx < access_count; ++access_idx) {
                         const page_id_t page = lookup_page_fast(table_ids[access_idx], keys[access_idx]);
+                        if (page != static_cast<page_id_t>(-1)) {
+                            ++hot_hits;
+                        } else {
+                            ++hot_misses;
+                        }
 
                         txn->accessed_page_ids.push_back(page);
                         const uint64_t table_page =
@@ -1139,9 +1148,23 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                         fill_candidate_accesses(table_ids.data(), keys.data(), nullptr, keys.size());
                     }
                 }
+                local_hot_hits[t] = hot_hits;
+                local_hot_misses[t] = hot_misses;
             }));
     }
     for (auto& fut : futs) fut.get();
+    uint64_t batch_hot_hits = 0;
+    uint64_t batch_hot_misses = 0;
+    for (size_t t = 0; t < preprocess_thread_count; ++t) {
+        batch_hot_hits += local_hot_hits[t];
+        batch_hot_misses += local_hot_misses[t];
+    }
+    if (batch_hot_hits > 0) {
+        stats_.hot_hit.fetch_add(batch_hot_hits, std::memory_order_relaxed);
+    }
+    if (batch_hot_misses > 0) {
+        stats_.hot_miss.fetch_add(batch_hot_misses, std::memory_order_relaxed);
+    }
     clock_gettime(CLOCK_MONOTONIC, &lookup_end_time);
     const double lookup_ms =
         (lookup_end_time.tv_sec - lookup_start_time.tv_sec) * 1000.0 +
