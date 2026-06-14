@@ -70,6 +70,22 @@ public:
     // 表：usertable(id INT PRIMARY KEY, field0 TEXT)
     void create_table(pqxx::connection* conn) {
         std::cout << "Create YCSB table..." << (USE_UNLOGGED_TABLES ? " (UNLOGGED)" : "") << std::endl;
+        auto print_usertable_size = [](pqxx::connection* size_conn, const std::string& label) {
+            try {
+                pqxx::work txn(*size_conn);
+                pqxx::result usertable_size =
+                    txn.exec("select sys_size_pretty(sys_relation_size('usertable'))");
+                std::cout << "YCSB table sizes " << label << ":" << std::endl;
+                if (!usertable_size.empty()) {
+                    std::cout << "  Usertable table size: "
+                              << usertable_size[0][0].as<std::string>() << std::endl;
+                }
+                txn.commit();
+            } catch (const std::exception& e) {
+                std::cerr << "Error while getting YCSB table size " << label
+                          << ": " << e.what() << std::endl;
+            }
+        };
         try {
             pqxx::work txn(*conn);
             txn.exec("DROP TABLE IF EXISTS usertable");
@@ -94,6 +110,7 @@ public:
         } catch (const std::exception& e) {
             std::cerr << "Error creating YCSB table: " << e.what() << std::endl;
         }
+        print_usertable_size(conn, "before pre-extension");
         if (DISABLE_TABLE_AUTOVACUUM) {
             try {
                 pqxx::work txn(*conn);
@@ -125,6 +142,7 @@ public:
 
         extend_thread1.join();
         std::cout << "Table creation and pre-extension completed." << std::endl;
+        print_usertable_size(conn, "after pre-extension");
 
     }
 

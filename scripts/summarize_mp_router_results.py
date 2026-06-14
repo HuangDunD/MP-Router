@@ -149,7 +149,7 @@ def parse_result(path):
     ))
     result.update(parse_latency_section(
         text,
-        r"(?m)^(?:Preprocess-and-Route-to-Complete|Route-to-Complete|Fetch-to-Complete) "
+        r"(?m)^(?:Batch-Start-to-Complete|Preprocess-and-Route-to-Complete|Route-to-Complete|Fetch-to-Complete) "
         r"Latency Statistics \(After Warmup\):",
         "e2e_latency",
     ))

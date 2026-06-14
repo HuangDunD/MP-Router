@@ -115,13 +115,14 @@ void YCSB::load_data(pqxx::connection* conn0) {
     // 输出一些导入数据的统计信息
     try{
         auto txn = pqxx::work(*conn0);
-        pqxx::result usertable_size = txn.exec("select sys_size_pretty(sys_relation_size('usertable')) ");
+        pqxx::result usertable_size = txn.exec("select sys_size_pretty(sys_relation_size('usertable'))");
+        std::cout << "YCSB table sizes after data load:" << std::endl;
         if(!usertable_size.empty()){
-            std::cout << "Usertable table size: " << usertable_size[0][0].as<std::string>() << std::endl;
+            std::cout << "  Usertable table size: " << usertable_size[0][0].as<std::string>() << std::endl;
         }
         txn.commit();
     }catch(const std::exception &e) {
-        std::cerr << "Error while getting table size: " << e.what() << std::endl;
+        std::cerr << "Error while getting YCSB table size after data load: " << e.what() << std::endl;
     }
 }
 

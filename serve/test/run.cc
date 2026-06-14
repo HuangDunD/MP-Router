@@ -4008,7 +4008,7 @@ int main(int argc, char *argv[]) {
         std::cout << "No transactions recorded after warmup for latency stats." << std::endl;
     }
 
-    // --- Preprocess + Route to Complete Latency Statistics (After Warmup) ---
+    // --- Batch Start to Complete Latency Statistics (After Warmup) ---
     std::vector<double> all_fetch_latencies;
     total_size = 0;
     for (const auto& v : worker_fetch_latencies) total_size += v.size();
@@ -4025,7 +4025,7 @@ int main(int argc, char *argv[]) {
         double p95 = all_fetch_latencies[static_cast<size_t>(all_fetch_latencies.size() * 0.95)];
         double p99 = all_fetch_latencies[static_cast<size_t>(all_fetch_latencies.size() * 0.99)];
         
-        std::cout << "Preprocess-and-Route-to-Complete Latency Statistics (After Warmup):" << std::endl;
+        std::cout << "Batch-Start-to-Complete Latency Statistics (After Warmup):" << std::endl;
         std::cout << "  Average: " << avg << " ms" << std::endl;
         std::cout << "  P50: " << p50 << " ms" << std::endl;
         std::cout << "  P95: " << p95 << " ms" << std::endl;

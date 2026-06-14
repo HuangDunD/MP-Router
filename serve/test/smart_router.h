@@ -1120,6 +1120,10 @@ public:
                 }
                 batch_cv.notify_all();
             }
+            struct timespec batch_start_ts;
+            clock_gettime(CLOCK_MONOTONIC, &batch_start_ts);
+            double batch_start_ms = batch_start_ts.tv_sec * 1000.0 +
+                                    batch_start_ts.tv_nsec / 1000000.0;
 
             logger->info("Batch Router Worker: one of the compute nodes finished processing batch " + std::to_string(batch_id - 1) + 
                 "now queue status: " + [&]() {
@@ -1157,6 +1161,9 @@ public:
                 }
                 batch_cv.notify_all(); // 通知所有等待的计算节点线程结束
                 break;
+            }
+            for (auto* txn_entry : *txn_batch) {
+                txn_entry->route_start_time = batch_start_ms;
             }
 
             // 开始调度

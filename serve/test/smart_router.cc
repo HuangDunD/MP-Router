@@ -570,6 +570,11 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
         }
         else if(SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
             // 基于page Metis的结果进行分区, 同时返回page到node的映射
+            if (page_to_node_map.empty()) {
+                result.smart_router_id = rand() % cfg_.partition_nums;
+                result.success = true;
+                return result;
+            }
             if(SYSTEM_MODE == 23) {
                 if (!WarmupEnd) {
                     node_id_t metis_decision_node;
@@ -3141,9 +3146,8 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     struct timespec route_start_ts;
     clock_gettime(CLOCK_MONOTONIC, &route_start_ts);
     double route_start_ms = route_start_ts.tv_sec * 1000.0 + route_start_ts.tv_nsec / 1000000.0;
-    double latency_start_ms = route_start_ms - prepared.preprocess_ms;
     for (auto* txn_entry : *txn_batch) {
-        txn_entry->route_start_time = latency_start_ms;
+        txn_entry->route_start_time = route_start_ms;
     }
     
     // 计时

@@ -37,6 +37,33 @@ public:
     YacHandleType type;
 };
 
+namespace {
+
+void print_smallbank_table_sizes(pqxx::connection* conn, const std::string& label) {
+    try {
+        pqxx::work txn(*conn);
+        pqxx::result checking_size =
+            txn.exec("select sys_size_pretty(sys_relation_size('checking'))");
+        pqxx::result savings_size =
+            txn.exec("select sys_size_pretty(sys_relation_size('savings'))");
+        std::cout << "SmallBank table sizes " << label << ":" << std::endl;
+        if (!checking_size.empty()) {
+            std::cout << "  Checking table size: "
+                      << checking_size[0][0].as<std::string>() << std::endl;
+        }
+        if (!savings_size.empty()) {
+            std::cout << "  Savings table size: "
+                      << savings_size[0][0].as<std::string>() << std::endl;
+        }
+        txn.commit();
+    } catch (const std::exception& e) {
+        std::cerr << "Error while getting SmallBank table size " << label
+                  << ": " << e.what() << std::endl;
+    }
+}
+
+}
+
 void SmallBank::create_table_yashan() { 
     std::cout << "Creating tables in YashanDB..." << std::endl;
     YashanConnInfo info = YashanDBConnections[0]; // Use the first connection info for table creation
@@ -1146,6 +1173,7 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
         thread.join();
     }
     std::cout << "Data loaded successfully." << std::endl;
+    print_smallbank_table_sizes(conn0, "before pre-extension");
 
     // try vacuum freeze 
     // try {
@@ -1251,20 +1279,7 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
     // }
 
     // 输出一些导入数据的统计信息
-    try{
-        auto txn = pqxx::work(*conn0);
-        pqxx::result checking_size = txn.exec("select sys_size_pretty(sys_relation_size('checking')) ");
-        pqxx::result savings_size = txn.exec("select sys_size_pretty(sys_relation_size('savings')) ");
-        if(!checking_size.empty()){
-            std::cout << "Checking table size: " << checking_size[0][0].as<std::string>() << std::endl;
-        }
-        if(!savings_size.empty()){
-            std::cout << "Savings table size: " << savings_size[0][0].as<std::string>() << std::endl;
-        }
-        txn.commit();
-    }catch(const std::exception &e) {
-        std::cerr << "Error while getting table size: " << e.what() << std::endl;
-    }
+    print_smallbank_table_sizes(conn0, "after pre-extension");
 
     // // 在各个节点都执行一次select count(*)，确保数据同步完成
     // try{

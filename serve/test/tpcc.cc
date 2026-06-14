@@ -39,6 +39,43 @@ static itemkey_t current_epoch_ms() {
             std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+namespace {
+
+const std::vector<std::string>& tpcc_table_names() {
+    static const std::vector<std::string> tables = {
+        "warehouse", "district", "customer", "history", "new_order",
+        "orders", "order_line", "item", "stock"
+    };
+    return tables;
+}
+
+void print_tpcc_table_sizes(const std::string& label) {
+    try {
+        pqxx::connection conn(DBConnection[0]);
+        if (!conn.is_open()) {
+            std::cerr << "Failed to connect while getting TPC-C table sizes. conninfo"
+                      << DBConnection[0] << std::endl;
+            return;
+        }
+        pqxx::work txn(conn);
+        std::cout << "TPC-C table sizes " << label << ":" << std::endl;
+        for (const auto& table : tpcc_table_names()) {
+            pqxx::result size_result = txn.exec(
+                "select sys_size_pretty(sys_relation_size('" + table + "'))");
+            if (!size_result.empty()) {
+                std::cout << "  " << table << " table size: "
+                          << size_result[0][0].as<std::string>() << std::endl;
+            }
+        }
+        txn.commit();
+    } catch (const std::exception& e) {
+        std::cerr << "Error while getting TPC-C table sizes " << label
+                  << ": " << e.what() << std::endl;
+    }
+}
+
+}
+
 TPCC::TPCC(int num_warehouses, int access_pattern_type, bool standard_mode)
     : num_warehouses_(num_warehouses),
       access_pattern(access_pattern_type),
@@ -280,6 +317,7 @@ void TPCC::create_table(pqxx::connection *conn) {
 
         txn.commit();
         std::cout << "TPC-C tables created." << std::endl;
+        print_tpcc_table_sizes("before pre-extension");
 
         // Pre-extend tables
         std::cout << "Pre-extending TPC-C tables..." << std::endl;
@@ -310,6 +348,7 @@ void TPCC::create_table(pqxx::connection *conn) {
             t.join();
         }
         std::cout << "TPC-C tables pre-extended." << std::endl;
+        print_tpcc_table_sizes("after pre-extension");
     } catch (const std::exception &e) {
         std::cerr << "Error creating TPC-C tables: " << e.what() << std::endl;
     }
@@ -382,6 +421,7 @@ void TPCC::load_data() {
         for (auto& t : wh_threads) t.join();
         
         std::cout << "TPC-C data loaded." << std::endl;
+        print_tpcc_table_sizes("after data load");
     } catch (const std::exception &e) {
         std::cerr << "Error loading TPC-C data: " << e.what() << std::endl;
     }
