@@ -1256,6 +1256,7 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
     prepared->global_page_pairs.reserve(all_page_pairs.size());
     prepared->conflict_page_ranges.reserve(all_page_pairs.size());
     prepared->unique_conflict_pages.reserve(all_page_pairs.size());
+    prepared->unique_ownership_pages.reserve(all_page_pairs.size());
     prepared->conflict_page_index_map.reserve(all_page_pairs.size());
     for (size_t i = 0; i < all_page_pairs.size();) {
         const uint64_t page = all_page_pairs[i].page;
@@ -1293,12 +1294,20 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
     for (SchedulingCandidateTxn* sc : prepared->global_conflicted_txns) {
         sc->conflict_page_indexes.assign(sc->involved_pages.size(), -1);
         for (size_t page_idx = 0; page_idx < sc->involved_pages.size(); ++page_idx) {
-            auto index_it = prepared->conflict_page_index_map.find(sc->involved_pages[page_idx]);
+            const uint64_t page = sc->involved_pages[page_idx];
+            if ((page & 0xFFFFFFFF) != 0xFFFFFFFF) {
+                prepared->unique_ownership_pages.push_back(page);
+            }
+            auto index_it = prepared->conflict_page_index_map.find(page);
             if (index_it != prepared->conflict_page_index_map.end()) {
                 sc->conflict_page_indexes[page_idx] = static_cast<int32_t>(index_it->second);
             }
         }
     }
+    std::sort(prepared->unique_ownership_pages.begin(), prepared->unique_ownership_pages.end());
+    prepared->unique_ownership_pages.erase(
+        std::unique(prepared->unique_ownership_pages.begin(), prepared->unique_ownership_pages.end()),
+        prepared->unique_ownership_pages.end());
 
     clock_gettime(CLOCK_MONOTONIC, &metadata_end_time);
     const double metadata_ms =
@@ -2760,6 +2769,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     auto& page_to_txn_range_map = prepared.page_to_txn_range_map;
     auto& conflict_page_ranges = prepared.conflict_page_ranges;
     auto& unique_conflict_pages = prepared.unique_conflict_pages;
+    auto& unique_ownership_pages = prepared.unique_ownership_pages;
     auto& conflicted_txn_partitions = prepared.conflicted_txn_partitions;
     const size_t conflict_page_count = unique_conflict_pages.size();
     const size_t n = txn_batch->size();
@@ -3183,14 +3193,15 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     struct timespec ownership_start_time, ownership_end_time;
     clock_gettime(CLOCK_MONOTONIC, &ownership_start_time);
     std::unordered_map<uint64_t, std::pair<std::vector<node_id_t>, bool>> page_ownership_to_node_map; // 记录每个页面对应的节点ID（Ownership表结果）
-    page_ownership_to_node_map.reserve(unique_conflict_pages.size());
+    page_ownership_to_node_map.reserve(unique_ownership_pages.size());
 
-    // 并行获取 conflict pages ownership
-    size_t num_pages = unique_conflict_pages.size();
+    // 并行获取所有冲突事务涉及页面的 ownership。冲突事务也可能访问非冲突页，
+    // 调度时仍需要这些页面的 ownership，否则后续 page_ownership_to_node_map.at(page) 会缺键。
+    size_t num_pages = unique_ownership_pages.size();
     size_t ownership_thread_count = std::min<size_t>(std::min<size_t>(worker_threads_, 8ul), (num_pages + 1000) / 1000); 
     if(ownership_thread_count == 0) ownership_thread_count = 1;
     if (Enable_Important_Router_Batch_Log) {
-        logger->info("Unique conflict page count: " + std::to_string(num_pages) +
+        logger->info("Unique ownership page count: " + std::to_string(num_pages) +
                         ", using " + std::to_string(ownership_thread_count) + " threads to fetch ownership info");
     }
 
@@ -3204,11 +3215,11 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
         size_t start = t * ownership_chunk;
         size_t end = std::min(num_pages, start + ownership_chunk);
         
-        ownership_futs.push_back(threadpool.enqueue([this, start, end, t, &unique_conflict_pages, &local_ownership_results]() {
+        ownership_futs.push_back(threadpool.enqueue([this, start, end, t, &unique_ownership_pages, &local_ownership_results]() {
             auto& local_res = local_ownership_results[t];
             local_res.reserve(end - start);
             for(size_t i = start; i < end; ++i) {
-                uint64_t page = unique_conflict_pages[i];
+                uint64_t page = unique_ownership_pages[i];
                 auto owner_stats = std::move(ownership_table_->get_owner(page));
                 local_res.emplace_back(page, std::move(owner_stats));
             }

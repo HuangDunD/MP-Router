@@ -1141,7 +1141,7 @@ HotspotFraction = [1, 0.1, 0.01, 0.001]
 HotspotProb = [0.8]
 # HotspotProb = [0.8, 0.9, 0.95]
 # account = 100W, 单个表大概14W个页面, 每个页面8KB, 大小约1.1GB
-AccountCount = [10000000]
+AccountCount = [20000000]
 WarehouseCount = [200]
 # WorkerThreadCount = [16]
 WorkerThreadCount = [16, 2, 4, 8, 32, 64, 128]
@@ -1159,7 +1159,7 @@ AffinityTxnRatio = [0.8, 1, 0.6, 0.4, 0.2, 0]
 # AffinityTxnRatio = [1, 0.8, 0.6, 0.4, 0.2, 0]
 BatchSize = [10000] # default 10000
 # BatchSize = [1000]
-NumBucket = [4]
+NumBucket = [1]
 EnableLongTxn = 0 # 0:disable, 1:enable
 LongTxnSize = [4, 8, 12, 14, 16, 20] # only valid when EnableLongTxn=1
 KeyPageMapCapacity = [1.1, 1.0, 0.8, 0.6, 0.4, 0.2] # passed to --key-page-ratio
@@ -1304,6 +1304,8 @@ if __name__ == "__main__":
         os.chdir(Run_Path)
         while attempt < max_try and not success:
             attempt += 1
+            if os.path.exists(result):
+                os.remove(result)
             extra_part_log = ""
             if case["access_pattern"] == 1:
                 extra_part_log = f", ZipfianTheta={case['zipfian_theta']}, ZipfianGenerator={case['zipfian_generator']}"
@@ -1353,9 +1355,9 @@ if __name__ == "__main__":
             wait_for_db_start()
 
             with open(output, "w", encoding="utf-8") as outfile:
-                process = subprocess.Popen(cmd, shell=True)
-                process.wait()
-            if os.path.exists(result):
+                process = subprocess.Popen(cmd, shell=True, stdout=outfile, stderr=subprocess.STDOUT)
+                return_code = process.wait()
+            if return_code == 0 and os.path.exists(result):
                 success = True
                 logging.info("Test completed successfully.")
 
@@ -1389,7 +1391,10 @@ if __name__ == "__main__":
                 ssh.close()
                 summarize_result_dir(figure_path)
             else:
-                logging.warning("Result file not found, retrying...")
+                if return_code != 0:
+                    logging.warning(f"Run exited with code {return_code}, retrying...")
+                elif not os.path.exists(result):
+                    logging.warning("Result file not found, retrying...")
         if not success:
             logging.error(
                 f"Test failed after {max_try} attempts for case {case['case_id']}: "

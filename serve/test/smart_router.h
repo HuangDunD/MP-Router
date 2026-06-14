@@ -789,6 +789,7 @@ public:
         std::unordered_map<uint64_t, uint32_t> conflict_page_index_map;
         std::vector<std::pair<uint32_t, uint32_t>> conflict_page_ranges;
         std::vector<uint64_t> unique_conflict_pages;
+        std::vector<uint64_t> unique_ownership_pages;
         std::vector<std::vector<SchedulingCandidateTxn*>> conflicted_txn_partitions;
     };
 
