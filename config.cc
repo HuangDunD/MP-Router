@@ -13,6 +13,7 @@ uint64_t ATTEMPTED_NUM = 10000000;
 int REGION_SIZE = 1000;
 double AffinitySampleRate = 1;
 int TPCC_WAREHOUSE_NUM = -1;
+bool TPCCPartitionWarehouses = false;
 double AffinityTxnRatio = 0;
 uint64_t PARTITION_INTERVAL = 500000;
 std::string partition_log_file_ = "partitioning_log.log";

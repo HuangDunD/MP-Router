@@ -543,7 +543,9 @@ def data_cache_is_valid(backup_path):
     return True
 
 def ensure_data_cache(case, force_reload=False):
-    backup_path = data_cache_path(case["workload"], case.get("account_count"), case.get("warehouse_count"))
+    backup_path = case.get("data_cache_path") or data_cache_path(
+        case["workload"], case.get("account_count"), case.get("warehouse_count")
+    )
     if force_reload or not data_cache_is_valid(backup_path):
         reason = "--force-reload" if force_reload else "no valid cache was detected"
         logging.info(f"Preparing data cache {backup_path}: {reason}")
@@ -645,6 +647,7 @@ def base_case_config(workload_name, account_count=None, warehouse_count=None):
         "affinity_txn_ratio": DefaultAffinityTxnRatio,
         "batch_size": DefaultBatchSize,
         "num_bucket": DefaultNumBucket,
+        "tpcc_partition_warehouses": DefaultTPCCPartitionWarehouses if workload_name in ("tpcc", "tpcc-standard") else 0,
         "long_txn_length": DefaultLongTxnLength if EnableLongTxn else None,
         "key_page_ratio": DefaultKeyPageMapCapacity,
         "mlp_enabled": DefaultEnableMLP,
@@ -671,6 +674,7 @@ def dedupe_case_configs(configs):
             case["affinity_txn_ratio"],
             case["batch_size"],
             case["num_bucket"],
+            case.get("tpcc_partition_warehouses"),
             case.get("long_txn_length"),
             case.get("key_page_ratio"),
             case.get("mlp_enabled"),
@@ -706,6 +710,12 @@ def build_axis_case_configs(workload_name, account_count=None, warehouse_count=N
         configs.append(case)
 
     if workload_name != "smallbank":
+        if workload_name in ("tpcc", "tpcc-standard"):
+            for partition_warehouses in values_except_default(TPCCPartitionWarehouse, DefaultTPCCPartitionWarehouses):
+                case = dict(base)
+                case["tpcc_partition_warehouses"] = partition_warehouses
+                case["scan_axis"] = "tpcc_partition_warehouses"
+                configs.append(case)
         return dedupe_case_configs(configs)
 
     for worker_threads in values_except_default(WorkerThreadCount, DefaultWorkerThreads):
@@ -756,6 +766,7 @@ def build_axis_case_configs(workload_name, account_count=None, warehouse_count=N
 def build_full_case_configs(workload_name, account_count=None, warehouse_count=None):
     configs = []
     long_txn_sizes = LongTxnSize if EnableLongTxn else [None]
+    tpcc_partition_values = TPCCPartitionWarehouse if workload_name in ("tpcc", "tpcc-standard") else [0]
     for access_config in access_configs_for_workload(workload_name):
         for worker_threads in WorkerThreadCount:
             for batch_size in BatchSize:
@@ -763,23 +774,25 @@ def build_full_case_configs(workload_name, account_count=None, warehouse_count=N
                     for mlp_enabled in EnableMLP:
                         for affinity_ratio in AffinityTxnRatio:
                             for num_bucket in NumBucket:
-                                for long_txn_length in long_txn_sizes:
-                                    case = {
-                                        "workload": workload_name,
-                                        "account_count": account_count,
-                                        "warehouse_count": warehouse_count,
-                                        "worker_threads": worker_threads,
-                                        "affinity_txn_ratio": affinity_ratio,
-                                        "batch_size": batch_size,
-                                        "num_bucket": num_bucket,
-                                        "long_txn_length": long_txn_length,
-                                        "key_page_ratio": key_page_ratio,
-                                        "mlp_enabled": mlp_enabled,
-                                        "use_data_cache": UseDataCache,
-                                        "scan_axis": "full",
-                                    }
-                                    case.update(access_config)
-                                    configs.append(case)
+                                for partition_warehouses in tpcc_partition_values:
+                                    for long_txn_length in long_txn_sizes:
+                                        case = {
+                                            "workload": workload_name,
+                                            "account_count": account_count,
+                                            "warehouse_count": warehouse_count,
+                                            "worker_threads": worker_threads,
+                                            "affinity_txn_ratio": affinity_ratio,
+                                            "batch_size": batch_size,
+                                            "num_bucket": num_bucket,
+                                            "tpcc_partition_warehouses": partition_warehouses,
+                                            "long_txn_length": long_txn_length,
+                                            "key_page_ratio": key_page_ratio,
+                                            "mlp_enabled": mlp_enabled,
+                                            "use_data_cache": UseDataCache,
+                                            "scan_axis": "full",
+                                        }
+                                        case.update(access_config)
+                                        configs.append(case)
     return dedupe_case_configs(configs)
 
 def build_case_configs_for_workload(workload_name, account_count=None, warehouse_count=None):
@@ -811,6 +824,7 @@ def build_case_plan():
             case_config["affinity_txn_ratio"],
             case_config["batch_size"],
             case_config["num_bucket"],
+            case_config.get("tpcc_partition_warehouses"),
             case_config.get("long_txn_length"),
             case_config.get("key_page_ratio"),
             case_config.get("mlp_enabled"),
@@ -840,6 +854,10 @@ def build_case_plan():
                     run_modes = mlp_run_modes
                 else:
                     run_modes = RunModeType
+                if workload_name in ("tpcc", "tpcc-standard"):
+                    run_modes = list(run_modes) + [
+                        mode for mode in TPCCRuleRunModeType if mode not in run_modes
+                    ]
                 for run_mode in run_modes:
                     key = case_key(case_config, run_mode)
                     if key in seen:
@@ -849,6 +867,8 @@ def build_case_plan():
                     case["run_mode"] = run_mode
                     case["case_group_id"] = case_group_ids[group_key]
                     case["data_cache_path"] = data_cache_path(workload_name, account_count, warehouse_count)
+                    if case.get("tpcc_partition_warehouses"):
+                        case["data_cache_path"] += "_whpart"
                     if is_mlp_delta:
                         mlp_case_pairs.append(case)
                     else:
@@ -891,7 +911,7 @@ def normalize_case_from_plan(row):
     int_fields = [
         "case_id", "case_group_id", "run_mode", "access_pattern",
         "worker_threads", "batch_size", "num_bucket", "mlp_enabled",
-        "account_count", "warehouse_count", "long_txn_length",
+        "account_count", "warehouse_count", "tpcc_partition_warehouses", "long_txn_length",
     ]
     float_fields = [
         "zipfian_theta", "hotspot_fraction", "hotspot_prob",
@@ -945,6 +965,7 @@ def case_group_dir_name(case):
         f"r{value_for_path(case['affinity_txn_ratio'])}",
         f"b{case['batch_size']}",
         f"nb{case['num_bucket']}",
+        f"whpart{case.get('tpcc_partition_warehouses', 0)}",
         f"kp{value_for_path(case['key_page_ratio'])}",
         f"mlp{case['mlp_enabled']}",
     ])
@@ -1042,6 +1063,8 @@ def prepare_backup_data(case, backup_path):
         f"--worker-threads {case['worker_threads']} "
         f"--sys_extend_size {sys_extend} --sys_index_extend_size {sys_index_extend}"
     )
+    if case.get("tpcc_partition_warehouses"):
+        cmd += " --tpcc-partition-warehouses"
     if Unlog:
         cmd += " --unlog"
     logging.info(f"Loading data with command: {cmd}")
@@ -1119,9 +1142,12 @@ db_ready_probe_conninfos = [
 # RunModeType = [0, 3, 8, 11, 4, 13]
 # RunModeType = [0, 3, 11, 13]
 RunModeType = [0, 2, 11, 13, 23, 25, 28]
+TPCCRuleRunModeType = [31]
 # RunModeType = [11, 13, 2]
 # RunModeType = [28]
-# ! system: 0 随机路由, 2 page hash 11 MP-Router 13 MP-Router without scheduling 23 metis 24 ownership + load 25 load
+# ! system: 0 random, 2 page hash, 11 MP-Router, 13 without scheduling, 23 metis,
+# ! 25 load balance, 28 chimera-like
+# ! TPCCRuleRunModeType: 31 TPC-C warehouse rule router, auto-added for TPC-C workloads
 # RunModeType = [13]
 # RunModeType = [1]
 Workloads = ["smallbank", "tpcc"] # one script run can cover multiple workloads
@@ -1160,6 +1186,7 @@ AffinityTxnRatio = [0.8, 1, 0.6, 0.4, 0.2, 0]
 BatchSize = [10000] # default 10000
 # BatchSize = [1000]
 NumBucket = [4]
+TPCCPartitionWarehouse = [0, 1] # 0:disable, 1:partition warehouse by w_id range
 EnableLongTxn = 0 # 0:disable, 1:enable
 LongTxnSize = [4, 8, 12, 14, 16, 20] # only valid when EnableLongTxn=1
 KeyPageMapCapacity = [1.1, 1.0, 0.8, 0.6, 0.4, 0.2] # passed to --key-page-ratio
@@ -1182,6 +1209,7 @@ DefaultKeyPageMapCapacity = KeyPageMapCapacity[0]
 DefaultEnableMLP = EnableMLP[0]
 DefaultAffinityTxnRatio = AffinityTxnRatio[0]
 DefaultNumBucket = NumBucket[0]
+DefaultTPCCPartitionWarehouses = TPCCPartitionWarehouse[0]
 DefaultLongTxnLength = LongTxnSize[0]
 
 # -------------------------------------------- # main test logic -------------------------------------------- #
@@ -1315,7 +1343,8 @@ if __name__ == "__main__":
                 f"Running case {case['case_id']} with Workload={case['workload']}, RunMode={case['run_mode']}, "
                 f"AccessPattern={case['access_pattern']}{extra_part_log}, Scale={scale_label}, "
                 f"WorkerThreads={case['worker_threads']}, BatchSize={case['batch_size']}, "
-                f"KeyPageCapacity={case['key_page_ratio']}, MLP={case['mlp_enabled']}, Attempt={attempt}"
+                f"KeyPageCapacity={case['key_page_ratio']}, MLP={case['mlp_enabled']}, "
+                f"TPCCPartitionWarehouses={case.get('tpcc_partition_warehouses', 0)}, Attempt={attempt}"
             )
             kwr_report_name = (
                 f"kwr_{time_str}_case{case['case_id']:03d}"
@@ -1334,6 +1363,8 @@ if __name__ == "__main__":
                 f" --batch-size {case['batch_size']} --num-bucket {case['num_bucket']}"
                 f" --key-page-ratio {case['key_page_ratio']}"
             )
+            if case.get("tpcc_partition_warehouses"):
+                cmd += " --tpcc-partition-warehouses"
             if UseDataCache:
                 cmd += " --skip-load-data"
 
