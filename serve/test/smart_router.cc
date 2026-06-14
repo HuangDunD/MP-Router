@@ -998,7 +998,12 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
     const size_t preprocess_thread_count =
         std::max<size_t>(1, std::min<size_t>(std::min<size_t>(std::max(1, PreprocessInternalThreads), 8), n));
     const size_t chunk = (n + preprocess_thread_count - 1) / preprocess_thread_count;
-    std::vector<std::vector<std::pair<uint64_t, uint32_t>>> local_page_pairs(preprocess_thread_count);
+    struct PageAccessPair {
+        uint64_t page;
+        uint32_t txn_idx;
+        bool is_write;
+    };
+    std::vector<std::vector<PageAccessPair>> local_page_pairs(preprocess_thread_count);
     std::vector<uint64_t> local_hot_hits(preprocess_thread_count, 0);
     std::vector<uint64_t> local_hot_misses(preprocess_thread_count, 0);
     std::vector<std::future<void>> futs;
@@ -1036,9 +1041,7 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                                                        const itemkey_t* keys,
                                                        const bool* rw,
                                                        size_t access_count) {
-                        if (rw != nullptr) {
-                            sc.rw_flags.assign(rw, rw + access_count);
-                        }
+                        if (rw != nullptr) sc.rw_flags.assign(rw, rw + access_count);
                         sc.involved_pages.reserve(access_count);
                         sc.conflict_page_indexes.assign(access_count, -1);
                         sc.page_to_metis_node_vec.assign(access_count, -1);
@@ -1060,7 +1063,9 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                         sc.involved_pages.push_back(table_page);
                         if (page != static_cast<page_id_t>(-1)) {
                             sc.valid_page_count++;
-                            page_pairs.emplace_back(table_page, static_cast<uint32_t>(idx));
+                            const bool is_write =
+                                access_idx < sc.rw_flags.size() ? sc.rw_flags[access_idx] : true;
+                            page_pairs.push_back({table_page, static_cast<uint32_t>(idx), is_write});
                         }
                     }
                     };
@@ -1071,7 +1076,6 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                         if (txn_type == 6 && txn->accounts.size() > MAX_ITEM_SIZE) {
                             std::vector<table_id_t> table_ids(txn->accounts.size(), kChecking);
                             std::vector<itemkey_t> keys = txn->accounts;
-                            sc.rw_flags.assign(txn->accounts.size(), true);
                             fill_candidate_accesses(table_ids.data(), keys.data(), nullptr, keys.size());
                             continue;
                         }
@@ -1140,7 +1144,8 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                         if (Workload_Type == 1) {
                             table_ids = ycsb_->get_table_ids_by_txn_type();
                             keys = txn->ycsb_keys;
-                            rw = ycsb_->get_rw_flags();
+                            rw = txn->ycsb_rw_flags.empty() ?
+                                ycsb_->get_rw_flags() : txn->ycsb_rw_flags;
                         } else if (Workload_Type == 2) {
                             keys = txn->tpcc_keys;
                             table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, keys.size());
@@ -1177,7 +1182,7 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
 
     struct timespec pair_merge_start_time, pair_merge_end_time;
     clock_gettime(CLOCK_MONOTONIC, &pair_merge_start_time);
-    std::vector<std::pair<uint64_t, uint32_t>> all_page_pairs;
+    std::vector<PageAccessPair> all_page_pairs;
     size_t total_pair_count = 0;
     for (const auto& pairs : local_page_pairs) total_pair_count += pairs.size();
     all_page_pairs.reserve(total_pair_count);
@@ -1186,7 +1191,11 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                               std::make_move_iterator(pairs.begin()),
                               std::make_move_iterator(pairs.end()));
     }
-    std::sort(all_page_pairs.begin(), all_page_pairs.end());
+    std::sort(all_page_pairs.begin(), all_page_pairs.end(),
+              [](const PageAccessPair& lhs, const PageAccessPair& rhs) {
+                  if (lhs.page != rhs.page) return lhs.page < rhs.page;
+                  return lhs.txn_idx < rhs.txn_idx;
+              });
     clock_gettime(CLOCK_MONOTONIC, &pair_merge_end_time);
     const double pair_merge_ms =
         (pair_merge_end_time.tv_sec - pair_merge_start_time.tv_sec) * 1000.0 +
@@ -1203,20 +1212,27 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
         for (size_t i = 0; i < all_page_pairs.size();) {
             size_t range_end = i + 1;
             while (range_end < all_page_pairs.size() &&
-                   all_page_pairs[range_end].first == all_page_pairs[i].first) {
+                   all_page_pairs[range_end].page == all_page_pairs[i].page) {
                 ++range_end;
             }
-            const uint32_t first_txn = all_page_pairs[i].second;
+            bool has_writer = false;
+            uint32_t first_txn = all_page_pairs[i].txn_idx;
             bool has_distinct_txn = false;
-            for (size_t j = i + 1; j < range_end; ++j) {
-                if (all_page_pairs[j].second != first_txn) {
-                    has_distinct_txn = true;
-                    break;
-                }
+            for (size_t j = i; j < range_end; ++j) {
+                has_writer = has_writer || all_page_pairs[j].is_write;
+                if (all_page_pairs[j].txn_idx != first_txn) has_distinct_txn = true;
             }
-            if (has_distinct_txn) {
+            if (has_writer && has_distinct_txn) {
                 for (size_t j = i; j < range_end; ++j) {
-                    SchedulingCandidateTxn& sc = prepared->candidates[all_page_pairs[j].second];
+                    if (all_page_pairs[j].is_write) {
+                        SchedulingCandidateTxn& sc = prepared->candidates[all_page_pairs[j].txn_idx];
+                        sc.is_conflicted = true;
+                        prepared->conflicted_txns.insert(sc.txn->tx_id);
+                    }
+                }
+                for (size_t j = i; j < range_end; ++j) {
+                    if (all_page_pairs[j].is_write) continue;
+                    SchedulingCandidateTxn& sc = prepared->candidates[all_page_pairs[j].txn_idx];
                     sc.is_conflicted = true;
                     prepared->conflicted_txns.insert(sc.txn->tx_id);
                 }
@@ -1242,18 +1258,26 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
     prepared->unique_conflict_pages.reserve(all_page_pairs.size());
     prepared->conflict_page_index_map.reserve(all_page_pairs.size());
     for (size_t i = 0; i < all_page_pairs.size();) {
-        const uint64_t page = all_page_pairs[i].first;
+        const uint64_t page = all_page_pairs[i].page;
         const size_t range_begin = prepared->global_page_pairs.size();
-        bool has_conflicted_txn_on_page = false;
-        while (i < all_page_pairs.size() && all_page_pairs[i].first == page) {
-            SchedulingCandidateTxn* sc = &prepared->candidates[all_page_pairs[i].second];
-            if (sc->is_conflicted) {
+        size_t range_end_idx = i;
+        bool has_writer = false;
+        uint32_t first_txn = all_page_pairs[i].txn_idx;
+        bool has_distinct_txn = false;
+        while (range_end_idx < all_page_pairs.size() && all_page_pairs[range_end_idx].page == page) {
+            has_writer = has_writer || all_page_pairs[range_end_idx].is_write;
+            if (all_page_pairs[range_end_idx].txn_idx != first_txn) has_distinct_txn = true;
+            ++range_end_idx;
+        }
+        const bool page_has_rw_conflict = has_writer && has_distinct_txn;
+        while (i < range_end_idx) {
+            SchedulingCandidateTxn* sc = &prepared->candidates[all_page_pairs[i].txn_idx];
+            if (page_has_rw_conflict && sc->is_conflicted) {
                 prepared->global_page_pairs.emplace_back(page, sc);
-                has_conflicted_txn_on_page = true;
             }
             ++i;
         }
-        if (has_conflicted_txn_on_page) {
+        if (page_has_rw_conflict) {
             const size_t range_end = prepared->global_page_pairs.size();
             const uint32_t page_index = static_cast<uint32_t>(prepared->unique_conflict_pages.size());
             prepared->page_to_txn_range_map[page] = {

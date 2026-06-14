@@ -310,9 +310,6 @@ public:
             const std::string table_keyword = USE_UNLOGGED_TABLES ? "CREATE UNLOGGED TABLE " : "CREATE TABLE ";
             txn.exec(table_keyword + "checking (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
             txn.exec(table_keyword + "savings (id INT, balance INT, city INT, name CHAR(200)) WITH (FILLFACTOR = 50)");
-            // create index
-            txn.exec("CREATE UNIQUE INDEX idx_checking_id ON checking (id)");
-            txn.exec("CREATE UNIQUE INDEX idx_savings_id ON savings (id)");
             std::cout << "Tables created successfully." << std::endl;
             txn.commit();
         } catch (const std::exception &e) {

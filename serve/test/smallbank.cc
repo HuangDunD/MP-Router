@@ -1175,6 +1175,18 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
     std::cout << "Data loaded successfully." << std::endl;
     print_smallbank_table_sizes(conn0, "before pre-extension");
 
+    try {
+        pqxx::work txn_index(*conn0);
+        std::cout << "Creating SmallBank indexes after data load..." << std::endl;
+        txn_index.exec("CREATE UNIQUE INDEX idx_checking_id ON checking (id)");
+        txn_index.exec("CREATE UNIQUE INDEX idx_savings_id ON savings (id)");
+        txn_index.commit();
+        std::cout << "SmallBank indexes created successfully." << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Error while creating SmallBank indexes after data load: "
+                  << e.what() << std::endl;
+    }
+
     // try vacuum freeze 
     // try {
     //     pqxx::nontransaction txn_vacuum(*conn0);

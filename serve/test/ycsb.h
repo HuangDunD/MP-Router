@@ -104,7 +104,6 @@ public:
                 FIELD9   VARCHAR(100)
             ) WITH (FILLFACTOR = 50);
             )SQL");
-            txn.exec("CREATE UNIQUE INDEX idx_usertable_id ON usertable(id)");
             txn.commit();
             std::cout << "YCSB table created." << std::endl;
         } catch (const std::exception& e) {

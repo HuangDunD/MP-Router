@@ -956,6 +956,58 @@ def summarize_result_dir(result_dir):
     summary_script = os.path.join(workspace, "scripts", "summarize_mp_router_results.py")
     subprocess.run([sys.executable, summary_script, result_dir], check=False)
 
+def run_git_capture(args, output_path):
+    with open(output_path, "w", encoding="utf-8") as f:
+        result = subprocess.run(
+            ["git"] + args,
+            cwd=workspace,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            encoding="utf-8",
+            check=False,
+        )
+    return result.returncode
+
+def backup_remote_kingbase_conf(result_dir):
+    remote_conf = os.path.join(database_data_path.rstrip("/"), "kingbase.conf")
+    local_conf = os.path.join(result_dir, "kingbase.conf")
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect(kwr_report_ip, username="root", password=kwr_ip_password, timeout=30)
+        sftp = ssh.open_sftp()
+        try:
+            sftp.get(remote_conf, local_conf)
+            logging.info(f"Backed up remote kingbase.conf to {local_conf}")
+        finally:
+            sftp.close()
+    except Exception as e:
+        logging.warning(f"Failed to back up remote kingbase.conf from {remote_conf}: {e}")
+    finally:
+        ssh.close()
+
+def capture_run_reproducibility_metadata(result_dir):
+    os.makedirs(result_dir, exist_ok=True)
+    logging.info(f"Capturing reproducibility metadata under {result_dir}")
+    git_dir = os.path.join(result_dir, "git")
+    os.makedirs(git_dir, exist_ok=True)
+
+    captures = [
+        (["rev-parse", "HEAD"], "head.txt"),
+        (["branch", "--show-current"], "branch.txt"),
+        (["status", "--short"], "status_short.txt"),
+        (["diff", "--stat"], "diff_stat.txt"),
+        (["diff"], "diff.patch"),
+        (["diff", "--cached"], "diff_cached.patch"),
+        (["log", "-1", "--decorate=full", "--stat"], "last_commit.txt"),
+    ]
+    for args, filename in captures:
+        rc = run_git_capture(args, os.path.join(git_dir, filename))
+        if rc != 0:
+            logging.warning(f"git {' '.join(args)} exited with code {rc}")
+
+    backup_remote_kingbase_conf(result_dir)
+
 def access_extra_args(case):
     if case["access_pattern"] == 1:
         return f" --zipfian-theta {case['zipfian_theta']} --zipfian-generator {case['zipfian_generator']}"
@@ -1215,6 +1267,8 @@ if __name__ == "__main__":
     if args.plan_only:
         logging.info(f"Plan-only mode completed: {figure_path}")
         raise SystemExit(0)
+
+    capture_run_reproducibility_metadata(figure_path)
 
     # !开始本次的测试
     os.chdir(workspace)
