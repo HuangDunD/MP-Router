@@ -414,7 +414,7 @@ void TPCC::pre_extend_tables() {
             extend_sizes.push_back(total_pages);
         }
     };
-    add_extend_target("warehouse", 1000);
+    add_extend_target("warehouse", 30000);
     add_extend_target("district", 30000);
     add_extend_target("customer", 500000);
     add_extend_target("history", 100000);
