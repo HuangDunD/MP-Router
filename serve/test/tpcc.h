@@ -120,6 +120,7 @@ private:
     void load_district(pqxx::transaction_base &txn, int w_id);
     void load_customer(pqxx::transaction_base &txn, int w_id, int d_id);
     void load_orders(pqxx::transaction_base &txn, int w_id, int d_id);
+    void pre_extend_tables();
 
     // Helper functions for transaction generation
     int generate_txn_type();

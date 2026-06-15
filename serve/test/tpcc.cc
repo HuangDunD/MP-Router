@@ -2,6 +2,7 @@
 #include <iostream>
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <set>
 
 // Initialize static members
@@ -61,7 +62,14 @@ void print_tpcc_table_sizes(const std::string& label) {
         std::cout << "TPC-C table sizes " << label << ":" << std::endl;
         for (const auto& table : tpcc_table_names()) {
             pqxx::result size_result = txn.exec(
-                "select sys_size_pretty(sys_relation_size('" + table + "'))");
+                "with child_sizes as ("
+                "  select coalesce(sum(sys_relation_size(c.oid)), 0) as child_size"
+                "  from pg_class c"
+                "  join pg_inherits i on c.oid = i.inhrelid"
+                "  where i.inhparent = '" + table + "'::regclass"
+                ") "
+                "select sys_size_pretty(case when child_size > 0 then child_size "
+                "else sys_relation_size('" + table + "') end) from child_sizes");
             if (!size_result.empty()) {
                 std::cout << "  " << table << " table size: "
                           << size_result[0][0].as<std::string>() << std::endl;
@@ -160,6 +168,32 @@ void TPCC::create_table(pqxx::connection *conn) {
         txn.exec("DROP TABLE IF EXISTS stock CASCADE");
         txn.exec("DROP TABLE IF EXISTS item CASCADE");
         txn.exec("DROP TABLE IF EXISTS warehouse CASCADE");
+
+        const int partition_count = std::max(1, ComputeNodeCount);
+        const int warehouses_per_partition =
+            (num_warehouses_ + partition_count - 1) / partition_count;
+        auto for_each_warehouse_partition = [&](const std::function<void(int, int, int)>& fn) {
+            for (int partition_id = 0; partition_id < partition_count; ++partition_id) {
+                const int start_w_id = partition_id * warehouses_per_partition + 1;
+                if (start_w_id > num_warehouses_) break;
+                const int end_w_id_exclusive =
+                    std::min(num_warehouses_ + 1, start_w_id + warehouses_per_partition);
+                fn(partition_id, start_w_id, end_w_id_exclusive);
+            }
+        };
+        auto create_warehouse_range_partitions = [&](const std::string& table_name) {
+            if (!TPCCPartitionWarehouses) return;
+            for_each_warehouse_partition([&](int partition_id, int start_w_id, int end_w_id_exclusive) {
+                const std::string partition_name = table_name + "_p" + std::to_string(partition_id);
+                txn.exec(
+                    table_keyword + partition_name +
+                    " PARTITION OF " + table_name + " FOR VALUES FROM (" +
+                    std::to_string(start_w_id) + ") TO (" +
+                    std::to_string(end_w_id_exclusive) + ")"
+                );
+                txn.exec("ALTER TABLE " + partition_name + " SET (FILLFACTOR = 50)");
+            });
+        };
         
         // Warehouse
         if (TPCCPartitionWarehouses) {
@@ -175,26 +209,7 @@ void TPCC::create_table(pqxx::connection *conn) {
                 w_ytd DECIMAL(12,2)
             ) PARTITION BY RANGE (w_id);
             )SQL");
-
-            const int partition_count = std::max(1, ComputeNodeCount);
-            const int warehouses_per_partition =
-                (num_warehouses_ + partition_count - 1) / partition_count;
-            for (int partition_id = 0; partition_id < partition_count; ++partition_id) {
-                const int start_w_id = partition_id * warehouses_per_partition + 1;
-                if (start_w_id > num_warehouses_) break;
-                const int end_w_id_exclusive =
-                    std::min(num_warehouses_ + 1, start_w_id + warehouses_per_partition);
-                const std::string partition_name = "warehouse_p" + std::to_string(partition_id);
-                txn.exec(
-                    table_keyword + partition_name +
-                    " PARTITION OF warehouse FOR VALUES FROM (" +
-                    std::to_string(start_w_id) + ") TO (" +
-                    std::to_string(end_w_id_exclusive) + ")"
-                );
-                txn.exec("ALTER TABLE " + partition_name + " SET (FILLFACTOR = 50)");
-            }
-            std::cout << "TPC-C warehouse table partitioned by w_id into up to "
-                      << partition_count << " range partitions." << std::endl;
+            create_warehouse_range_partitions("warehouse");
         } else {
             txn.exec(table_keyword + R"SQL(warehouse (
                 w_id INT PRIMARY KEY,
@@ -224,8 +239,8 @@ void TPCC::create_table(pqxx::connection *conn) {
                 d_ytd DECIMAL(12,2),
                 d_next_o_id INT,
                 PRIMARY KEY (d_w_id, d_id)
-            ) WITH (FILLFACTOR = 50);
-        )SQL");
+            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (d_w_id);" : "WITH (FILLFACTOR = 50);"));
+        create_warehouse_range_partitions("district");
 
         // Customer
         txn.exec(table_keyword + R"SQL(customer (
@@ -251,8 +266,8 @@ void TPCC::create_table(pqxx::connection *conn) {
                 c_delivery_cnt INT,
                 c_data VARCHAR(500),
                 PRIMARY KEY (c_w_id, c_d_id, c_id)
-            ) WITH (FILLFACTOR = 50);
-        )SQL");
+            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (c_w_id);" : "WITH (FILLFACTOR = 50);"));
+        create_warehouse_range_partitions("customer");
 
         // History
         txn.exec(table_keyword + R"SQL(history (
@@ -264,8 +279,8 @@ void TPCC::create_table(pqxx::connection *conn) {
                 h_date TIMESTAMP,
                 h_amount DECIMAL(6,2),
                 h_data VARCHAR(24)
-            ) WITH (FILLFACTOR = 50);
-        )SQL");
+            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (h_w_id);" : "WITH (FILLFACTOR = 50);"));
+        create_warehouse_range_partitions("history");
 
         // NewOrder
         txn.exec(table_keyword + R"SQL(new_order (
@@ -273,8 +288,8 @@ void TPCC::create_table(pqxx::connection *conn) {
                 no_d_id INT,
                 no_w_id INT,
                 PRIMARY KEY (no_w_id, no_d_id, no_o_id)
-            ) WITH (FILLFACTOR = 50);
-        )SQL");
+            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (no_w_id);" : "WITH (FILLFACTOR = 50);"));
+        create_warehouse_range_partitions("new_order");
 
         // Orders
         txn.exec(table_keyword + R"SQL(orders (
@@ -287,8 +302,8 @@ void TPCC::create_table(pqxx::connection *conn) {
                 o_ol_cnt INT,
                 o_all_local INT,
                 PRIMARY KEY (o_w_id, o_d_id, o_id)
-            ) WITH (FILLFACTOR = 50);
-        )SQL");
+            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (o_w_id);" : "WITH (FILLFACTOR = 50);"));
+        create_warehouse_range_partitions("orders");
 
         // OrderLine
         txn.exec(table_keyword + R"SQL(order_line (
@@ -303,8 +318,8 @@ void TPCC::create_table(pqxx::connection *conn) {
                 ol_amount DECIMAL(6,2),
                 ol_dist_info CHAR(24),
                 PRIMARY KEY (ol_w_id, ol_d_id, ol_o_id, ol_number)
-            ) WITH (FILLFACTOR = 50);
-        )SQL");
+            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (ol_w_id);" : "WITH (FILLFACTOR = 50);"));
+        create_warehouse_range_partitions("order_line");
 
         // Item
         txn.exec(table_keyword + R"SQL(item (
@@ -336,8 +351,13 @@ void TPCC::create_table(pqxx::connection *conn) {
                 s_remote_cnt INT,
                 s_data VARCHAR(50),
                 PRIMARY KEY (s_w_id, s_i_id)
-            ) WITH (FILLFACTOR = 50);
-        )SQL");
+            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (s_w_id);" : "WITH (FILLFACTOR = 50);"));
+        create_warehouse_range_partitions("stock");
+
+        if (TPCCPartitionWarehouses) {
+            std::cout << "TPC-C warehouse-local tables partitioned by warehouse id into up to "
+                      << partition_count << " range partitions." << std::endl;
+        }
 
         if (DISABLE_TABLE_AUTOVACUUM) {
             std::vector<std::string> tables = {
@@ -346,63 +366,91 @@ void TPCC::create_table(pqxx::connection *conn) {
             };
             for (const auto& table : tables) {
                 txn.exec("ALTER TABLE " + table + " SET (autovacuum_enabled = off)");
+                if (TPCCPartitionWarehouses && table != "item") {
+                    for_each_warehouse_partition([&](int partition_id, int, int) {
+                        txn.exec("ALTER TABLE " + table + "_p" + std::to_string(partition_id) +
+                                 " SET (autovacuum_enabled = off)");
+                    });
+                }
             }
             std::cout << "Disabled autovacuum for TPC-C tables." << std::endl;
         }
 
         txn.commit();
         std::cout << "TPC-C tables and primary-key indexes created." << std::endl;
-        print_tpcc_table_sizes("before pre-extension");
-
-        // Pre-extend tables
-        std::cout << "Pre-extending TPC-C tables..." << std::endl;
-        std::vector<std::string> extend_tables;
-        if (TPCCPartitionWarehouses) {
-            const int partition_count = std::max(1, ComputeNodeCount);
-            for (int partition_id = 0; partition_id < partition_count; ++partition_id) {
-                const int start_w_id =
-                    partition_id * ((num_warehouses_ + partition_count - 1) / partition_count) + 1;
-                if (start_w_id > num_warehouses_) break;
-                extend_tables.push_back("warehouse_p" + std::to_string(partition_id));
-            }
-        } else {
-            extend_tables.push_back("warehouse");
-        }
-        extend_tables.insert(extend_tables.end(), {"district", "customer", "history", "new_order", "orders", "order_line", "item", "stock"});
-        // Custom sizes for each table (number of pages) - adjust as needed
-        std::vector<int> extend_sizes(extend_tables.size(), 1000);
-        std::vector<int> non_warehouse_extend_sizes = {30000, 500000, 100000, 100000, 50000, 500000, 5000, 1000000};
-        for (size_t i = 0; i < non_warehouse_extend_sizes.size(); ++i) {
-            extend_sizes[extend_sizes.size() - non_warehouse_extend_sizes.size() + i] = non_warehouse_extend_sizes[i];
-        }
-        
-        std::vector<std::thread> extend_threads;
-        for (size_t i = 0; i < extend_tables.size(); ++i) {
-            extend_threads.emplace_back([this, i, extend_tables, extend_sizes](){
-                pqxx::connection conn_extend(DBConnection[0]);
-                if (!conn_extend.is_open()) {
-                    std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
-                    return;
-                }
-                try {
-                    pqxx::nontransaction txn(conn_extend);
-                    std::string extend_sql = "SELECT sys_extend('" + extend_tables[i] + "', " + std::to_string(extend_sizes[i]) + ")";
-                    txn.exec(extend_sql);
-                    std::cout << "Pre-extended " << extend_tables[i] << " table." << std::endl;
-                } catch (const std::exception &e) {
-                    std::cerr << "Error while pre-extending " << extend_tables[i] << " table: " << e.what() << std::endl;
-                }
-            });
-        }
-
-        for (auto& t : extend_threads) {
-            t.join();
-        }
-        std::cout << "TPC-C tables pre-extended." << std::endl;
-        print_tpcc_table_sizes("after pre-extension");
+        print_tpcc_table_sizes("after table creation");
     } catch (const std::exception &e) {
         std::cerr << "Error creating TPC-C tables: " << e.what() << std::endl;
     }
+}
+
+void TPCC::pre_extend_tables() {
+    // Keep the initial load size observable before adding reserved space.
+    std::cout << "Pre-extending TPC-C tables..." << std::endl;
+
+    const int partition_count = std::max(1, ComputeNodeCount);
+    const int warehouses_per_partition =
+        (num_warehouses_ + partition_count - 1) / partition_count;
+    auto for_each_warehouse_partition = [&](const std::function<void(int)>& fn) {
+        for (int partition_id = 0; partition_id < partition_count; ++partition_id) {
+            const int start_w_id = partition_id * warehouses_per_partition + 1;
+            if (start_w_id > num_warehouses_) break;
+            fn(partition_id);
+        }
+    };
+
+    std::vector<std::string> extend_tables;
+    std::vector<int> extend_sizes;
+    auto add_extend_target = [&](const std::string& table_name, int total_pages) {
+        if (TPCCPartitionWarehouses && table_name != "item") {
+            const int partition_pages =
+                std::max(1, (total_pages + partition_count - 1) / partition_count);
+            for_each_warehouse_partition([&](int partition_id) {
+                extend_tables.push_back(table_name + "_p" + std::to_string(partition_id));
+                extend_sizes.push_back(partition_pages);
+            });
+        } else {
+            extend_tables.push_back(table_name);
+            extend_sizes.push_back(total_pages);
+        }
+    };
+    add_extend_target("warehouse", 1000);
+    add_extend_target("district", 30000);
+    add_extend_target("customer", 500000);
+    add_extend_target("history", 100000);
+    add_extend_target("new_order", 100000);
+    add_extend_target("orders", 50000);
+    add_extend_target("order_line", 500000);
+    add_extend_target("item", 5000);
+    add_extend_target("stock", 1000000);
+
+    std::vector<std::thread> extend_threads;
+    for (size_t i = 0; i < extend_tables.size(); ++i) {
+        extend_threads.emplace_back([this, i, extend_tables, extend_sizes](){
+            pqxx::connection conn_extend(DBConnection[0]);
+            if (!conn_extend.is_open()) {
+                std::cerr << "Failed to connect to the database. conninfo" + DBConnection[0] << std::endl;
+                return;
+            }
+            try {
+                pqxx::nontransaction txn(conn_extend);
+                std::string extend_sql =
+                    "SELECT sys_extend('" + extend_tables[i] + "', " +
+                    std::to_string(extend_sizes[i]) + ")";
+                txn.exec(extend_sql);
+                std::cout << "Pre-extended " << extend_tables[i] << " table." << std::endl;
+            } catch (const std::exception &e) {
+                std::cerr << "Error while pre-extending " << extend_tables[i]
+                          << " table: " << e.what() << std::endl;
+            }
+        });
+    }
+
+    for (auto& t : extend_threads) {
+        t.join();
+    }
+    std::cout << "TPC-C tables pre-extended." << std::endl;
+    print_tpcc_table_sizes("after pre-extension");
 }
 
 void TPCC::load_data() {
@@ -473,6 +521,7 @@ void TPCC::load_data() {
         
         std::cout << "TPC-C data loaded." << std::endl;
         print_tpcc_table_sizes("after data load");
+        pre_extend_tables();
     } catch (const std::exception &e) {
         std::cerr << "Error loading TPC-C data: " << e.what() << std::endl;
     }
