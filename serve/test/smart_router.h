@@ -134,6 +134,11 @@ public:
             uint64_t batch_local_total_txn_count = 0;
             uint64_t batch_local_conflict_free_txn_count = 0;
             uint64_t batch_local_conflicted_txn_count = 0;
+            uint64_t conflict_free_path_txn_count = 0;
+            uint64_t conflicting_critical_path_txn_count = 0;
+            uint64_t conflicting_non_critical_path_txn_count = 0;
+            std::array<uint64_t, 4> tpcc_conflict_pages_by_table = {0, 0, 0, 0};
+            std::array<uint64_t, 4> tpcc_conflict_txns_by_table = {0, 0, 0, 0};
                 double merge_and_construct_ipq_ms = 0.0;
                 double select_condidate_txns_ms = 0.0;
                 double compute_transfer_page_ms = 0.0;

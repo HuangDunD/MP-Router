@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <iostream>
@@ -106,6 +107,11 @@ struct RouterStatSnapshot {
     uint64_t batch_local_total_txn_count = 0;
     uint64_t batch_local_conflict_free_txn_count = 0;
     uint64_t batch_local_conflicted_txn_count = 0;
+    uint64_t conflict_free_path_txn_count = 0;
+    uint64_t conflicting_critical_path_txn_count = 0;
+    uint64_t conflicting_non_critical_path_txn_count = 0;
+    std::array<uint64_t, 4> tpcc_conflict_pages_by_table = {0, 0, 0, 0};
+    std::array<uint64_t, 4> tpcc_conflict_txns_by_table = {0, 0, 0, 0};
     double merge_and_construct_ipq_ms = 0.0;
     double select_condidate_txns_ms = 0.0;
     double compute_transfer_page_ms = 0.0;
@@ -254,6 +260,69 @@ struct RouterStatSnapshot {
                           ? 100.0 * batch_local_conflicted_txn_count / batch_local_total_txn_count
                           : 0.0)
                   << "%" << std::endl;
+        uint64_t classified_path_txns =
+            conflict_free_path_txn_count +
+            conflicting_critical_path_txn_count +
+            conflicting_non_critical_path_txn_count;
+        uint64_t conflicting_path_txns =
+            conflicting_critical_path_txn_count + conflicting_non_critical_path_txn_count;
+        uint64_t unclassified_path_txns =
+            batch_local_total_txn_count > classified_path_txns
+                ? batch_local_total_txn_count - classified_path_txns
+                : 0;
+        std::cout << "    Router Path Txn Mix:" << std::endl;
+        std::cout << "      Conflict-Free Path Txns: " << conflict_free_path_txn_count
+                  << " ("
+                  << (batch_local_total_txn_count > 0
+                          ? 100.0 * conflict_free_path_txn_count / batch_local_total_txn_count
+                          : 0.0)
+                  << "% of total)" << std::endl;
+        std::cout << "      Conflicting Critical-Path Txns: " << conflicting_critical_path_txn_count
+                  << " ("
+                  << (batch_local_total_txn_count > 0
+                          ? 100.0 * conflicting_critical_path_txn_count / batch_local_total_txn_count
+                          : 0.0)
+                  << "% of total, "
+                  << (conflicting_path_txns > 0
+                          ? 100.0 * conflicting_critical_path_txn_count / conflicting_path_txns
+                          : 0.0)
+                  << "% of conflicting path)" << std::endl;
+        std::cout << "      Conflicting Non-Critical-Path Txns: " << conflicting_non_critical_path_txn_count
+                  << " ("
+                  << (batch_local_total_txn_count > 0
+                          ? 100.0 * conflicting_non_critical_path_txn_count / batch_local_total_txn_count
+                          : 0.0)
+                  << "% of total, "
+                  << (conflicting_path_txns > 0
+                          ? 100.0 * conflicting_non_critical_path_txn_count / conflicting_path_txns
+                          : 0.0)
+                  << "% of conflicting path)" << std::endl;
+        if (unclassified_path_txns > 0) {
+            std::cout << "      Unclassified Path Txns: " << unclassified_path_txns
+                      << " ("
+                      << (batch_local_total_txn_count > 0
+                              ? 100.0 * unclassified_path_txns / batch_local_total_txn_count
+                              : 0.0)
+                      << "% of total)" << std::endl;
+        }
+        const uint64_t tpcc_conflict_pages_total =
+            tpcc_conflict_pages_by_table[0] + tpcc_conflict_pages_by_table[1] +
+            tpcc_conflict_pages_by_table[2] + tpcc_conflict_pages_by_table[3];
+        const uint64_t tpcc_conflict_txns_total =
+            tpcc_conflict_txns_by_table[0] + tpcc_conflict_txns_by_table[1] +
+            tpcc_conflict_txns_by_table[2] + tpcc_conflict_txns_by_table[3];
+        if (tpcc_conflict_pages_total > 0 || tpcc_conflict_txns_total > 0) {
+            static const std::array<const char*, 4> tpcc_table_names = {
+                "warehouse", "district", "customer", "stock"
+            };
+            std::cout << "    TPCC Page Conflict Breakdown:" << std::endl;
+            for (size_t i = 0; i < tpcc_table_names.size(); ++i) {
+                std::cout << "      " << tpcc_table_names[i]
+                          << " conflict pages / txns: "
+                          << tpcc_conflict_pages_by_table[i] << " / "
+                          << tpcc_conflict_txns_by_table[i] << std::endl;
+            }
+        }
         std::cout << "    Conflict-Free Path Parallel Worker Wall Time: "
                   << conflict_free_path_worker_wall_ms << " ms" << std::endl;
         std::cout << "    Conflict-Free Path Estimated Capacity: "
@@ -396,6 +465,11 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.batch_local_total_txn_count = tdb.batch_local_total_txn_count;
     snap.batch_local_conflict_free_txn_count = tdb.batch_local_conflict_free_txn_count;
     snap.batch_local_conflicted_txn_count = tdb.batch_local_conflicted_txn_count;
+    snap.conflict_free_path_txn_count = tdb.conflict_free_path_txn_count;
+    snap.conflicting_critical_path_txn_count = tdb.conflicting_critical_path_txn_count;
+    snap.conflicting_non_critical_path_txn_count = tdb.conflicting_non_critical_path_txn_count;
+    snap.tpcc_conflict_pages_by_table = tdb.tpcc_conflict_pages_by_table;
+    snap.tpcc_conflict_txns_by_table = tdb.tpcc_conflict_txns_by_table;
     snap.merge_and_construct_ipq_ms = tdb.merge_and_construct_ipq_ms;
     snap.process_conflicted_txn_ms = tdb.process_conflicted_txn_ms;
     snap.select_condidate_txns_ms = tdb.select_condidate_txns_ms;
@@ -541,6 +615,23 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.batch_local_conflicted_txn_count = b.batch_local_conflicted_txn_count >= a.batch_local_conflicted_txn_count
                                             ? b.batch_local_conflicted_txn_count - a.batch_local_conflicted_txn_count
                                             : 0;
+    d.conflict_free_path_txn_count = b.conflict_free_path_txn_count >= a.conflict_free_path_txn_count
+                                        ? b.conflict_free_path_txn_count - a.conflict_free_path_txn_count
+                                        : 0;
+    d.conflicting_critical_path_txn_count = b.conflicting_critical_path_txn_count >= a.conflicting_critical_path_txn_count
+                                                ? b.conflicting_critical_path_txn_count - a.conflicting_critical_path_txn_count
+                                                : 0;
+    d.conflicting_non_critical_path_txn_count = b.conflicting_non_critical_path_txn_count >= a.conflicting_non_critical_path_txn_count
+                                                    ? b.conflicting_non_critical_path_txn_count - a.conflicting_non_critical_path_txn_count
+                                                    : 0;
+    for (size_t i = 0; i < d.tpcc_conflict_pages_by_table.size(); ++i) {
+        d.tpcc_conflict_pages_by_table[i] = b.tpcc_conflict_pages_by_table[i] >= a.tpcc_conflict_pages_by_table[i]
+                                                ? b.tpcc_conflict_pages_by_table[i] - a.tpcc_conflict_pages_by_table[i]
+                                                : 0;
+        d.tpcc_conflict_txns_by_table[i] = b.tpcc_conflict_txns_by_table[i] >= a.tpcc_conflict_txns_by_table[i]
+                                            ? b.tpcc_conflict_txns_by_table[i] - a.tpcc_conflict_txns_by_table[i]
+                                            : 0;
+    }
     d.merge_and_construct_ipq_ms = b.merge_and_construct_ipq_ms - a.merge_and_construct_ipq_ms;
     d.process_conflicted_txn_ms = b.process_conflicted_txn_ms - a.process_conflicted_txn_ms;
     d.select_condidate_txns_ms = b.select_condidate_txns_ms - a.select_condidate_txns_ms;

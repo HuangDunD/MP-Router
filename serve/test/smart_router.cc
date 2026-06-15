@@ -1218,6 +1218,22 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
 
     struct timespec conflict_start_time, conflict_end_time;
     clock_gettime(CLOCK_MONOTONIC, &conflict_start_time);
+    std::array<uint64_t, 4> batch_tpcc_conflict_pages_by_table = {0, 0, 0, 0};
+    std::array<std::unordered_set<tx_id_t>, 4> batch_tpcc_conflict_txns_by_table;
+    auto tpcc_conflict_breakdown_index = [](table_id_t table_id) -> int {
+        switch (static_cast<TPCCTableType>(table_id)) {
+            case TPCCTableType::kWarehouse:
+                return 0;
+            case TPCCTableType::kDistrict:
+                return 1;
+            case TPCCTableType::kCustomer:
+                return 2;
+            case TPCCTableType::kStock:
+                return 3;
+            default:
+                return -1;
+        }
+    };
     if (SYSTEM_MODE == 29) {
         for (auto& sc : prepared->candidates) {
             prepared->conflicted_txns.insert(sc.txn->tx_id);
@@ -1238,6 +1254,17 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                 if (all_page_pairs[j].txn_idx != first_txn) has_distinct_txn = true;
             }
             if (has_writer && has_distinct_txn) {
+                if (Workload_Type == 2) {
+                    const table_id_t table_id = static_cast<table_id_t>(all_page_pairs[i].page >> 32);
+                    const int table_idx = tpcc_conflict_breakdown_index(table_id);
+                    if (table_idx >= 0) {
+                        batch_tpcc_conflict_pages_by_table[table_idx]++;
+                        for (size_t j = i; j < range_end; ++j) {
+                            SchedulingCandidateTxn& sc = prepared->candidates[all_page_pairs[j].txn_idx];
+                            batch_tpcc_conflict_txns_by_table[table_idx].insert(sc.txn->tx_id);
+                        }
+                    }
+                }
                 for (size_t j = i; j < range_end; ++j) {
                     if (all_page_pairs[j].is_write) {
                         SchedulingCandidateTxn& sc = prepared->candidates[all_page_pairs[j].txn_idx];
@@ -1391,6 +1418,10 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
         time_stats_.compute_union_ms += union_ms;
         time_stats_.preprocess_txn_ms += preprocess_ms;
         time_stats_.preprocess_completed_txn_count += n;
+        for (size_t i = 0; i < batch_tpcc_conflict_pages_by_table.size(); ++i) {
+            time_stats_.tpcc_conflict_pages_by_table[i] += batch_tpcc_conflict_pages_by_table[i];
+            time_stats_.tpcc_conflict_txns_by_table[i] += batch_tpcc_conflict_txns_by_table[i].size();
+        }
     }
     return prepared;
 }
@@ -2793,6 +2824,8 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     time_stats_.batch_local_total_txn_count += n;
     time_stats_.batch_local_conflicted_txn_count += global_conflicted_txns.size();
     time_stats_.batch_local_conflict_free_txn_count += n - global_conflicted_txns.size();
+    std::atomic<uint64_t> conflicting_critical_path_txn_cnt{0};
+    std::atomic<uint64_t> conflicting_non_critical_path_txn_cnt{0};
     std::vector<std::future<void>> futs;
     std::unordered_map<uint64_t, std::string> debug_pages;
 #if LOG_BATCH_ROUTER
@@ -3246,11 +3279,18 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     // Don't wait here.
     // for(auto& fut : ownership_futs) fut.get();
 
-    std::atomic<int> unconflict_and_ownership_ok_txn_cnt, unconflict_and_ownership_cross_txn_cnt, unconflict_and_shared_txn_cnt;
+    std::atomic<int> unconflict_and_ownership_ok_txn_cnt{0};
+    std::atomic<int> unconflict_and_ownership_cross_txn_cnt{0};
+    std::atomic<int> unconflict_and_shared_txn_cnt{0};
     std::vector<std::atomic<int>> schedule_txn_cnt_per_node_this_batch(ComputeNodeCount);
-    std::atomic<int> candidate_txn_cnt;
+    std::atomic<int> candidate_txn_cnt{0};
     std::vector<std::atomic<int>> ownership_ok_txn_cnt_per_node(ComputeNodeCount);
     std::vector<std::atomic<int>> expected_page_transfer_count_per_node(ComputeNodeCount);
+    for (int i = 0; i < ComputeNodeCount; ++i) {
+        schedule_txn_cnt_per_node_this_batch[i].store(0, std::memory_order_relaxed);
+        ownership_ok_txn_cnt_per_node[i].store(0, std::memory_order_relaxed);
+        expected_page_transfer_count_per_node[i].store(0, std::memory_order_relaxed);
+    }
     futs.clear();
     size_t conflict_free_thread_count = std::min<size_t>(std::min<size_t>(worker_threads_, 64ul), n);
     if (conflict_free_thread_count == 0) conflict_free_thread_count = 1;
@@ -3522,6 +3562,10 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
         time_stats_.conflict_free_path_worker_wall_ms +=
             *std::max_element(conflict_free_worker_wall_ms.begin(), conflict_free_worker_wall_ms.end());
     }
+    time_stats_.conflict_free_path_txn_count +=
+        static_cast<uint64_t>(unconflict_and_ownership_ok_txn_cnt.load(std::memory_order_relaxed)) +
+        static_cast<uint64_t>(unconflict_and_ownership_cross_txn_cnt.load(std::memory_order_relaxed)) +
+        static_cast<uint64_t>(unconflict_and_shared_txn_cnt.load(std::memory_order_relaxed));
 
     // 计时结束
     clock_gettime(CLOCK_MONOTONIC, &end_time);
@@ -3678,7 +3722,8 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     for(int i=0; i<ComputeNodeCount; ++i) ownership_queue_sizes[i] = ownership_ok_txn_cnt_per_node[i].load();
     
     std::vector<std::vector<std::unordered_set<SchedulingCandidateTxn*>>> local_ownership_ok_txn_queues_list(thread_count);
-    std::atomic<int> scheduled_counter, scheduled_front_txn_cnt = 0;
+    std::atomic<int> scheduled_counter{0};
+    std::atomic<int> scheduled_front_txn_cnt{0};
     std::atomic<int> dependency_group_id_source{1};
     for (size_t t = 0; t < thread_count; ++t) {
         // Resize the local vector for this thread
@@ -3691,7 +3736,9 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                                             conflict_page_count, &scheduled_front_txn_cnt, &dependency_group_id_source,
                                             &local_ownership_ok_txn_queues_list, &ownership_queue_sizes, &scheduled_counter,
                                             &expected_page_transfer_count_per_node, &schedule_txn_cnt_per_node_this_batch, 
-                                            &compute_node_workload_benefit, &debug_pages, n]() {
+                                            &compute_node_workload_benefit, &debug_pages, n,
+                                            &conflicting_critical_path_txn_cnt,
+                                            &conflicting_non_critical_path_txn_cnt]() {
             
             struct timespec r_start_time, r_end_time;
             clock_gettime(CLOCK_MONOTONIC, &r_start_time);
@@ -3815,6 +3862,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                         this->routed_txn_cnt_per_node[i].fetch_add(sys30_routed_counts[i], std::memory_order_relaxed);
                         load_tracker_.record(i, sys30_routed_counts[i]);
                         schedule_txn_cnt_per_node_this_batch[i].fetch_add(sys30_routed_counts[i], std::memory_order_relaxed);
+                        conflicting_non_critical_path_txn_cnt.fetch_add(sys30_routed_counts[i], std::memory_order_relaxed);
                     }
                 }
             }
@@ -4263,6 +4311,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                                 must_schedule_prior_txn_cnt++;
                                 // !标记该事务已经被调度
                                 affected_txn->is_scheduled = true;
+                                conflicting_critical_path_txn_cnt.fetch_add(1, std::memory_order_relaxed);
                             }
                             else {      
                                 // ! case1: 之前可以执行, 但现在需要变动到新的节点上执行, 但执行节点变了
@@ -4327,6 +4376,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                             must_schedule_prior_txn_cnt++;
                             // !标记该事务已经被调度
                             affected_txn->is_scheduled = true;
+                            conflicting_critical_path_txn_cnt.fetch_add(1, std::memory_order_relaxed);
                         } else{
                             // ! case4: 之前不可以执行, 页面所有权转移之后仍然不能执行
                             // 更新candidate_txn_benefit_ipq中的benefit值
@@ -4649,6 +4699,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                             size_t cnt = dag_ready_txn[node_id].size();
                             if(cnt > 0) {
                                 txn_queues_[node_id]->push_txn_back_batch(std::move(dag_ready_txn[node_id]));
+                                conflicting_non_critical_path_txn_cnt.fetch_add(cnt, std::memory_order_relaxed);
                                 assert(dag_ready_txn[node_id].empty());
                                 scheduled_front_txn_cnt += cnt;
                                 local_scheduled_front_txn_cnt[t] += cnt; 
@@ -4738,6 +4789,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                             this->routed_txn_cnt_per_node[will_route_node]++;
                             load_tracker_.record(will_route_node);
                             schedule_txn_cnt_per_node_this_batch[will_route_node]++;
+                            conflicting_non_critical_path_txn_cnt.fetch_add(1, std::memory_order_relaxed);
                         }
                     }
                     for(int node_id = 0; node_id < ComputeNodeCount; node_id++){
@@ -4875,6 +4927,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                     this->routed_txn_cnt_per_node[node_id].fetch_add(node_txn_count, std::memory_order_relaxed);
                     load_tracker_.record(node_id, node_txn_count);
                     schedule_txn_cnt_per_node_this_batch[node_id].fetch_add(node_txn_count, std::memory_order_relaxed);
+                    conflicting_non_critical_path_txn_cnt.fetch_add(node_txn_count, std::memory_order_relaxed);
                 }
                 // if(WarmupEnd)
                 if(t==0 && Enable_Important_Router_Batch_Log) {
@@ -4922,6 +4975,10 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
 
     // Join workers
     for(auto& fut : futs) fut.get();
+    time_stats_.conflicting_critical_path_txn_count +=
+        conflicting_critical_path_txn_cnt.load(std::memory_order_relaxed);
+    time_stats_.conflicting_non_critical_path_txn_count +=
+        conflicting_non_critical_path_txn_cnt.load(std::memory_order_relaxed);
 
     if (Enable_Important_Router_Batch_Log) {
         logger->info("Batch id: " + std::to_string(batch_id) +
