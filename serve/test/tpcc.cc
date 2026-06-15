@@ -181,7 +181,7 @@ void TPCC::create_table(pqxx::connection *conn) {
                 fn(partition_id, start_w_id, end_w_id_exclusive);
             }
         };
-        auto create_warehouse_range_partitions = [&](const std::string& table_name) {
+        auto create_warehouse_range_partitions = [&](const std::string& table_name, int fillfactor = 50) {
             if (!TPCCPartitionWarehouses) return;
             for_each_warehouse_partition([&](int partition_id, int start_w_id, int end_w_id_exclusive) {
                 const std::string partition_name = table_name + "_p" + std::to_string(partition_id);
@@ -191,7 +191,8 @@ void TPCC::create_table(pqxx::connection *conn) {
                     std::to_string(start_w_id) + ") TO (" +
                     std::to_string(end_w_id_exclusive) + ")"
                 );
-                txn.exec("ALTER TABLE " + partition_name + " SET (FILLFACTOR = 50)");
+                txn.exec("ALTER TABLE " + partition_name + " SET (FILLFACTOR = " +
+                         std::to_string(fillfactor) + ")");
             });
         };
         
@@ -206,10 +207,12 @@ void TPCC::create_table(pqxx::connection *conn) {
                 w_state CHAR(2),
                 w_zip CHAR(9),
                 w_tax DECIMAL(4,4),
-                w_ytd DECIMAL(12,2)
+                w_ytd DECIMAL(12,2),
+                w_padding VARCHAR(1000)
             ) PARTITION BY RANGE (w_id);
             )SQL");
-            create_warehouse_range_partitions("warehouse");
+            txn.exec("ALTER TABLE warehouse ALTER COLUMN w_padding SET STORAGE PLAIN");
+            create_warehouse_range_partitions("warehouse", 10);
         } else {
             txn.exec(table_keyword + R"SQL(warehouse (
                 w_id INT PRIMARY KEY,
@@ -220,9 +223,11 @@ void TPCC::create_table(pqxx::connection *conn) {
                 w_state CHAR(2),
                 w_zip CHAR(9),
                 w_tax DECIMAL(4,4),
-                w_ytd DECIMAL(12,2)
-            ) WITH (FILLFACTOR = 50);
+                w_ytd DECIMAL(12,2),
+                w_padding VARCHAR(1000)
+            ) WITH (FILLFACTOR = 10);
             )SQL");
+            txn.exec("ALTER TABLE warehouse ALTER COLUMN w_padding SET STORAGE PLAIN");
         }
 
         // District
@@ -238,9 +243,11 @@ void TPCC::create_table(pqxx::connection *conn) {
                 d_tax DECIMAL(4,4),
                 d_ytd DECIMAL(12,2),
                 d_next_o_id INT,
+                d_padding VARCHAR(1000),
                 PRIMARY KEY (d_w_id, d_id)
-            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (d_w_id);" : "WITH (FILLFACTOR = 50);"));
-        create_warehouse_range_partitions("district");
+            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (d_w_id);" : "WITH (FILLFACTOR = 10);"));
+        txn.exec("ALTER TABLE district ALTER COLUMN d_padding SET STORAGE PLAIN");
+        create_warehouse_range_partitions("district", 10);
 
         // Customer
         txn.exec(table_keyword + R"SQL(customer (
@@ -391,6 +398,8 @@ void TPCC::pre_extend_tables() {
     const int partition_count = std::max(1, ComputeNodeCount);
     const int warehouses_per_partition =
         (num_warehouses_ + partition_count - 1) / partition_count;
+    const int active_partition_count =
+        std::max(1, (num_warehouses_ + warehouses_per_partition - 1) / warehouses_per_partition);
     auto for_each_warehouse_partition = [&](const std::function<void(int)>& fn) {
         for (int partition_id = 0; partition_id < partition_count; ++partition_id) {
             const int start_w_id = partition_id * warehouses_per_partition + 1;
@@ -449,7 +458,74 @@ void TPCC::pre_extend_tables() {
     for (auto& t : extend_threads) {
         t.join();
     }
-    std::cout << "TPC-C tables pre-extended." << std::endl;
+
+    // Reserve pages for all physical TPC-C primary-key indexes. Querying
+    // pg_class also covers database-generated leaf-index names.
+    if (PreExtendIndexPageSize > 0) {
+        try {
+            pqxx::connection conn_index_extend(DBConnection[0]);
+            if (!conn_index_extend.is_open()) {
+                std::cerr << "Failed to connect while pre-extending TPC-C indexes. conninfo"
+                          << DBConnection[0] << std::endl;
+            } else {
+                pqxx::nontransaction txn(conn_index_extend);
+                pqxx::result indexes = txn.exec(R"SQL(
+                    SELECT DISTINCT table_class.relname AS table_name,
+                           index_class.relname AS index_name,
+                           GREATEST(
+                               (sys_relation_size(index_class.oid) + 8191) / 8192,
+                               1
+                           ) AS current_pages
+                    FROM pg_class table_class
+                    JOIN pg_namespace table_namespace
+                      ON table_namespace.oid = table_class.relnamespace
+                    JOIN pg_index index_info
+                      ON index_info.indrelid = table_class.oid
+                    JOIN pg_class index_class
+                      ON index_class.oid = index_info.indexrelid
+                    WHERE table_namespace.nspname = 'public'
+                      AND index_info.indisprimary
+                      AND index_class.relkind = 'i'
+                      AND (
+                          table_class.relname IN (
+                              'warehouse', 'district', 'customer', 'new_order',
+                              'orders', 'order_line', 'item', 'stock'
+                          )
+                          OR table_class.relname ~
+                             '^(warehouse|district|customer|new_order|orders|order_line|stock)_p[0-9]+$'
+                      )
+                    ORDER BY index_class.relname
+                )SQL");
+
+                for (const auto& row : indexes) {
+                    const std::string table_name = row["table_name"].as<std::string>();
+                    const std::string index_name = row["index_name"].as<std::string>();
+                    const int64_t current_pages = row["current_pages"].as<int64_t>();
+                    const bool is_partition_index =
+                        TPCCPartitionWarehouses && table_name != "item";
+                    const int64_t reserve_pages = is_partition_index
+                        ? std::max<int64_t>(
+                              1,
+                              (PreExtendIndexPageSize + active_partition_count - 1) /
+                                  active_partition_count)
+                        : PreExtendIndexPageSize;
+                    txn.exec(
+                        "SELECT sys_extend(" + txn.quote(index_name) + ", " +
+                        std::to_string(reserve_pages) + ")"
+                    );
+                    std::cout << "Pre-extended " << index_name
+                              << " index by " << reserve_pages
+                              << " pages (current pages before extension: "
+                              << current_pages << ")." << std::endl;
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error while pre-extending TPC-C indexes: "
+                      << e.what() << std::endl;
+        }
+    }
+
+    std::cout << "TPC-C tables and indexes pre-extended." << std::endl;
     print_tpcc_table_sizes("after pre-extension");
 }
 
@@ -574,10 +650,11 @@ void TPCC::load_warehouse(pqxx::transaction_base &txn, int w_id) {
         random_string(10, 20) + "', '" +
         random_string(2, 2) + "', '" +
         random_nstring(9, 9) + "', " +
-        std::to_string(random_int(0, 2000) / 10000.0) + ", 300000.00";
+        std::to_string(random_int(0, 2000) / 10000.0) + ", 300000.00, '" +
+        random_string(1000, 1000) + "'";
     
     // Warehouse is single row per call, but let's keep consistent interface
-    std::vector<std::string> columns = {"w_id", "w_name", "w_street_1", "w_street_2", "w_city", "w_state", "w_zip", "w_tax", "w_ytd"};
+    std::vector<std::string> columns = {"w_id", "w_name", "w_street_1", "w_street_2", "w_city", "w_state", "w_zip", "w_tax", "w_ytd", "w_padding"};
     exec_batch_insert(txn, "warehouse", columns, {val});
 }
 
@@ -608,7 +685,7 @@ void TPCC::load_stock(pqxx::transaction_base &txn, int w_id) {
 
 void TPCC::load_district(pqxx::transaction_base &txn, int w_id) {
     std::vector<std::string> values_batch;
-    std::vector<std::string> columns = {"d_id", "d_w_id", "d_name", "d_street_1", "d_street_2", "d_city", "d_state", "d_zip", "d_tax", "d_ytd", "d_next_o_id"};
+    std::vector<std::string> columns = {"d_id", "d_w_id", "d_name", "d_street_1", "d_street_2", "d_city", "d_state", "d_zip", "d_tax", "d_ytd", "d_next_o_id", "d_padding"};
 
     for (int d = 1; d <= DIST_PER_WARE; ++d) {
         std::string val = 
@@ -620,7 +697,9 @@ void TPCC::load_district(pqxx::transaction_base &txn, int w_id) {
             random_string(10, 20) + "', '" +
             random_string(2, 2) + "', '" +
             random_nstring(9, 9) + "', " +
-            std::to_string(random_int(0, 2000) / 10000.0) + ", 30000.00, " + std::to_string(customers_per_dist() + 1);
+            std::to_string(random_int(0, 2000) / 10000.0) + ", 30000.00, " +
+            std::to_string(customers_per_dist() + 1) + ", '" +
+            random_string(1000, 1000) + "'";
         values_batch.push_back(val);
     }
     exec_batch_insert(txn, "district", columns, values_batch);
