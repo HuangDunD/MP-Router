@@ -83,8 +83,8 @@ public:
 
     // Constants for TPC-C
     static const int DIST_PER_WARE = 10;
-    static const int CUST_PER_DIST = 300;
-    static const int ITEM_COUNT = 1000;
+    static const int CUST_PER_DIST = 3000;
+    static const int ITEM_COUNT = 10000;
     static const int STANDARD_CUST_PER_DIST = 3000;
     static const int STANDARD_ITEM_COUNT = 100000;
 

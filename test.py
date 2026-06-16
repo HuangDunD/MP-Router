@@ -258,6 +258,37 @@ END $$;
             )
             raise RuntimeError("Failed to drop public tables after config group.")
 
+def truncate_kwr_tables():
+    if not shutil.which("psql"):
+        raise RuntimeError("psql is required to truncate KWR tables.")
+
+    truncate_kwr_sql = """
+TRUNCATE TABLE perf.kwr_last_sql_stmt_all;
+TRUNCATE TABLE perf.kwr_stmt_list;
+"""
+
+    for conninfo in db_ready_probe_conninfos:
+        parsed = parse_conninfo(conninfo)
+        env = os.environ.copy()
+        if parsed.get("password"):
+            env["PGPASSWORD"] = parsed["password"]
+
+        logging.info(f"Truncating KWR tables on {mask_conninfo_password(conninfo)}")
+        res = subprocess.run(
+            build_local_sql_exec_command(conninfo, truncate_kwr_sql),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            timeout=db_drop_tables_timeout_seconds,
+        )
+        if res.returncode != 0:
+            logging.error(
+                f"Failed to truncate KWR tables on {mask_conninfo_password(conninfo)}: "
+                f"stdout={res.stdout.strip()}, stderr={res.stderr.strip()}"
+            )
+            raise RuntimeError("Failed to truncate KWR tables.")
+
 def build_db_probe_command(conninfo):
     parsed = parse_conninfo(conninfo)
     host = parsed.get("host", "127.0.0.1")
@@ -761,10 +792,18 @@ def build_axis_case_configs(workload_name, account_count=None, warehouse_count=N
         configs.append(case)
 
     for mlp_enabled in values_except_default(EnableMLP, DefaultEnableMLP):
-        case = dict(base)
-        case["mlp_enabled"] = mlp_enabled
-        case["scan_axis"] = "mlp"
-        configs.append(case)
+        for theta in ZipfianTheta:
+            case = dict(base)
+            case.update({
+                "access_pattern": 1,
+                "zipfian_theta": theta,
+                "zipfian_generator": ZipfianGenerator,
+                "hotspot_fraction": None,
+                "hotspot_prob": None,
+            })
+            case["mlp_enabled"] = mlp_enabled
+            case["scan_axis"] = "mlp_zipfian"
+            configs.append(case)
 
     return dedupe_case_configs(configs)
 
@@ -814,6 +853,7 @@ def build_case_plan():
     baseline_mlp = int(DefaultEnableMLP)
     mlp_run_modes = MLPRunModeType if MLPRunModeType else RunModeType
     key_page_capacity_run_modes = KeyPageCapacityRunModeType if KeyPageCapacityRunModeType else RunModeType
+    batch_size_run_modes = BatchSizeRunModeType if BatchSizeRunModeType else RunModeType
 
     def case_key(case_config, run_mode):
         return (
@@ -850,10 +890,12 @@ def build_case_plan():
                     case_group_id += 1
                     case_group_ids[group_key] = case_group_id
                 is_mlp_delta = (
-                    case_config.get("scan_axis") == "mlp"
+                    case_config.get("scan_axis") in ("mlp", "mlp_zipfian")
                     and int(case_config.get("mlp_enabled", baseline_mlp)) != baseline_mlp
                 )
-                if case_config.get("scan_axis") == "key_page_capacity":
+                if case_config.get("scan_axis") == "batch_size":
+                    run_modes = batch_size_run_modes
+                elif case_config.get("scan_axis") == "key_page_capacity":
                     run_modes = key_page_capacity_run_modes
                 elif is_mlp_delta:
                     run_modes = mlp_run_modes
@@ -1179,7 +1221,7 @@ TPCCRuleRunModeType = [31]
 # ! TPCCRuleRunModeType: 31 TPC-C warehouse rule router, auto-added for TPC-C workloads
 # RunModeType = [13]
 # RunModeType = [1]
-Workloads = ["smallbank", "tpcc"] # one script run can cover multiple workloads
+Workloads = ["smallbank"] # one script run can cover multiple workloads
 WorkloadAccessPatterns = {
     "smallbank": [1, 2],
     "tpcc": [0],
@@ -1189,7 +1231,7 @@ AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
 # AccessPattern = [1]
 # ZipfianTheta = [0.4]
 # ZipfianTheta = [0.8]
-ZipfianTheta = [1.1, 1.3, 0.1, 0.3, 0.7, 0.9] 
+ZipfianTheta = [0.8, 0.95, 0.6, 1.1, 1.3, 0.1] 
 # ZipfianTheta = [0.8, 0.9, 0.95, 0.7, 0.6]
 ZipfianGenerator = "finite" # options: finite, legacy
 HotspotFraction = [1, 0.1, 0.01, 0.001]
@@ -1210,17 +1252,20 @@ UseDataCache = False # True: restore workload data cache before each case; False
 workload = Workloads[0]
 sys_extend_size = 300000
 sys_index_extend_size = 30000
+# AffinityTxnRatio = [0.8]
 AffinityTxnRatio = [0.8, 1, 0.6, 0.4, 0.2, 0]
 # AffinityTxnRatio = [1, 0.8, 0.6, 0.4, 0.2, 0]
-BatchSize = [10000] # default 10000
+BatchSize = [10000, 5000, 1000, 500, 100, 10, 50000, 100000] # default 10000
 # BatchSize = [1000]
 NumBucket = [1]
 TPCCPartitionWarehouse = [0, 1] # 0:disable, 1:partition warehouse by w_id range
 EnableLongTxn = 0 # 0:disable, 1:enable
 LongTxnSize = [4, 8, 12, 14, 16, 20] # only valid when EnableLongTxn=1
+# KeyPageMapCapacity = [1.1]
 KeyPageMapCapacity = [1.1, 1.0, 0.8, 0.6, 0.4, 0.2] # passed to --key-page-ratio
-EnableMLP = [0] # 0:disable, 1:enable; changing this requires rebuilding with MLP_PREDICTION
+EnableMLP = [0, 1] # 0:disable, 1:enable; changing this requires rebuilding with MLP_PREDICTION
 MLPRunModeType = [11] # MLP-delta cases run only these modes; baseline MLP=0 reuses normal sweep results
+BatchSizeRunModeType = [11] # BatchSize axis runs only these modes
 KeyPageCapacityRunModeType = [2, 23, 11, 28] # KeyPageMapCapacity axis runs only these modes
 RebuildForMLP = True
 RestoreConfigAfterRun = True
@@ -1229,7 +1274,7 @@ DefaultAccessPattern = {
     "smallbank": 1,
     "tpcc": 0,
 }
-DefaultZipfianTheta = 0.7
+DefaultZipfianTheta = 0.8
 DefaultHotspotFraction = 0.01
 DefaultHotspotProb = 0.8
 DefaultWorkerThreads = WorkerThreadCount[0]
@@ -1334,6 +1379,7 @@ if __name__ == "__main__":
         logging.info("Dropping public tables once before starting this script run.")
         wait_for_db_start()
         drop_public_tables()
+        truncate_kwr_tables()
         sync_remote_servers_after_case()
     
     # 标记是否已经准备好备份数据
@@ -1467,6 +1513,7 @@ if __name__ == "__main__":
             if not UseDataCache:
                 wait_for_db_start()
                 drop_public_tables()
+                truncate_kwr_tables()
                 sync_remote_servers_after_case()
                 restart_database_resource()
             time.sleep(config_group_interval_seconds)

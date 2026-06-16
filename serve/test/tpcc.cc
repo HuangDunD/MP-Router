@@ -225,7 +225,7 @@ void TPCC::create_table(pqxx::connection *conn) {
                 w_tax DECIMAL(4,4),
                 w_ytd DECIMAL(12,2),
                 w_padding VARCHAR(1000)
-            ) WITH (FILLFACTOR = 10);
+            ) WITH (FILLFACTOR = 20);
             )SQL");
             txn.exec("ALTER TABLE warehouse ALTER COLUMN w_padding SET STORAGE PLAIN");
         }
@@ -245,7 +245,7 @@ void TPCC::create_table(pqxx::connection *conn) {
                 d_next_o_id INT,
                 d_padding VARCHAR(1000),
                 PRIMARY KEY (d_w_id, d_id)
-            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (d_w_id);" : "WITH (FILLFACTOR = 10);"));
+            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (d_w_id);" : "WITH (FILLFACTOR = 20);"));
         txn.exec("ALTER TABLE district ALTER COLUMN d_padding SET STORAGE PLAIN");
         create_warehouse_range_partitions("district", 10);
 
@@ -423,15 +423,15 @@ void TPCC::pre_extend_tables() {
             extend_sizes.push_back(total_pages);
         }
     };
-    add_extend_target("warehouse", 30000);
-    add_extend_target("district", 30000);
+    add_extend_target("warehouse", 100000);
+    add_extend_target("district", 100000);
     add_extend_target("customer", 500000);
     add_extend_target("history", 100000);
     add_extend_target("new_order", 100000);
-    add_extend_target("orders", 50000);
+    add_extend_target("orders", 100000);
     add_extend_target("order_line", 500000);
     add_extend_target("item", 5000);
-    add_extend_target("stock", 1000000);
+    add_extend_target("stock", 100000);
 
     std::vector<std::thread> extend_threads;
     for (size_t i = 0; i < extend_tables.size(); ++i) {
@@ -473,9 +473,9 @@ void TPCC::pre_extend_tables() {
                     SELECT DISTINCT table_class.relname AS table_name,
                            index_class.relname AS index_name,
                            GREATEST(
-                               (sys_relation_size(index_class.oid) + 8191) / 8192,
+                               CEIL(sys_relation_size(index_class.oid)::numeric / 8192),
                                1
-                           ) AS current_pages
+                           )::bigint AS current_pages
                     FROM pg_class table_class
                     JOIN pg_namespace table_namespace
                       ON table_namespace.oid = table_class.relnamespace
