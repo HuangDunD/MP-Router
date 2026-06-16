@@ -3041,6 +3041,7 @@ int main(int argc, char *argv[]) {
     else if (Workload_Type == 3) std::cout << "TPC-C Standard";
     else std::cout << "Unknown";
     std::cout << std::endl;
+    std::cout << "Compiled MLP_PREDICTION: " << MLP_PREDICTION << std::endl;
     std::cout << "System mode: " << SYSTEM_MODE << " ----> ";
     switch (SYSTEM_MODE)
     {

@@ -40,10 +40,14 @@ def kill_server():
 def build():
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8") as outfile:
-        subprocess.run("rm -rf ./build", stdout=outfile, stderr=outfile, shell=True)
-        subprocess.run("mkdir ./build", stdout=outfile, stderr=outfile, shell=True)
-        subprocess.run("cd ./build && cmake ..", shell=True)
-        subprocess.run("cd ./build && make -j8", shell=True)
+        logging.info("Rebuilding MP-Router binary.")
+        build_dir = os.path.join(workspace, "build")
+        shutil.rmtree(build_dir, ignore_errors=True)
+        os.makedirs(build_dir, exist_ok=True)
+        subprocess.run(["cmake", ".."], cwd=build_dir, stdout=outfile,
+                       stderr=subprocess.STDOUT, check=True)
+        subprocess.run(["make", "-j8"], cwd=build_dir, stdout=outfile,
+                       stderr=subprocess.STDOUT, check=True)
     time.sleep(1)
 
 original_config_h_text = None
@@ -89,6 +93,7 @@ def ensure_build_for_mlp(mlp_enabled):
     set_mlp_prediction(mlp_enabled)
     build()
     current_built_mlp_mode = int(mlp_enabled)
+    logging.info(f"Built MP-Router with MLP_PREDICTION={current_built_mlp_mode}")
 
 def run_cmd(cmd, check=True):
     logging.info(f"Executing: {cmd}")

@@ -212,7 +212,7 @@ void TPCC::create_table(pqxx::connection *conn) {
             ) PARTITION BY RANGE (w_id);
             )SQL");
             txn.exec("ALTER TABLE warehouse ALTER COLUMN w_padding SET STORAGE PLAIN");
-            create_warehouse_range_partitions("warehouse", 10);
+            create_warehouse_range_partitions("warehouse", 20);
         } else {
             txn.exec(table_keyword + R"SQL(warehouse (
                 w_id INT PRIMARY KEY,
@@ -247,7 +247,7 @@ void TPCC::create_table(pqxx::connection *conn) {
                 PRIMARY KEY (d_w_id, d_id)
             ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (d_w_id);" : "WITH (FILLFACTOR = 20);"));
         txn.exec("ALTER TABLE district ALTER COLUMN d_padding SET STORAGE PLAIN");
-        create_warehouse_range_partitions("district", 10);
+        create_warehouse_range_partitions("district", 20);
 
         // Customer
         txn.exec(table_keyword + R"SQL(customer (

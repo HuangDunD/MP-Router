@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Plot System Throughput barchart.
+Combined Zipfian and Hotspot plots side-by-side.
+"""
+
+import matplotlib.pyplot as plt
+import os
+import shutil
+from matplotlib import rcParams
+
+# Configuration (same as Q1.py)
+# Check for LaTeX availability before enabling
+if shutil.which('latex'):
+    try:
+        rcParams.update({
+            "text.usetex": True,
+            "font.family": "serif",
+            "font.serif": ["Times", "Computer Modern Roman"],
+            "axes.unicode_minus": False,
+            "text.latex.preamble": r"\usepackage{amsmath}",
+        })
+    except Exception:
+        pass
+else:
+    rcParams["text.usetex"] = False
+
+# Global setting for hatch (texture) line width
+rcParams['hatch.linewidth'] = 0.3 
+
+# Configure fonts for academic papers (Times New Roman is standard)
+rcParams['font.family'] = 'serif'
+# Use Times New Roman as the primary serif font
+rcParams['font.serif'] = ['Arial']
+rcParams['font.size'] = 12
+rcParams['axes.labelsize'] = 14
+rcParams['xtick.labelsize'] = 12
+rcParams['ytick.labelsize'] = 12
+rcParams['legend.fontsize'] = 12
+
+def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
+    labels = [item[0] for item in data]
+    # Transpose data to get a list of values for each system
+    system_values = []
+    for i in range(len(systems)):
+        system_values.append([item[1][i] / 1000.0 for item in data])
+        
+    n_vars = len(data)
+    x_base = range(n_vars)
+    n_sys = len(systems)
+
+    # Plot bars
+    for i in range(n_sys):
+        offset = (i - (n_sys - 1) / 2) * bar_width
+        ax.bar(
+            [x + offset for x in x_base], 
+            system_values[i], 
+            width=bar_width, 
+            label=systems[i],
+            color=colors[i],
+            hatch=hatches[i],
+            edgecolor="#404040AD",
+            linewidth=0.8,
+            zorder=3
+        )
+
+    ax.set_xticks(x_base)
+    # Rotation 0 is better for short labels like numbers or percentages
+    ax.set_xticklabels(labels, rotation=0, ha='center', fontsize=14)
+    
+    # Reduce margins on left and right
+    ax.set_xlim(-0.55, len(labels) - 1 + 0.55)
+
+    ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
+    
+    # Calculate min value to set start of Y-axis
+    all_values = [val for sublist in system_values for val in sublist]
+    min_val = min(all_values)
+    # Start y-axis at ~60% of min value to emphasize top differences, but keep bar visible
+    bottom_val = int(5)
+    ax.set_ylim(bottom=bottom_val)
+    
+    # Set tick spacing to 5
+    from matplotlib.ticker import MultipleLocator
+    ax.yaxis.set_major_locator(MultipleLocator(5))
+    
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=16)
+
+def main():
+    # Output file
+    outdir = "figs"
+    outfile = "system_throughput_combined.pdf"
+    os.makedirs(outdir, exist_ok=True)
+    
+    # Systems
+    systems = [
+        # "Random", 
+        # "MinWaiting", 
+        # "Page Hash",
+        # "Page Affinity", 
+        "RR", 
+        "MWR",
+        "PHR",
+        "PAR",
+        "CPR", 
+        "MP-Router"
+    ]
+    
+    # Colors
+    colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#e47474"] 
+    # Hatches
+    hatches = ['////', '\\\\\\\\', 'xxxx', 'oo', 'OOOO', '....']
+
+    zipfian_data = [
+        ("0.6",   [15153.36, 15677.88, 19228.33, 18096.38, 19244.13, 27000.52]),
+        ("0.7",   [14196.76, 14418.65, 18075.71, 15786.33, 18260.44, 24866.46]),
+        ("0.8",   [12857.31, 12789.5,  15467.65, 13634.97, 16054.47, 21108.93]),
+        ("0.9",   [10486.94, 10454.78, 11695.23, 10949.11, 12293.98, 17183.29]),
+        ("0.95",  [8287.47,  8222.43,  7373.93,  8110.59,  6982.68, 14183.9]),
+    ]
+    
+    hotspot_data = [
+        ("100%",   [14411.01, 16357.22, 20074.59, 19134.37, 20184.12, 29414.35]),
+        ("10%",    [14743.19, 14150.31, 18504.18, 17196.27, 19506.29, 26156.22]),
+        ("1%",     [10308.37, 10461.43, 12545.3,  10876.99, 12947.69, 17248.04]),
+        ("0.1%",   [8510.3,   7899.38,  9208.47,  8608.64,  9283.45, 12055.23])
+    ]
+
+    # Figure setup: 1 row, 2 columns, separate Y axis to allow individual zooming
+    # Reduced height as requested
+    fig_w, fig_h = 8.5, 2.5 
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h), sharey=False)
+    
+    # Bar configuration
+    total_width = 0.8       
+    n_sys = len(systems)    
+    bar_width = total_width / n_sys
+
+    # Plot Subgroups
+    # Zipfian
+    plot_subgroup(ax1, zipfian_data, systems, colors, hatches, bar_width, xlabel=r"Skewness ($\theta$)")
+    # Moved title lower and adjusted fontsize
+    ax1.text(0.5, -0.35, "(a) Zipfian distribution", transform=ax1.transAxes, 
+             ha='center', va='top', fontsize=14, weight='bold')
+    
+    # Hotspot
+    plot_subgroup(ax2, hotspot_data, systems, colors, hatches, bar_width, xlabel="Hotspot Fraction")
+    ax2.text(0.5, -0.35, "(b) Uniform-hotspot distribution", transform=ax2.transAxes, 
+             ha='center', va='top', fontsize=14, weight='bold')
+    
+    # Set Y-label for both plots as they have different scales
+    ax1.set_ylabel("Throughput (KTPS)", fontsize=14)
+    ax2.set_ylabel("Throughput (KTPS)", fontsize=14)
+
+    # Common Legend
+    # We take handles and labels from one of the axes
+    handles, labels = ax1.get_legend_handles_labels()
+    fig.legend(
+        handles, 
+        labels,
+        loc='lower center', 
+        bbox_to_anchor=(0.5, 0.86), # Adjusted position
+        prop={'weight': 'bold', 'size': 12},  # Reduced size to fit
+        handlelength=1.5, # Reduced handle length
+        handleheight=1.2,
+        frameon=False,
+        ncol=6,
+        columnspacing=1.5
+    )
+    
+    # Increase bottom margin to make room for the text added below axes
+    plt.subplots_adjust(bottom=0.15, top=0.85, wspace=0.25)
+    # Use rect parameter to reserve space for legend at the top
+    # plt.tight_layout(rect=[0, 0.1, 1, 0.9]) # tight_layout handles texts badly sometimes
+
+    
+    # Save
+    out_path = os.path.join(outdir, outfile)
+    plt.savefig(out_path, dpi=600, bbox_inches="tight", pad_inches=0.05)
+    print(f"Saved figure: {out_path}")
+    plt.close(fig)
+
+if __name__ == "__main__":
+    main()
