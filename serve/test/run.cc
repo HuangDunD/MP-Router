@@ -364,7 +364,10 @@ void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* yc
                     pqxx::result res = txn_select.exec("SELECT ctid, w_id FROM warehouse WHERE w_id = " + std::to_string(w_id));
                     if (!res.empty()) {
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(res[0]["ctid"].as<std::string>());
-                        smart_router->initial_key_page((table_id_t)TPCCTableType::kWarehouse, tpcc->make_warehouse_key(w_id), page_id);
+                        const itemkey_t key = tpcc->make_warehouse_key(w_id);
+                        const table_id_t router_table_id =
+                            tpcc->get_router_table_id((table_id_t)TPCCTableType::kWarehouse, key);
+                        smart_router->initial_key_page(router_table_id, key, page_id);
                     }
 
                     // District (10 per warehouse)
@@ -372,7 +375,10 @@ void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* yc
                         res = txn_select.exec("SELECT ctid, d_w_id, d_id FROM district WHERE d_w_id = " + std::to_string(w_id) + " AND d_id = " + std::to_string(d));
                         if (!res.empty()) {
                             auto [page_id, tuple_index] = parse_page_id_from_ctid(res[0]["ctid"].as<std::string>());
-                            smart_router->initial_key_page((table_id_t)TPCCTableType::kDistrict, tpcc->make_district_key(w_id, d), page_id);
+                            const itemkey_t key = tpcc->make_district_key(w_id, d);
+                            const table_id_t router_table_id =
+                                tpcc->get_router_table_id((table_id_t)TPCCTableType::kDistrict, key);
+                            smart_router->initial_key_page(router_table_id, key, page_id);
                         }
                     }
                     
@@ -382,7 +388,10 @@ void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* yc
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(row["ctid"].as<std::string>());
                         int d_id = row["c_d_id"].as<int>();
                         int c_id = row["c_id"].as<int>();
-                        smart_router->initial_key_page((table_id_t)TPCCTableType::kCustomer, tpcc->make_customer_key(w_id, d_id, c_id), page_id);
+                        const itemkey_t key = tpcc->make_customer_key(w_id, d_id, c_id);
+                        const table_id_t router_table_id =
+                            tpcc->get_router_table_id((table_id_t)TPCCTableType::kCustomer, key);
+                        smart_router->initial_key_page(router_table_id, key, page_id);
                     }
 
                     // Stock rows for this warehouse.
@@ -390,7 +399,10 @@ void init_key_page_map(SmartRouter* smart_router, SmallBank* smallbank, YCSB* yc
                     for (auto row : res) {
                         auto [page_id, tuple_index] = parse_page_id_from_ctid(row["ctid"].as<std::string>());
                         int i_id = row["s_i_id"].as<int>();
-                        smart_router->initial_key_page((table_id_t)TPCCTableType::kStock, tpcc->make_stock_key(w_id, i_id), page_id);
+                        const itemkey_t key = tpcc->make_stock_key(w_id, i_id);
+                        const table_id_t router_table_id =
+                            tpcc->get_router_table_id((table_id_t)TPCCTableType::kStock, key);
+                        smart_router->initial_key_page(router_table_id, key, page_id);
                     }
                 } catch (const std::exception &e) {
                     std::cerr << "Error while selecting TPC-C data: " << e.what() << std::endl;
@@ -1598,7 +1610,7 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
 
             std::vector<itemkey_t> tpcc_keys = txn_entry->tpcc_keys;
             assert(tpcc_keys.size() > 0);
-            std::vector<table_id_t> tables = tpcc->get_table_ids_by_txn_type(txn_type, tpcc_keys.size());
+            std::vector<table_id_t> tables = tpcc->get_router_table_ids_by_txn_type(txn_type, tpcc_keys);
             assert(tables.size() == tpcc_keys.size());
             std::vector<bool> rw = tpcc->get_rw_flags_by_txn_type(txn_type, tpcc_keys.size());
             std::vector<page_id_t> ctid_ret_page_ids; // Dummy for now as we didn't get ctids from SP

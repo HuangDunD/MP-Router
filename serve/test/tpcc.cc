@@ -4,6 +4,7 @@
 #include <chrono>
 #include <functional>
 #include <set>
+#include <stdexcept>
 
 // Initialize static members
 const std::vector<table_id_t> TPCC::TABLE_IDS_ARR[5] = {
@@ -100,7 +101,7 @@ int TPCC::item_count() const {
     return standard_mode_ ? STANDARD_ITEM_COUNT : ITEM_COUNT;
 }
 
-std::vector<table_id_t> TPCC::get_table_ids_by_txn_type(int txn_type, int key_size) {
+std::vector<table_id_t> TPCC::get_table_ids_by_txn_type(int txn_type, int key_size) const {
     if (txn_type == (int)TPCCTxType::kNewOrder) {
         std::vector<table_id_t> new_order_table_ids;
         new_order_table_ids = TABLE_IDS_ARR[txn_type];
@@ -111,6 +112,77 @@ std::vector<table_id_t> TPCC::get_table_ids_by_txn_type(int txn_type, int key_si
         return new_order_table_ids;
     }
     return TABLE_IDS_ARR[txn_type];
+}
+
+int TPCC::router_table_group(table_id_t base_table_id) {
+    switch (static_cast<TPCCTableType>(base_table_id)) {
+        case TPCCTableType::kWarehouse: return 0;
+        case TPCCTableType::kDistrict: return 1;
+        case TPCCTableType::kCustomer: return 2;
+        case TPCCTableType::kStock: return 3;
+        default: return -1;
+    }
+}
+
+table_id_t TPCC::get_base_table_id_for_router_table(table_id_t router_table_id) {
+    if (!TPCCPartitionWarehouses) return router_table_id;
+    const int group = router_table_id / ROUTER_PARTITION_SLOT_COUNT;
+    switch (group) {
+        case 0: return static_cast<table_id_t>(TPCCTableType::kWarehouse);
+        case 1: return static_cast<table_id_t>(TPCCTableType::kDistrict);
+        case 2: return static_cast<table_id_t>(TPCCTableType::kCustomer);
+        case 3: return static_cast<table_id_t>(TPCCTableType::kStock);
+        default: return router_table_id;
+    }
+}
+
+int TPCC::warehouse_id_from_key(table_id_t base_table_id, itemkey_t key) const {
+    switch (static_cast<TPCCTableType>(base_table_id)) {
+        case TPCCTableType::kWarehouse:
+            return static_cast<int>(key);
+        case TPCCTableType::kDistrict:
+            return static_cast<int>((key - 1) / DIST_PER_WARE) + 1;
+        case TPCCTableType::kCustomer:
+            return static_cast<int>((key - 1) / (DIST_PER_WARE * STANDARD_CUST_PER_DIST)) + 1;
+        case TPCCTableType::kStock:
+            return static_cast<int>((key - 1) / STANDARD_ITEM_COUNT) + 1;
+        default:
+            return 1;
+    }
+}
+
+int TPCC::warehouse_partition_id(int w_id) const {
+    const int partition_count = std::max(1, ComputeNodeCount);
+    if (partition_count > ROUTER_PARTITION_SLOT_COUNT) {
+        throw std::runtime_error(
+            "TPC-C partition-aware router table id currently supports up to " +
+            std::to_string(ROUTER_PARTITION_SLOT_COUNT) + " warehouse partitions");
+    }
+    const int warehouses_per_partition =
+        std::max(1, (num_warehouses_ + partition_count - 1) / partition_count);
+    int partition_id = (w_id - 1) / warehouses_per_partition;
+    if (partition_id < 0) partition_id = 0;
+    if (partition_id >= partition_count) partition_id = partition_count - 1;
+    return partition_id;
+}
+
+table_id_t TPCC::get_router_table_id(table_id_t base_table_id, itemkey_t key) const {
+    if (!TPCCPartitionWarehouses) return base_table_id;
+    const int group = router_table_group(base_table_id);
+    if (group < 0) return base_table_id;
+    const int w_id = warehouse_id_from_key(base_table_id, key);
+    const int partition_id = warehouse_partition_id(w_id);
+    return static_cast<table_id_t>(group * ROUTER_PARTITION_SLOT_COUNT + partition_id);
+}
+
+std::vector<table_id_t> TPCC::get_router_table_ids_by_txn_type(int txn_type, const std::vector<itemkey_t>& keys) const {
+    std::vector<table_id_t> table_ids = get_table_ids_by_txn_type(txn_type, keys.size());
+    assert(table_ids.size() == keys.size());
+    if (!TPCCPartitionWarehouses) return table_ids;
+    for (size_t i = 0; i < table_ids.size(); ++i) {
+        table_ids[i] = get_router_table_id(table_ids[i], keys[i]);
+    }
+    return table_ids;
 }
 
 std::vector<bool> TPCC::get_rw_flags_by_txn_type(int txn_type, int key_size) {

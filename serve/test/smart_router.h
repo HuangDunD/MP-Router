@@ -707,7 +707,7 @@ public:
                 accounts_keys = txn->ycsb_keys;
             } else if (Workload_Type == 2) {
                 accounts_keys = txn->tpcc_keys;
-                table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, accounts_keys.size());
+                table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, accounts_keys);
             }
             else assert(false); // 不可能出现的情况
             assert(table_ids.size() == accounts_keys.size());
@@ -876,7 +876,7 @@ public:
     //                 rw = ycsb_->get_rw_flags();
     //             } else if (Workload_Type == 2) {
     //                 keys = txn_entry->tpcc_keys;
-    //                 table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, keys.size());
+    //                 table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, keys);
     //                 rw = tpcc_->get_rw_flags_by_txn_type(txn_type, keys.size());
     //             }
     //             else assert(false); // 不可能出现的情况
@@ -1213,7 +1213,7 @@ public:
                             rw = ycsb_->get_rw_flags();
                         } else if (Workload_Type == 2 || Workload_Type == 3) {
                             keys = txn_entry->tpcc_keys;
-                            table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, keys.size());
+                            table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, keys);
                             rw = tpcc_->get_rw_flags_by_txn_type(txn_type, keys.size());
                         }
                         // assert(table_ids.size() == keys.size());
@@ -1248,7 +1248,7 @@ public:
                                 } else if (Workload_Type == 1) {
                                     choose_node = key / (ycsb_->get_record_count() / ComputeNodeCount); // Range partitioning
                                 } else if (Workload_Type == 2) {
-                                    table_id_t tid = table_ids[i];
+                                    table_id_t tid = TPCC::get_base_table_id_for_router_table(table_ids[i]);
                                     int total = tpcc_->get_total_keys(static_cast<TPCCTableType>(tid));
                                     if (total == 0) total = 1; 
                                     int range = total / ComputeNodeCount;

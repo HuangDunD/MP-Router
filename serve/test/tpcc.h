@@ -52,7 +52,10 @@ public:
     void set_hotspot_ratio(double ratio) { hotspot_ratio = ratio; }
     
     // Helper to get table IDs involved in a transaction type
-    std::vector<table_id_t> get_table_ids_by_txn_type(int txn_type, int key_size);
+    std::vector<table_id_t> get_table_ids_by_txn_type(int txn_type, int key_size) const;
+    std::vector<table_id_t> get_router_table_ids_by_txn_type(int txn_type, const std::vector<itemkey_t>& keys) const;
+    table_id_t get_router_table_id(table_id_t base_table_id, itemkey_t key) const;
+    static table_id_t get_base_table_id_for_router_table(table_id_t router_table_id);
     
     // Helper to get read/write flags for keys
     std::vector<bool> get_rw_flags_by_txn_type(int txn_type, int key_size);
@@ -108,6 +111,8 @@ public:
     int get_total_keys(TPCCTableType table_type) const;
 
 private:
+    static constexpr int ROUTER_PARTITION_SLOT_COUNT = 4;
+
     int num_warehouses_;
     int access_pattern; // 0: uniform, 1: zipfian, 2: hotspot
     double hotspot_ratio; // For hotspot access pattern, the ratio of accesses to hotspot warehouses
@@ -131,6 +136,9 @@ private:
     static std::string random_nstring(int min_len, int max_len);
     static int random_int(int min, int max);
     static int nurand(int A, int x, int y);
+    int warehouse_id_from_key(table_id_t base_table_id, itemkey_t key) const;
+    int warehouse_partition_id(int w_id) const;
+    static int router_table_group(table_id_t base_table_id);
     
     // Static data for routing/locking info
     static const std::vector<table_id_t> TABLE_IDS_ARR[5];

@@ -738,7 +738,7 @@ std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_
             accounts_keys = txn->ycsb_keys;
         } else if (Workload_Type == 2) {
             accounts_keys = txn->tpcc_keys;
-            table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, accounts_keys.size());
+            table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, accounts_keys);
         }
         else assert(false); // 不可能出现的情况
         assert(table_ids.size() == accounts_keys.size());
@@ -1163,7 +1163,7 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                                 ycsb_->get_rw_flags() : txn->ycsb_rw_flags;
                         } else if (Workload_Type == 2) {
                             keys = txn->tpcc_keys;
-                            table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, keys.size());
+                            table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, keys);
                             rw = tpcc_->get_rw_flags_by_txn_type(txn_type, keys.size());
                         } else {
                             assert(false);
@@ -1221,7 +1221,8 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
     std::array<uint64_t, 4> batch_tpcc_conflict_pages_by_table = {0, 0, 0, 0};
     std::array<std::unordered_set<tx_id_t>, 4> batch_tpcc_conflict_txns_by_table;
     auto tpcc_conflict_breakdown_index = [](table_id_t table_id) -> int {
-        switch (static_cast<TPCCTableType>(table_id)) {
+        const table_id_t base_table_id = TPCC::get_base_table_id_for_router_table(table_id);
+        switch (static_cast<TPCCTableType>(base_table_id)) {
             case TPCCTableType::kWarehouse:
                 return 0;
             case TPCCTableType::kDistrict:
@@ -1505,7 +1506,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                     rw = ycsb_->get_rw_flags();
                 } else if (Workload_Type == 2) {
                     accounts_keys = txn->tpcc_keys;
-                    table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, accounts_keys.size());
+                    table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, accounts_keys);
                     rw = tpcc_->get_rw_flags_by_txn_type(txn_type, accounts_keys.size());
                 }
                 else assert(false); // 不可能出现的情况
@@ -2566,7 +2567,7 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
             rw = ycsb_->get_rw_flags();
         } else if (Workload_Type == 2) {
             accounts_keys = txn->tpcc_keys;
-            table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, accounts_keys.size());
+            table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, accounts_keys);
             rw = tpcc_->get_rw_flags_by_txn_type(txn_type, accounts_keys.size());
         } else {
             assert(false);
@@ -2934,7 +2935,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                     rw = ycsb_->get_rw_flags();
                 } else if (Workload_Type == 2) {
                     accounts_keys = txn->tpcc_keys;
-                    table_ids = tpcc_->get_table_ids_by_txn_type(txn_type, accounts_keys.size());
+                    table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, accounts_keys);
                     rw = tpcc_->get_rw_flags_by_txn_type(txn_type, accounts_keys.size());
                 }
                 else assert(false); // 不可能出现的情况
