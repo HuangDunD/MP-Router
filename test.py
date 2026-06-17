@@ -728,6 +728,9 @@ def dedupe_case_configs(configs):
 def values_except_default(values, default_value):
     return [value for value in values if value != default_value]
 
+def contains_int_value(values, target_value):
+    return any(int(value) == int(target_value) for value in values)
+
 def access_config_key(config):
     return (
         config["access_pattern"],
@@ -739,19 +742,21 @@ def access_config_key(config):
 
 def build_axis_case_configs(workload_name, account_count=None, warehouse_count=None):
     base = base_case_config(workload_name, account_count, warehouse_count)
-    configs = [base]
+    include_baseline_cases = contains_int_value(EnableMLP, DefaultEnableMLP)
+    configs = [base] if include_baseline_cases else []
 
-    default_access_key = access_config_key(default_access_config(workload_name))
-    for access_config in access_configs_for_workload(workload_name):
-        if access_config_key(access_config) == default_access_key:
-            continue
-        case = dict(base)
-        case.update(access_config)
-        case["scan_axis"] = "access"
-        configs.append(case)
+    if include_baseline_cases:
+        default_access_key = access_config_key(default_access_config(workload_name))
+        for access_config in access_configs_for_workload(workload_name):
+            if access_config_key(access_config) == default_access_key:
+                continue
+            case = dict(base)
+            case.update(access_config)
+            case["scan_axis"] = "access"
+            configs.append(case)
 
     if workload_name != "smallbank":
-        if workload_name in ("tpcc", "tpcc-standard"):
+        if include_baseline_cases and workload_name in ("tpcc", "tpcc-standard"):
             for partition_warehouses in values_except_default(TPCCPartitionWarehouse, DefaultTPCCPartitionWarehouses):
                 case = dict(base)
                 case["tpcc_partition_warehouses"] = partition_warehouses
@@ -759,42 +764,43 @@ def build_axis_case_configs(workload_name, account_count=None, warehouse_count=N
                 configs.append(case)
         return dedupe_case_configs(configs)
 
-    for worker_threads in values_except_default(WorkerThreadCount, DefaultWorkerThreads):
-        case = dict(base)
-        case["worker_threads"] = worker_threads
-        case["scan_axis"] = "worker_threads"
-        configs.append(case)
-
-    for affinity_ratio in values_except_default(AffinityTxnRatio, DefaultAffinityTxnRatio):
-        case = dict(base)
-        case["affinity_txn_ratio"] = affinity_ratio
-        case["scan_axis"] = "affinity_txn_ratio"
-        configs.append(case)
-
-    for batch_size in values_except_default(BatchSize, DefaultBatchSize):
-        case = dict(base)
-        case["batch_size"] = batch_size
-        case["scan_axis"] = "batch_size"
-        configs.append(case)
-
-    for num_bucket in values_except_default(NumBucket, DefaultNumBucket):
-        case = dict(base)
-        case["num_bucket"] = num_bucket
-        case["scan_axis"] = "num_bucket"
-        configs.append(case)
-
-    if EnableLongTxn:
-        for long_txn_length in values_except_default(LongTxnSize, DefaultLongTxnLength):
+    if include_baseline_cases:
+        for worker_threads in values_except_default(WorkerThreadCount, DefaultWorkerThreads):
             case = dict(base)
-            case["long_txn_length"] = long_txn_length
-            case["scan_axis"] = "long_txn_length"
+            case["worker_threads"] = worker_threads
+            case["scan_axis"] = "worker_threads"
             configs.append(case)
 
-    for key_page_ratio in values_except_default(KeyPageMapCapacity, DefaultKeyPageMapCapacity):
-        case = dict(base)
-        case["key_page_ratio"] = key_page_ratio
-        case["scan_axis"] = "key_page_capacity"
-        configs.append(case)
+        for affinity_ratio in values_except_default(AffinityTxnRatio, DefaultAffinityTxnRatio):
+            case = dict(base)
+            case["affinity_txn_ratio"] = affinity_ratio
+            case["scan_axis"] = "affinity_txn_ratio"
+            configs.append(case)
+
+        for batch_size in values_except_default(BatchSize, DefaultBatchSize):
+            case = dict(base)
+            case["batch_size"] = batch_size
+            case["scan_axis"] = "batch_size"
+            configs.append(case)
+
+        for num_bucket in values_except_default(NumBucket, DefaultNumBucket):
+            case = dict(base)
+            case["num_bucket"] = num_bucket
+            case["scan_axis"] = "num_bucket"
+            configs.append(case)
+
+        if EnableLongTxn:
+            for long_txn_length in values_except_default(LongTxnSize, DefaultLongTxnLength):
+                case = dict(base)
+                case["long_txn_length"] = long_txn_length
+                case["scan_axis"] = "long_txn_length"
+                configs.append(case)
+
+        for key_page_ratio in values_except_default(KeyPageMapCapacity, DefaultKeyPageMapCapacity):
+            case = dict(base)
+            case["key_page_ratio"] = key_page_ratio
+            case["scan_axis"] = "key_page_capacity"
+            configs.append(case)
 
     for mlp_enabled in values_except_default(EnableMLP, DefaultEnableMLP):
         for theta in ZipfianTheta:
@@ -1187,7 +1193,7 @@ output = workspace + "/build/output.txt"
 result = workspace + "/build/serve/test/result.txt"
 log = workspace + "/build/serve/test/partitioning_log.log"
 Run_Path = workspace + "/build/serve/test/"
-kwr_report_ip = "47.111.27.99"
+kwr_report_ip = "47.111.5.98"
 kwr_ip_password = "Wljwlj123."
 kwr_report_path = "/home/kingbase/MP-Router/kwr/"
 database_data_path = "/sharedata/kingbase/data-hot/"
@@ -1205,7 +1211,7 @@ data_path_wait_timeout_seconds = 30
 test_interval_seconds = 5
 config_group_interval_seconds = 30
 db_ready_probe_conninfos = [
-    "host=172.16.0.105 port=44321 user=system password=123456 dbname=smallbank",
+    "host=172.16.0.117 port=44321 user=system password=123456 dbname=smallbank",
     "host=172.16.0.113 port=44321 user=system password=123456 dbname=smallbank",
     "host=172.16.0.114 port=44321 user=system password=123456 dbname=smallbank",
     "host=172.16.0.115 port=44321 user=system password=123456 dbname=smallbank",
@@ -1216,8 +1222,9 @@ db_ready_probe_conninfos = [
 # -------------------------------------------- # test parameters -------------------------------------------- #
 # dynamic
 # RunModeType = [0, 3, 8, 11, 4, 13]
-# RunModeType = [0, 3, 11, 13]
-RunModeType = [0, 2, 11, 13, 23, 25, 28]
+# RunModeType = [11]
+RunModeType = [28]
+# RunModeType = [0, 2, 11, 13, 23, 25, 28]
 TPCCRuleRunModeType = [31]
 # RunModeType = [11, 13, 2]
 # RunModeType = [28]
@@ -1226,9 +1233,9 @@ TPCCRuleRunModeType = [31]
 # ! TPCCRuleRunModeType: 31 TPC-C warehouse rule router, auto-added for TPC-C workloads
 # RunModeType = [13]
 # RunModeType = [1]
-Workloads = ["smallbank"] # one script run can cover multiple workloads
+Workloads = ["tpcc"] # one script run can cover multiple workloads
 WorkloadAccessPatterns = {
-    "smallbank": [1, 2],
+    "smallbank": [1],
     "tpcc": [0],
 }
 SweepMode = "axis" # axis: vary one dimension from defaults; full: Cartesian product
@@ -1236,17 +1243,17 @@ AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
 # AccessPattern = [1]
 # ZipfianTheta = [0.4]
 # ZipfianTheta = [0.8]
-ZipfianTheta = [0.8, 0.95, 0.6, 1.1, 1.3, 0.1] 
-# ZipfianTheta = [0.8, 0.9, 0.95, 0.7, 0.6]
+ZipfianTheta = [0.8, 0.95, 0.6, 1.1, 1.3, 0.1, 0.9] 
+# ZipfianTheta = [0.8]
 ZipfianGenerator = "finite" # options: finite, legacy
-HotspotFraction = [1, 0.1, 0.01, 0.001]
-HotspotProb = [0.8]
-# HotspotProb = [0.8, 0.9, 0.95]
+HotspotFraction = [0.25]
+# HotspotProb = [0.8]
+HotspotProb = [0.5, 0.8, 0.9]
 # account = 100W, 单个表大概14W个页面, 每个页面8KB, 大小约1.1GB
 AccountCount = [10000000]
 WarehouseCount = [200]
-# WorkerThreadCount = [16]
-WorkerThreadCount = [16, 2, 4, 8, 32, 64, 128]
+WorkerThreadCount = [16]
+# WorkerThreadCount = [16, 2, 4, 8, 32, 64, 128]
 try_count = 35000
 TimeRun = 1 # 0:disable, 1:enable
 WarmupSeconds = 15
@@ -1257,18 +1264,19 @@ UseDataCache = False # True: restore workload data cache before each case; False
 workload = Workloads[0]
 sys_extend_size = 300000
 sys_index_extend_size = 30000
-# AffinityTxnRatio = [0.8]
-AffinityTxnRatio = [0.8, 1, 0.6, 0.4, 0.2, 0]
+AffinityTxnRatio = [0.8]
+# AffinityTxnRatio = [0.8, 1, 0.6, 0.4, 0.2, 0]
 # AffinityTxnRatio = [1, 0.8, 0.6, 0.4, 0.2, 0]
-BatchSize = [10000, 5000, 1000, 500, 100, 10, 50000, 100000] # default 10000
-# BatchSize = [1000]
+# BatchSize = [10000, 5000, 1000, 500, 100, 10, 50000, 100000] # default 10000
+BatchSize = [10000]
 NumBucket = [1]
-TPCCPartitionWarehouse = [0, 1] # 0:disable, 1:partition warehouse by w_id range
+TPCCPartitionWarehouse = [0] # 0:disable, 1:partition warehouse by w_id range
 EnableLongTxn = 0 # 0:disable, 1:enable
 LongTxnSize = [4, 8, 12, 14, 16, 20] # only valid when EnableLongTxn=1
-# KeyPageMapCapacity = [1.1]
-KeyPageMapCapacity = [1.1, 1.0, 0.8, 0.6, 0.4, 0.2] # passed to --key-page-ratio
-EnableMLP = [0, 1] # 0:disable, 1:enable; changing this requires rebuilding with MLP_PREDICTION
+KeyPageMapCapacity = [1.1]
+# KeyPageMapCapacity = [1.1, 1.0, 0.8, 0.6, 0.4, 0.2] # passed to --key-page-ratio
+EnableMLP = [0]
+# EnableMLP = [0, 1] # 0:disable, 1:enable; changing this requires rebuilding with MLP_PREDICTION
 MLPRunModeType = [11] # MLP-delta cases run only these modes; baseline MLP=0 reuses normal sweep results
 BatchSizeRunModeType = [11] # BatchSize axis runs only these modes
 KeyPageCapacityRunModeType = [2, 23, 11, 28] # KeyPageMapCapacity axis runs only these modes
@@ -1280,12 +1288,12 @@ DefaultAccessPattern = {
     "tpcc": 0,
 }
 DefaultZipfianTheta = 0.8
-DefaultHotspotFraction = 0.01
+DefaultHotspotFraction = 0.25
 DefaultHotspotProb = 0.8
 DefaultWorkerThreads = WorkerThreadCount[0]
 DefaultBatchSize = BatchSize[0]
 DefaultKeyPageMapCapacity = KeyPageMapCapacity[0]
-DefaultEnableMLP = EnableMLP[0]
+DefaultEnableMLP = 0
 DefaultAffinityTxnRatio = AffinityTxnRatio[0]
 DefaultNumBucket = NumBucket[0]
 DefaultTPCCPartitionWarehouses = TPCCPartitionWarehouse[0]
