@@ -9,6 +9,10 @@ import matplotlib.pyplot as plt
 import os
 import shutil
 from matplotlib import rcParams
+try:
+    import revision_extracted_data as revision_data
+except ImportError:
+    revision_data = None
 
 # Configuration
 if shutil.which('latex'):
@@ -47,6 +51,8 @@ def main():
         "w/o critical-path",
         "w/o scheduling" 
     ]
+    if revision_data:
+        systems = revision_data.ABLATION_SYSTEMS
     
     # Colors
     colors = ["#e47474", "#74a8e4c2", "#74e4bfce", "#e4e474"]
@@ -63,6 +69,8 @@ def main():
         ("0.9",   [17183.29, 16090.22, 15202.88, 12773.06]),
         ("0.95",  [14183.9, 7346.82, 10850.71, 6688.58]),
     ]
+    if revision_data:
+        data = revision_data.ablation_data
     
     # Figure setup: Slimmer single plot
     fig_w, fig_h = 2.5, 3.5
@@ -77,7 +85,10 @@ def main():
     # Transpose data
     system_values = []
     for i in range(n_sys):
-        system_values.append([item[1][i] / 1000.0 for item in data])
+        system_values.append([
+            (item[1][i] / 1000.0) if item[1][i] is not None else None
+            for item in data
+        ])
         
     n_vars = len(data)
     x_base = range(n_vars)
@@ -87,7 +98,7 @@ def main():
         offset = (i - (n_sys - 1) / 2) * bar_width
         ax.bar(
             [x + offset for x in x_base], 
-            system_values[i], 
+            [0 if value is None else value for value in system_values[i]], 
             width=bar_width, 
             label=systems[i],
             color=colors[i],

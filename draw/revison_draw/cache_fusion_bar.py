@@ -6,9 +6,15 @@ Combined Zipfian and Hotspot plots side-by-side.
 """
 
 import matplotlib.pyplot as plt
+import argparse
 import os
 import shutil
 from matplotlib import rcParams
+import math
+try:
+    import revision_extracted_data as revision_data
+except ImportError:
+    revision_data = None
 
 # Configuration (same as Q1.py)
 # Check for LaTeX availability before enabling
@@ -39,6 +45,8 @@ rcParams['xtick.labelsize'] = 12
 rcParams['ytick.labelsize'] = 12
 rcParams['legend.fontsize'] = 12
 
+DEFAULT_CACHE_FUSION_METRIC = "cf_waits_per_kwr_business_txn"
+
 def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
     labels = [item[0] for item in data]
     # Transpose data to get a list of values for each system
@@ -67,26 +75,39 @@ def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
 
     ax.set_xticks(x_base)
     # Rotation 0 is better for short labels like numbers or percentages
-    ax.set_xticklabels(labels, rotation=0, ha='center', fontsize=14)
+    tick_labels = [label.replace("%", r"\%") for label in labels]
+    ax.set_xticklabels(tick_labels, rotation=0, ha='center', fontsize=14)
     
     # Reduce margins on left and right
     ax.set_xlim(-0.55, len(labels) - 1 + 0.55)
 
     ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
     
-    # Set Y-axis range
-    # You can set the range manually using ax.set_ylim(bottom, top)
-    # Here we set it from 0 to 6 to cover all data points (max ~5.14)
-    ax.set_ylim(0, 5.5)
+    all_values = [val for sublist in system_values for val in sublist if val is not None]
+    upper_val = math.ceil(max(all_values) * 1.15)
+    ax.set_ylim(0, upper_val)
     
     # Increase y-ticks density
     from matplotlib.ticker import MultipleLocator
-    ax.yaxis.set_major_locator(MultipleLocator(1))
+    ax.yaxis.set_major_locator(MultipleLocator(max(1, upper_val // 5)))
     
     if xlabel:
         ax.set_xlabel(xlabel, fontsize=16)
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--metric",
+        choices=(
+            "cf_waits_per_txn",
+            "cf_waits_per_app_txn",
+            "cf_waits_per_kwr_business_txn",
+        ),
+        default=DEFAULT_CACHE_FUSION_METRIC,
+        help="Cache-fusion metric to plot.",
+    )
+    args = parser.parse_args()
+
     # Output file
     outdir = "figs"
     outfile = "system_cache_fusion_combined.pdf"
@@ -101,6 +122,8 @@ def main():
         "CPR", 
         "MP-Router"
     ]
+    if revision_data:
+        systems = revision_data.MAIN_SYSTEMS
     
     # Colors
     colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#e47474"] 
@@ -121,6 +144,14 @@ def main():
         ("1%",     [3.74,  3.62, 2.44,  3.44,  2.42, 1.63]),
         ("0.1%",   [5.14,  4.99, 4.26,  4.83,  3.88, 2.89])
     ]
+    if revision_data:
+        if hasattr(revision_data, "cache_fusion_data"):
+            metric_data = revision_data.cache_fusion_data[args.metric]
+            zipfian_data = metric_data["zipfian"]
+            hotspot_data = metric_data["hotspot"]
+        else:
+            zipfian_data = revision_data.cache_fusion_zipfian_data
+            hotspot_data = revision_data.cache_fusion_hotspot_data
 
     # Figure setup: 1 row, 2 columns, separate Y axis to allow individual zooming
     fig_w, fig_h = 8.5, 2.5

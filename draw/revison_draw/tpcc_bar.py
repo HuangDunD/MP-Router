@@ -10,6 +10,10 @@ import os
 import shutil
 import numpy as np
 from matplotlib import rcParams
+try:
+    import revision_extracted_data as revision_data
+except ImportError:
+    revision_data = None
 
 # Configuration (same as throughput_bar.py)
 if shutil.which('latex'):
@@ -53,11 +57,13 @@ def main():
         "CPR",
         "MP-Router"
     ]
+    if revision_data:
+        systems = revision_data.TPCC_SYSTEMS
     
     # Colors
-    colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027",  "#e47474"] 
+    colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027",  "#e47474", "#8c8c8c"] 
     # Hatches
-    hatches = ['////', '\\\\\\\\', 'xxxx', 'oo', 'OOOO', '....']
+    hatches = ['////', '\\\\\\\\', 'xxxx', 'oo', 'OOOO', '....', '----']
 
     # Data Structure: list of (Label, values_list)
     # Values are in TPS
@@ -70,6 +76,8 @@ def main():
         ("80%",    [1317.72, 1281.79, 1270.28, 1239.66, 1154.68, 5165.38]),
         ("90%",    [1247.59, 1193.56, 1294.28, 1202.52, 1166.08, 6172.2]),
     ]
+    if revision_data:
+        raw_data_map = revision_data.tpcc_data
 
     # Prepare data for plotting (Transpose: list of [val_sys1_norm, val_sys1_50, ...])
     # Actually matplotlib bar grouped needs: for each system, a list of values across groups

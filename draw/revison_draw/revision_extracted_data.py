@@ -12,7 +12,7 @@ ABLATION_SYSTEMS = ['MP-Router', 'w/o barrier', 'w/o critical-path', 'w/o schedu
 throughput_zipfian_data = [('0.1', [83629.17, 84793.7, 106955.9, 96134.37, 97803.73, 126348.13]),
  ('0.6', [82187.26, 82718.88, 100301.26, 92793.34, 93070.26, 122045.9]),
  ('0.8', [72046.07, 72224.56, 84830.97, 68772.67, 78025.03, 107074.93]),
- ('0.9', [None, None, None, None, None, None]),
+ ('0.9', [14892.43, 12971.53, 15253.43, 14371.59, 17182.89, 77165.69]),
  ('1.1', [2611.65, 2475.33, 2642.91, 2682.67, 2654.77, 34410.69]),
  ('1.3', [1194.93, 1149.9, 1210.47, 1120.47, 1248.2, 19189.73])]
 
@@ -20,6 +20,39 @@ throughput_hotspot_data = [('100%', [83820.37, 85687.6, 105609.13, 96332.93, 939
  ('10%', [81633.43, 82445.23, 102018.0, 94046.1, 91617.63, 121613.13]),
  ('1%', [66423.97, 67283.31, 80567.4, 74126.47, 77025.07, 94651.1]),
  ('0.1%', [56835.77, 56942.3, 65462.57, 57352.73, 64014.2, 72369.6])]
+
+CACHE_FUSION_METRICS = ['cf_waits_per_txn', 'cf_waits_per_app_txn', 'cf_waits_per_kwr_business_txn']
+
+cache_fusion_data = {'cf_waits_per_app_txn': {'hotspot': [('100%', [0.69644, 0.755416, 0.487042, 0.611024, 0.456311, 0.333172]),
+                                      ('10%', [0.762482, 0.820499, 0.534428, 0.651287, 0.477348, 0.386707]),
+                                      ('1%', [1.132977, 1.205369, 0.860718, 1.056408, 0.715479, 0.652786]),
+                                      ('0.1%', [1.492659, 1.499314, 1.24839, 1.546012, 1.196603, 1.072028])],
+                          'zipfian': [('0.1', [0.699549, 0.749019, 0.487463, 0.620995, 0.449402, 0.340364]),
+                                      ('0.6', [0.72998, 0.803964, 0.527322, 0.66751, 0.483268, 0.352063]),
+                                      ('0.8', [0.858244, 0.878211, 0.657522, 0.864307, 0.621171, 0.452923]),
+                                      ('0.9', [0.899889, 0.933492, 0.654028, 0.860818, 0.646166, 0.538448]),
+                                      ('1.1', [2.190091, 2.094667, 1.724429, 1.829833, 1.715531, 0.460597]),
+                                      ('1.3', [4.019973, 3.62675, 3.084623, 3.343518, 3.016424, 0.349072])]},
+ 'cf_waits_per_kwr_business_txn': {'hotspot': [('100%', [1.944695, 1.583908, 1.129909, 1.400147, 1.118438, 0.762329]),
+                                               ('10%', [2.090249, 1.775101, 1.189518, 1.530837, 1.156633, 0.879598]),
+                                               ('1%', [2.924458, 2.641402, 1.828374, 2.467306, 1.644584, 1.368137]),
+                                               ('0.1%', [3.901074, 3.637297, 2.81238, 3.670413, 2.920656, 2.377499])],
+                                   'zipfian': [('0.1', [1.945035, 1.565635, 1.114281, 1.435395, 1.171361, 0.775208]),
+                                               ('0.6', [2.036508, 1.691826, 1.19192, 1.534256, 1.188179, 0.829035]),
+                                               ('0.8', [2.39129, 2.056567, 1.52254, 1.890818, 1.433353, 0.992587]),
+                                               ('0.9', [2.356562, 2.151975, 1.570885, 2.167995, 1.602911, 1.189832]),
+                                               ('1.1', [5.397691, 5.663366, 4.50051, 6.094901, 5.004029, 1.126852]),
+                                               ('1.3', [9.827332, 9.507713, 14.072236, 10.089685, 6.241877, 0.96447])]},
+ 'cf_waits_per_txn': {'hotspot': [('100%', [1.95, 1.6, 1.14, 1.41, 1.13, 0.77]),
+                                  ('10%', [2.1, 1.78, 1.2, 1.54, 1.17, 0.89]),
+                                  ('1%', [2.94, 2.65, 1.84, 2.48, 1.65, 1.38]),
+                                  ('0.1%', [3.92, 3.64, 2.83, 3.7, 2.95, 2.4])],
+                      'zipfian': [('0.1', [1.95, 1.58, 1.12, 1.44, 1.18, 0.78]),
+                                  ('0.6', [2.05, 1.7, 1.2, 1.54, 1.19, 0.84]),
+                                  ('0.8', [2.4, 2.07, 1.53, 1.91, 1.44, 1.0]),
+                                  ('0.9', [2.38, 2.17, 1.58, 2.18, 1.64, 1.2]),
+                                  ('1.1', [5.46, 5.66, 4.5, 6.1, 4.99, 1.13]),
+                                  ('1.3', [9.78, 9.45, 14.02, 10.05, 6.24, 0.97])]}}
 
 affinity_data = [('0%', [69158.63, 46215.8, 41845.33, 46077.07, 44887.64, 102658.0]),
  ('20%', [70295.83, 67901.37, 63878.2, 49267.33, 65056.4, 101074.2]),
@@ -52,43 +85,44 @@ batch_size_data = [('10', [None]),
  ('100000', [116687.31])]
 
 ablation_data = [('0.8', [107074.93, None, None, 93383.29]),
- ('0.9', [None, None, None, None]),
+ ('0.9', [77165.69, None, None, 13694.71]),
  ('1.1', [34410.69, None, None, 2274.39])]
 
-mlp_data = [('0.1', [126047.3, 126348.13]),
- ('0.6', [119757.51, 122045.9]),
- ('0.8', [105917.87, 107074.93]),
- ('0.9', [None, None]),
- ('1.1', [33175.13, 34410.69]),
- ('1.3', [19550.03, 19189.73])]
+mlp_data = [('0.1', [37965.7, 126348.13]),
+ ('0.6', [25960.37, 122045.9]),
+ ('0.8', [10571.97, 107074.93]),
+ ('0.9', [6182.07, 77165.69]),
+ ('1.1', [4381.7, 34410.69]),
+ ('1.3', [4774.37, 19189.73])]
 
 TPCC_SYSTEMS = ['RR', 'MWR', 'PHR', 'PAR', 'CPR', 'MP-Router', 'Warehouse-aware']
 
-tpcc_data = [('Unpartitioned', [757.77, 1041.57, 809.1, 1118.5, 1168.4, 7330.07, 19678.13]),
- ('Warehouse-partitioned', [10072.37, 10392.17, 10154.93, 11157.83, 10368.43, 9988.8, 51307.03])]
+tpcc_data = [('Unpartitioned', [14255.56, 14323.43, 14812.23, 14876.6, 12304.66, 71192.16, 98752.24]),
+ ('Warehouse-partitioned', [None, None, None, None, None, None, None])]
 
-MISSING = ["throughput_zipfian/0.9/mode0: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': "
- "'0'}",
- "throughput_zipfian/0.9/mode25: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': "
- "'25'}",
- "throughput_zipfian/0.9/mode2: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': "
- "'2'}",
- "throughput_zipfian/0.9/mode23: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': "
- "'23'}",
- "throughput_zipfian/0.9/mode28: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': "
- "'28'}",
- "throughput_zipfian/0.9/mode11: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': "
- "'11'}",
- "batch_size/10/mode11: {'scan_axis': 'batch_size', 'batch_size': '10', 'run_mode': '11'}",
- "ablation/0.8/mode26: {'scan_axis': 'base', 'access_pattern': '1', 'zipfian_theta': '0.8', 'run_mode': '26'}",
- "ablation/0.8/mode30: {'scan_axis': 'base', 'access_pattern': '1', 'zipfian_theta': '0.8', 'run_mode': '30'}",
- "ablation/0.9/mode11: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': '11'}",
- "ablation/0.9/mode26: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': '26'}",
- "ablation/0.9/mode30: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': '30'}",
- "ablation/0.9/mode13: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': '13'}",
+MISSING = ["batch_size/10/mode11: {'scan_axis': 'batch_size', 'batch_size': '10', 'run_mode': '11'}",
+ "ablation/0.8/mode26: {'scan_axis': ('access', 'base'), 'access_pattern': '1', 'zipfian_theta': '0.8', 'run_mode': "
+ "'26'}",
+ "ablation/0.8/mode30: {'scan_axis': ('access', 'base'), 'access_pattern': '1', 'zipfian_theta': '0.8', 'run_mode': "
+ "'30'}",
+ "ablation/0.9/mode26: {'scan_axis': ('access', 'base'), 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': "
+ "'26'}",
+ "ablation/0.9/mode30: {'scan_axis': ('access', 'base'), 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': "
+ "'30'}",
  "ablation/1.1/mode26: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '1.1', 'run_mode': '26'}",
  "ablation/1.1/mode30: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '1.1', 'run_mode': '30'}",
- "mlp/0.9/mlp: {'scan_axis': 'mlp_zipfian', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': '11', "
- "'mlp_enabled': '1'}",
- "mlp/0.9/baseline: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': '11', "
- "'mlp_enabled': '0'}"]
+ "tpcc/Warehouse-partitioned/mode0: {'scan_axis': 'tpcc_partition_warehouses', 'run_mode': '0'}",
+ "tpcc/Warehouse-partitioned/mode25: {'scan_axis': 'tpcc_partition_warehouses', 'run_mode': '25'}",
+ "tpcc/Warehouse-partitioned/mode2: {'scan_axis': 'tpcc_partition_warehouses', 'run_mode': '2'}",
+ "tpcc/Warehouse-partitioned/mode23: {'scan_axis': 'tpcc_partition_warehouses', 'run_mode': '23'}",
+ "tpcc/Warehouse-partitioned/mode28: {'scan_axis': 'tpcc_partition_warehouses', 'run_mode': '28'}",
+ "tpcc/Warehouse-partitioned/mode11: {'scan_axis': 'tpcc_partition_warehouses', 'run_mode': '11'}",
+ "tpcc/Warehouse-partitioned/mode31: {'scan_axis': 'tpcc_partition_warehouses', 'run_mode': '31'}"]
+
+WARNINGS = ["tpcc/Unpartitioned/mode0: multiple matches for {'scan_axis': 'base', 'run_mode': '0'}; using largest case_id",
+ "tpcc/Unpartitioned/mode25: multiple matches for {'scan_axis': 'base', 'run_mode': '25'}; using largest case_id",
+ "tpcc/Unpartitioned/mode2: multiple matches for {'scan_axis': 'base', 'run_mode': '2'}; using largest case_id",
+ "tpcc/Unpartitioned/mode23: multiple matches for {'scan_axis': 'base', 'run_mode': '23'}; using largest case_id",
+ "tpcc/Unpartitioned/mode28: multiple matches for {'scan_axis': 'base', 'run_mode': '28'}; using largest case_id",
+ "tpcc/Unpartitioned/mode11: multiple matches for {'scan_axis': 'base', 'run_mode': '11'}; using largest case_id",
+ "tpcc/Unpartitioned/mode31: multiple matches for {'scan_axis': 'base', 'run_mode': '31'}; using largest case_id"]

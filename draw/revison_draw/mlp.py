@@ -10,6 +10,11 @@ import os
 import shutil
 from matplotlib import rcParams
 import matplotlib.ticker as ticker
+import math
+try:
+    import revision_extracted_data as revision_data
+except ImportError:
+    revision_data = None
 
 # Configuration (Consistent with throughput_bar.py)
 if shutil.which('latex'):
@@ -73,9 +78,13 @@ def plot_single_group(ax, data, systems, colors, hatches, bar_width, xlabel=None
 
     ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
     
-    # Y-axis scaling
-    ax.set_ylim(0, 30)
-    ax.yaxis.set_major_locator(ticker.MultipleLocator(5))
+    all_values = [val for sublist in system_values for val in sublist]
+    min_val = min(all_values)
+    max_val = max(all_values)
+    bottom_val = 0 if min_val / max_val < 0.35 else math.floor(min_val * 0.8 / 10) * 10
+    upper_val = math.ceil(max_val * 1.12 / 10) * 10
+    ax.set_ylim(bottom_val, upper_val)
+    ax.yaxis.set_major_locator(ticker.MultipleLocator(20 if upper_val > 80 else 10))
     
     if xlabel:
         ax.set_xlabel(xlabel, fontsize=16)
@@ -93,6 +102,8 @@ def main():
         "MP-Router with MLP",
         "MP-Router"
     ]
+    if revision_data:
+        systems = revision_data.MLP_SYSTEMS
     
     # Colors & Hatches (Mapped consistently from affinity_ratio_bar.py)
     colors = ["#B157D790", "#e47474"] 
@@ -107,6 +118,8 @@ def main():
         ("0.9", [1654.59, 17183.29]),
         ("0.95", [1621.85, 14183.90]),
     ]
+    if revision_data:
+        data = revision_data.mlp_data
 
     # Figure setup: Single plot
     fig_w, fig_h = 4, 3 # Adjusted for single plot aspect ratio

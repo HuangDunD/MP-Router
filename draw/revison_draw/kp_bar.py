@@ -10,6 +10,11 @@ import os
 import shutil
 from matplotlib import rcParams
 import matplotlib.ticker as ticker
+import math
+try:
+    import revision_extracted_data as revision_data
+except ImportError:
+    revision_data = None
 
 # Configuration (Consistent with throughput_bar.py)
 if shutil.which('latex'):
@@ -66,16 +71,21 @@ def plot_single_group(ax, data, systems, colors, hatches, bar_width, xlabel=None
         )
 
     ax.set_xticks(x_base)
-    ax.set_xticklabels(labels, rotation=0, ha='center', fontsize=14)
+    tick_labels = [label.replace("%", r"\%") for label in labels]
+    ax.set_xticklabels(tick_labels, rotation=0, ha='center', fontsize=14)
     
     # Margins
     ax.set_xlim(-0.6, len(labels) - 1 + 0.6)
 
     ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
     
-    # Y-axis scaling
-    ax.set_ylim(5, 25)
-    ax.yaxis.set_major_locator(ticker.MultipleLocator(5))
+    all_values = [val for sublist in system_values for val in sublist]
+    min_val = min(all_values)
+    max_val = max(all_values)
+    bottom_val = 0 if min_val / max_val < 0.35 else math.floor(min_val * 0.8 / 10) * 10
+    upper_val = math.ceil(max_val * 1.12 / 10) * 10
+    ax.set_ylim(bottom_val, upper_val)
+    ax.yaxis.set_major_locator(ticker.MultipleLocator(20 if upper_val > 80 else 10))
     
     if xlabel:
         ax.set_xlabel(xlabel, fontsize=16)
@@ -95,6 +105,8 @@ def main():
         "CPR",
         "MP-Router"
     ]
+    if revision_data:
+        systems = revision_data.KP_SYSTEMS
     
     # Colors & Hatches (Mapped consistently from affinity_ratio_bar.py)
     # Page Hash: "#2ca02c99", 'xxxx'
@@ -112,6 +124,8 @@ def main():
         ("80%", [15044.52, 13345.97, 15732.82, 19616.36]),
         ("100%", [15859.42, 14018.83, 16060.25, 21509.88]),
     ]
+    if revision_data:
+        data = revision_data.kp_data
 
     # Figure setup: Single plot
     fig_w, fig_h = 4, 3 # Adjusted for single plot aspect ratio

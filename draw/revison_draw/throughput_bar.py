@@ -9,6 +9,11 @@ import matplotlib.pyplot as plt
 import os
 import shutil
 from matplotlib import rcParams
+import math
+try:
+    import revision_extracted_data as revision_data
+except ImportError:
+    revision_data = None
 
 # Configuration (same as Q1.py)
 # Check for LaTeX availability before enabling
@@ -67,23 +72,23 @@ def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
 
     ax.set_xticks(x_base)
     # Rotation 0 is better for short labels like numbers or percentages
-    ax.set_xticklabels(labels, rotation=0, ha='center', fontsize=14)
+    tick_labels = [label.replace("%", r"\%") for label in labels]
+    ax.set_xticklabels(tick_labels, rotation=0, ha='center', fontsize=14)
     
     # Reduce margins on left and right
     ax.set_xlim(-0.55, len(labels) - 1 + 0.55)
 
     ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
     
-    # Calculate min value to set start of Y-axis
     all_values = [val for sublist in system_values for val in sublist]
     min_val = min(all_values)
-    # Start y-axis at ~60% of min value to emphasize top differences, but keep bar visible
-    bottom_val = int(5)
-    ax.set_ylim(bottom=bottom_val)
+    max_val = max(all_values)
+    bottom_val = 0 if min_val / max_val < 0.35 else math.floor(min_val * 0.8 / 10) * 10
+    upper_val = math.ceil(max_val * 1.12 / 10) * 10
+    ax.set_ylim(bottom_val, upper_val)
     
-    # Set tick spacing to 5
     from matplotlib.ticker import MultipleLocator
-    ax.yaxis.set_major_locator(MultipleLocator(5))
+    ax.yaxis.set_major_locator(MultipleLocator(20 if upper_val > 80 else 10))
     
     if xlabel:
         ax.set_xlabel(xlabel, fontsize=16)
@@ -107,6 +112,8 @@ def main():
         "CPR", 
         "MP-Router"
     ]
+    if revision_data:
+        systems = revision_data.MAIN_SYSTEMS
     
     # Colors
     colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#e47474"] 
@@ -127,6 +134,9 @@ def main():
         ("1%",     [10308.37, 10461.43, 12545.3,  10876.99, 12947.69, 17248.04]),
         ("0.1%",   [8510.3,   7899.38,  9208.47,  8608.64,  9283.45, 12055.23])
     ]
+    if revision_data:
+        zipfian_data = revision_data.throughput_zipfian_data
+        hotspot_data = revision_data.throughput_hotspot_data
 
     # Figure setup: 1 row, 2 columns, separate Y axis to allow individual zooming
     # Reduced height as requested

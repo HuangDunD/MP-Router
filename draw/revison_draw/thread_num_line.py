@@ -9,6 +9,10 @@ import os
 import shutil
 import numpy as np
 from matplotlib import rcParams
+try:
+    import revision_extracted_data as revision_data
+except ImportError:
+    revision_data = None
 
 # Configuration
 # Check for LaTeX availability before enabling
@@ -54,6 +58,8 @@ def main():
         "CPR",
         "MP-Router"
     ]
+    if revision_data:
+        systems = revision_data.MAIN_SYSTEMS
     
     # Data from user provided file
     # x-axis (Thread Count / Number of Connections)
@@ -77,6 +83,9 @@ def main():
         [22087.77, 22408.79, 30857.59, 27126.44, 26532.45, 37409.3], # 64
         [21334.01, 22189.82, 28714.79, 28181.52, 24640.16, 35214.9]  # 128
     ]
+    if revision_data:
+        thread_counts = [int(label) for label, _ in revision_data.thread_num_data]
+        data_points = [values for _, values in revision_data.thread_num_data]
     
     # Transpose to get series for each system
     system_series = list(map(list, zip(*data_points)))

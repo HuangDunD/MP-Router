@@ -52,6 +52,12 @@ ABLATION_SYSTEMS = [
 
 TPCC_SYSTEMS = MAIN_SYSTEMS + [("Warehouse-aware", "31")]
 
+CACHE_FUSION_METRICS = [
+    "cf_waits_per_txn",
+    "cf_waits_per_app_txn",
+    "cf_waits_per_kwr_business_txn",
+]
+
 
 def read_rows(path: Path) -> list[dict[str, str]]:
     with path.open(newline="") as f:
@@ -71,18 +77,27 @@ def throughput(row: dict[str, str]) -> float:
     return round(float(row["throughput_after_warmup_tps"]), 2)
 
 
+def metric(row: dict[str, str], column: str) -> float:
+    return round(float(row[column]), 6)
+
+
 class Extractor:
     def __init__(self, rows: list[dict[str, str]]):
         self.rows = rows
         self.missing: list[str] = []
+        self.warnings: list[str] = []
 
-    def find_one(self, desc: str, **conds: str) -> dict[str, str] | None:
+    def find_one(self, desc: str, **conds: object) -> dict[str, str] | None:
         matches = []
         for row in self.rows:
             ok = True
             for key, expected in conds.items():
                 actual = norm_float(row.get(key, ""))
-                if actual != str(expected):
+                if isinstance(expected, (tuple, list, set)):
+                    expected_values = {str(v) for v in expected}
+                else:
+                    expected_values = {str(expected)}
+                if actual not in expected_values:
                     ok = False
                     break
             if ok:
@@ -91,8 +106,8 @@ class Extractor:
             self.missing.append(f"{desc}: {conds}")
             return None
         if len(matches) > 1:
-            self.missing.append(f"{desc}: multiple matches for {conds}; using first")
-        return matches[0]
+            self.warnings.append(f"{desc}: multiple matches for {conds}; using largest case_id")
+        return max(matches, key=lambda row: int(row.get("case_id") or 0))
 
     def series(
         self,
@@ -113,6 +128,26 @@ class Extractor:
             out.append((label, values))
         return out
 
+    def metric_series(
+        self,
+        desc: str,
+        labels: list[tuple[str, dict[str, object]]],
+        systems: list[tuple[str, str]],
+        column: str,
+        base_conds: dict[str, str] | None = None,
+    ) -> list[tuple[str, list[float | None]]]:
+        out = []
+        for label, label_conds in labels:
+            values = []
+            for _, mode in systems:
+                conds = dict(base_conds or {})
+                conds.update(label_conds)
+                conds["run_mode"] = mode
+                row = self.find_one(f"{desc}/{label}/mode{mode}", **conds)
+                values.append(metric(row, column) if row else None)
+            out.append((label, values))
+        return out
+
 
 def smallbank_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], list[str]]:
     e = Extractor(rows)
@@ -121,10 +156,10 @@ def smallbank_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], li
         (theta, {"scan_axis": "access", "access_pattern": "1", "zipfian_theta": theta})
         for theta in ["0.1", "0.6"]
     ]
-    zipf_labels.append(("0.8", {"scan_axis": "base", "access_pattern": "1", "zipfian_theta": "0.8"}))
+    zipf_labels.append(("0.8", {"scan_axis": ("access", "base"), "access_pattern": "1", "zipfian_theta": "0.8"}))
     zipf_labels.extend(
         [
-            (theta, {"scan_axis": "access", "access_pattern": "1", "zipfian_theta": theta})
+            (theta, {"scan_axis": ("access", "base"), "access_pattern": "1", "zipfian_theta": theta})
             for theta in ["0.9", "1.1", "1.3"]
         ]
     )
@@ -139,14 +174,14 @@ def smallbank_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], li
     ]
     affinity_labels.insert(
         4,
-        ("80%", {"scan_axis": "base", "affinity_txn_ratio": "0.8"}),
+        ("80%", {"scan_axis": "base", "access_pattern": "1", "zipfian_theta": "0.8", "affinity_txn_ratio": "0.8"}),
     )
 
     thread_labels = [
         (threads, {"scan_axis": "worker_threads", "worker_threads": threads})
         for threads in ["2", "4", "8", "32", "64", "128"]
     ]
-    thread_labels.insert(3, ("16", {"scan_axis": "base", "worker_threads": "16"}))
+    thread_labels.insert(3, ("16", {"scan_axis": "base", "access_pattern": "1", "zipfian_theta": "0.8", "worker_threads": "16"}))
 
     kp_labels = [
         (f"{int(float(ratio) * 100)}%", {"scan_axis": "key_page_capacity", "key_page_ratio": ratio})
@@ -157,11 +192,11 @@ def smallbank_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], li
         (size, {"scan_axis": "batch_size", "batch_size": size})
         for size in ["10", "100", "500", "1000", "5000", "50000", "100000"]
     ]
-    batch_labels.insert(5, ("10000", {"scan_axis": "base", "batch_size": "10000"}))
+    batch_labels.insert(5, ("10000", {"scan_axis": "base", "access_pattern": "1", "zipfian_theta": "0.8", "batch_size": "10000"}))
 
     ablation_labels = [
-        ("0.8", {"scan_axis": "base", "access_pattern": "1", "zipfian_theta": "0.8"}),
-        ("0.9", {"scan_axis": "access", "access_pattern": "1", "zipfian_theta": "0.9"}),
+        ("0.8", {"scan_axis": ("access", "base"), "access_pattern": "1", "zipfian_theta": "0.8"}),
+        ("0.9", {"scan_axis": ("access", "base"), "access_pattern": "1", "zipfian_theta": "0.9"}),
         ("1.1", {"scan_axis": "access", "access_pattern": "1", "zipfian_theta": "1.1"}),
     ]
 
@@ -172,6 +207,24 @@ def smallbank_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], li
         "ABLATION_SYSTEMS": [name for name, _ in ABLATION_SYSTEMS],
         "throughput_zipfian_data": e.series("throughput_zipfian", zipf_labels, MAIN_SYSTEMS),
         "throughput_hotspot_data": e.series("throughput_hotspot", hotspot_labels, MAIN_SYSTEMS),
+        "CACHE_FUSION_METRICS": CACHE_FUSION_METRICS,
+        "cache_fusion_data": {
+            column: {
+                "zipfian": e.metric_series(
+                    f"cache_fusion_{column}_zipfian",
+                    zipf_labels,
+                    MAIN_SYSTEMS,
+                    column,
+                ),
+                "hotspot": e.metric_series(
+                    f"cache_fusion_{column}_hotspot",
+                    hotspot_labels,
+                    MAIN_SYSTEMS,
+                    column,
+                ),
+            }
+            for column in CACHE_FUSION_METRICS
+        },
         "affinity_data": e.series("affinity", affinity_labels, MAIN_SYSTEMS),
         "thread_num_data": e.series("thread_num", thread_labels, MAIN_SYSTEMS),
         "kp_data": e.series("kp", kp_labels, KP_SYSTEMS),
@@ -193,10 +246,9 @@ def smallbank_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], li
             mlp_enabled="1",
         )
         values.append(throughput(row) if row else None)
-        baseline_scan_axis = "base" if theta == "0.8" else "access"
         row = e.find_one(
             f"mlp/{theta}/baseline",
-            scan_axis=baseline_scan_axis,
+            scan_axis=("access", "base"),
             access_pattern="1",
             zipfian_theta=theta,
             run_mode="11",
@@ -206,10 +258,10 @@ def smallbank_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], li
         mlp_data.append((theta, values))
     data["mlp_data"] = mlp_data
 
-    return data, e.missing
+    return data, e.missing, e.warnings
 
 
-def tpcc_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], list[str]]:
+def tpcc_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], list[str], list[str]]:
     e = Extractor(rows)
     labels = [
         ("Unpartitioned", {"scan_axis": "base"}),
@@ -219,10 +271,10 @@ def tpcc_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], list[st
         "TPCC_SYSTEMS": [name for name, _ in TPCC_SYSTEMS],
         "tpcc_data": e.series("tpcc", labels, TPCC_SYSTEMS),
     }
-    return data, e.missing
+    return data, e.missing, e.warnings
 
 
-def write_module(output: Path, payload: dict[str, object], missing: list[str]) -> None:
+def write_module(output: Path, payload: dict[str, object], missing: list[str], warnings: list[str]) -> None:
     lines = [
         "# Auto-generated by extract_revision_data.py.",
         "# Do not edit by hand; adjust CSV paths or extraction config instead.",
@@ -232,6 +284,8 @@ def write_module(output: Path, payload: dict[str, object], missing: list[str]) -
         lines.append(f"{key} = {pformat(value, width=120)}")
         lines.append("")
     lines.append(f"MISSING = {pformat(missing, width=120)}")
+    lines.append("")
+    lines.append(f"WARNINGS = {pformat(warnings, width=120)}")
     lines.append("")
     output.write_text("\n".join(lines), encoding="utf-8")
 
@@ -243,15 +297,19 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
-    smallbank_data, smallbank_missing = smallbank_figures(read_rows(args.smallbank_summary))
-    tpcc_data, tpcc_missing = tpcc_figures(read_rows(args.tpcc_summary))
+    smallbank_data, smallbank_missing, smallbank_warnings = smallbank_figures(read_rows(args.smallbank_summary))
+    tpcc_data, tpcc_missing, tpcc_warnings = tpcc_figures(read_rows(args.tpcc_summary))
     payload = {**smallbank_data, **tpcc_data}
     missing = smallbank_missing + tpcc_missing
-    write_module(args.output, payload, missing)
+    warnings = smallbank_warnings + tpcc_warnings
+    write_module(args.output, payload, missing, warnings)
 
     print(f"Wrote {args.output}")
     print(f"Missing entries: {len(missing)}")
     for item in missing:
+        print("  -", item)
+    print(f"Warnings: {len(warnings)}")
+    for item in warnings:
         print("  -", item)
 
 

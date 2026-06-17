@@ -9,6 +9,10 @@ import os
 import shutil
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
+try:
+	import revision_extracted_data as revision_data
+except ImportError:
+	revision_data = None
 
 # Configuration (match throughput_bar.py)
 if shutil.which("latex"):
@@ -37,6 +41,14 @@ def main() -> None:
 	# Data
 	batch_sizes = [10, 100, 500, 1000, 5000, 10000, 50000, 100000]
 	throughput = [2090.62, 16682.91, 17793.46, 18822.3, 19505.85, 21858.69, 21844.15, 23121.71]
+	if revision_data:
+		pairs = [
+			(int(label), values[0])
+			for label, values in revision_data.batch_size_data
+			if values[0] is not None
+		]
+		batch_sizes = [label for label, _ in pairs]
+		throughput = [value for _, value in pairs]
 
 	# Convert to KTPS for consistency with other plots
 	throughput_k = [val / 1000.0 for val in throughput]
