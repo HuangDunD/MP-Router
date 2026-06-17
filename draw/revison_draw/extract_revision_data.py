@@ -46,7 +46,7 @@ MLP_SYSTEMS = [
 ABLATION_SYSTEMS = [
     ("MP-Router", "11"),
     ("w/o barrier", "26"),
-    ("w/o critical-path", "30"),
+    ("w/o critical-path", "27"),
     ("w/o scheduling", "13"),
 ]
 
@@ -293,11 +293,15 @@ def write_module(output: Path, payload: dict[str, object], missing: list[str], w
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--smallbank-summary", type=Path, default=DEFAULT_SMALLBANK_SUMMARY)
+    parser.add_argument("--smallbank-extra-summary", type=Path, action="append", default=[])
     parser.add_argument("--tpcc-summary", type=Path, default=DEFAULT_TPCC_SUMMARY)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
-    smallbank_data, smallbank_missing, smallbank_warnings = smallbank_figures(read_rows(args.smallbank_summary))
+    smallbank_rows = read_rows(args.smallbank_summary)
+    for path in args.smallbank_extra_summary:
+        smallbank_rows.extend(read_rows(path))
+    smallbank_data, smallbank_missing, smallbank_warnings = smallbank_figures(smallbank_rows)
     tpcc_data, tpcc_missing, tpcc_warnings = tpcc_figures(read_rows(args.tpcc_summary))
     payload = {**smallbank_data, **tpcc_data}
     missing = smallbank_missing + tpcc_missing

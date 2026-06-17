@@ -84,9 +84,9 @@ batch_size_data = [('10', [None]),
  ('50000', [112094.8]),
  ('100000', [116687.31])]
 
-ablation_data = [('0.8', [107074.93, None, None, 93383.29]),
- ('0.9', [77165.69, None, None, 13694.71]),
- ('1.1', [34410.69, None, None, 2274.39])]
+ablation_data = [('0.8', [107074.93, 94502.0, 90757.97, 93383.29]),
+ ('0.9', [77165.69, 13539.77, 66096.36, 13694.71]),
+ ('1.1', [34410.69, 3186.03, 19974.47, 2274.39])]
 
 mlp_data = [('0.1', [37965.7, 126348.13]),
  ('0.6', [25960.37, 122045.9]),
@@ -101,16 +101,6 @@ tpcc_data = [('Unpartitioned', [14255.56, 14323.43, 14812.23, 14876.6, 12304.66,
  ('Warehouse-partitioned', [None, None, None, None, None, None, None])]
 
 MISSING = ["batch_size/10/mode11: {'scan_axis': 'batch_size', 'batch_size': '10', 'run_mode': '11'}",
- "ablation/0.8/mode26: {'scan_axis': ('access', 'base'), 'access_pattern': '1', 'zipfian_theta': '0.8', 'run_mode': "
- "'26'}",
- "ablation/0.8/mode30: {'scan_axis': ('access', 'base'), 'access_pattern': '1', 'zipfian_theta': '0.8', 'run_mode': "
- "'30'}",
- "ablation/0.9/mode26: {'scan_axis': ('access', 'base'), 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': "
- "'26'}",
- "ablation/0.9/mode30: {'scan_axis': ('access', 'base'), 'access_pattern': '1', 'zipfian_theta': '0.9', 'run_mode': "
- "'30'}",
- "ablation/1.1/mode26: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '1.1', 'run_mode': '26'}",
- "ablation/1.1/mode30: {'scan_axis': 'access', 'access_pattern': '1', 'zipfian_theta': '1.1', 'run_mode': '30'}",
  "tpcc/Warehouse-partitioned/mode0: {'scan_axis': 'tpcc_partition_warehouses', 'run_mode': '0'}",
  "tpcc/Warehouse-partitioned/mode25: {'scan_axis': 'tpcc_partition_warehouses', 'run_mode': '25'}",
  "tpcc/Warehouse-partitioned/mode2: {'scan_axis': 'tpcc_partition_warehouses', 'run_mode': '2'}",
