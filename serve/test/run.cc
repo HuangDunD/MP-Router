@@ -928,7 +928,10 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             assert(tables.size() > 0);
             assert(tables.size() == keys.size());
             std::vector<bool> rw = smallbank->get_rw_by_txn_type(txn_type);
-            if(txn_type == 6) rw.assign(keys.size(), true); // Update RW flags for dynamic length
+            if (txn_type == 6) {
+                rw = txn_entry->ycsb_rw_flags.empty() ?
+                    std::vector<bool>(keys.size(), false) : txn_entry->ycsb_rw_flags;
+            }
 
             std::vector<page_id_t> ctid_ret_page_ids;
 
@@ -991,9 +994,15 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                                 if (i < keys.size() - 1) ids_str += ",";
                             }
                             ids_str += "]";
+                            std::string rw_flags_str = "array[";
+                            for(size_t i = 0; i < rw.size(); ++i) {
+                                rw_flags_str += rw[i] ? "true" : "false";
+                                if (i < rw.size() - 1) rw_flags_str += ",";
+                            }
+                            rw_flags_str += "]";
 
                             std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_multi_update(" +
-                                              ids_str + ", 1)";
+                                              ids_str + ", " + rw_flags_str + ", 1)";
                             res = txn.exec(sql);
                             break;
                         }
@@ -1940,6 +1949,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --time-run                  Run by wall-clock time instead of try-count" << std::endl;
     std::cout << "  --warmup-seconds <sec>      Warmup duration for --time-run [default: 180]" << std::endl;
     std::cout << "  --run-seconds <sec>         Measured duration after warmup for --time-run [default: 60]" << std::endl;
+    std::cout << "  --long-txn-write-pct <pct>  Long SmallBank per-op write probability (0-100) [default: 10]" << std::endl;
     std::cout << "  --retry-limit <n>           Retry SQLSTATE 40xxx rollback errors up to n times per txn [default: 0]" << std::endl;
     std::cout << "  --retry-to-commit <n>       Alias for --retry-limit" << std::endl;
     std::cout << "  --db-connection <conninfo>  Add one database conninfo string; repeat for multi-node" << std::endl;
@@ -3008,6 +3018,22 @@ int main(int argc, char *argv[]) {
                 std::cout << "Long transaction length set to: " << Long_Txn_Length << std::endl;
             } else {
                 std::cerr << "Error: --long-txn-length requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--long-txn-write-pct") {
+            if (i + 1 < argc) {
+                Long_Txn_Write_Pct = std::stoi(argv[++i]);
+                if (Long_Txn_Write_Pct < 0 || Long_Txn_Write_Pct > 100) {
+                    std::cerr << "Error: long-txn-write-pct must be between 0 and 100" << std::endl;
+                    return -1;
+                }
+                std::cout << "Long transaction write percentage set to: "
+                          << Long_Txn_Write_Pct << "% (read percentage: "
+                          << (100 - Long_Txn_Write_Pct) << "%)" << std::endl;
+            } else {
+                std::cerr << "Error: --long-txn-write-pct requires a value" << std::endl;
                 print_usage(argv[0]);
                 return -1;
             }

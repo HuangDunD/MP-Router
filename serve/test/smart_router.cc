@@ -138,12 +138,8 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
             return result;
         }
         const int w_id = static_cast<int>(txn->tpcc_params[0]);
-        const int warehouse_count = std::max(1, tpcc_->get_num_warehouses());
         const int partition_count = std::max(1, ComputeNodeCount);
-        const int warehouses_per_partition =
-            std::max(1, (warehouse_count + partition_count - 1) / partition_count);
-        result.smart_router_id =
-            std::min(partition_count - 1, std::max(0, (w_id - 1) / warehouses_per_partition));
+        result.smart_router_id = std::max(0, w_id - 1) % partition_count;
         result.success = true;
         return result;
     }
@@ -1091,6 +1087,8 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                         if (txn_type == 6 && txn->accounts.size() > MAX_ITEM_SIZE) {
                             std::vector<table_id_t> table_ids(txn->accounts.size(), kChecking);
                             std::vector<itemkey_t> keys = txn->accounts;
+                            sc.rw_flags = txn->ycsb_rw_flags.empty() ?
+                                std::vector<bool>(keys.size(), false) : txn->ycsb_rw_flags;
                             fill_candidate_accesses(table_ids.data(), keys.data(), nullptr, keys.size());
                             continue;
                         }
@@ -1143,7 +1141,8 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                                 for (size_t access_idx = 0; access_idx < access_count; ++access_idx) {
                                     table_ids[access_idx] = kChecking;
                                     keys[access_idx] = txn->accounts[access_idx];
-                                    rw[access_idx] = true;
+                                    rw[access_idx] = access_idx < txn->ycsb_rw_flags.size() ?
+                                        txn->ycsb_rw_flags[access_idx] : false;
                                 }
                                 break;
                             }
@@ -1500,6 +1499,10 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                         smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
                     }
                     rw = smallbank_->get_rw_by_txn_type(txn_type);
+                    if (txn_type == 6) {
+                        rw = txn->ycsb_rw_flags.empty() ?
+                            std::vector<bool>(accounts_keys.size(), false) : txn->ycsb_rw_flags;
+                    }
                 } else if (Workload_Type == 1) { 
                     table_ids = ycsb_->get_table_ids_by_txn_type();
                     accounts_keys = txn->ycsb_keys;
@@ -2561,6 +2564,10 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
                 smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
             }
             rw = smallbank_->get_rw_by_txn_type(txn_type);
+            if (txn_type == 6) {
+                rw = txn->ycsb_rw_flags.empty() ?
+                    std::vector<bool>(accounts_keys.size(), false) : txn->ycsb_rw_flags;
+            }
         } else if (Workload_Type == 1) { 
             table_ids = ycsb_->get_table_ids_by_txn_type();
             accounts_keys = txn->ycsb_keys;
@@ -2929,6 +2936,10 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                         smallbank_->get_keys_by_txn_type(txn_type, account1, account2, accounts_keys);
                     }
                     rw = smallbank_->get_rw_by_txn_type(txn_type);
+                    if (txn_type == 6) {
+                        rw = txn->ycsb_rw_flags.empty() ?
+                            std::vector<bool>(accounts_keys.size(), false) : txn->ycsb_rw_flags;
+                    }
                 } else if (Workload_Type == 1) { 
                     table_ids = ycsb_->get_table_ids_by_txn_type();
                     accounts_keys = txn->ycsb_keys;

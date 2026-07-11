@@ -991,6 +991,8 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
     // Experiment Control: Transaction Length
     bool enable_multi_update_experiment = Enable_Long_Txn; // 从配置中读取是否启用长事务实验
     int multi_update_length = Long_Txn_Length; // 从配置中读取长事务的长度
+    std::mt19937 rw_rng(static_cast<uint32_t>(GetCPUCycle() ^ (thread_id * 0x9e3779b9U)));
+    std::bernoulli_distribution long_txn_write_dist(Long_Txn_Write_Pct / 100.0);
     
     while(true) {
         if(dynamic_workload || time_based_run){
@@ -1013,16 +1015,29 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
                 // Generate MultiUpdate Transaction (Type 6)
                 int txn_type = 6; 
                 std::vector<itemkey_t> multi_accounts;
+                std::vector<bool> rw_flags;
                 multi_accounts.reserve(multi_update_length);
+                rw_flags.reserve(multi_update_length);
                 for(int k = 0; k < multi_update_length; k++) {
                     itemkey_t acc;
                     generate_account_id(acc, zipfian_gen, finite_zipfian_gen);
                     multi_accounts.push_back(acc);
+                    rw_flags.push_back(long_txn_write_dist(rw_rng));
                 }
-                // sort accounts to avoid deadlock
-                std::sort(multi_accounts.begin(), multi_accounts.end());
+                std::vector<std::pair<itemkey_t, bool>> accesses;
+                accesses.reserve(multi_update_length);
+                for (size_t k = 0; k < multi_accounts.size(); k++) {
+                    accesses.emplace_back(multi_accounts[k], rw_flags[k]);
+                }
+                // sort accounts to avoid deadlock while preserving each operation's rw flag
+                std::sort(accesses.begin(), accesses.end());
+                for (size_t k = 0; k < accesses.size(); k++) {
+                    multi_accounts[k] = accesses[k].first;
+                    rw_flags[k] = accesses[k].second;
+                }
                 // Create with variable number of accounts
                 txn_entry = new TxnQueueEntry(tx_id, txn_type, multi_accounts);
+                txn_entry->ycsb_rw_flags = rw_flags;
             } else {
                 // Simulate some work
                 // Randomly select a transaction type and accounts
@@ -1594,20 +1609,32 @@ void SmallBank::create_smallbank_stored_procedures(pqxx::connection* conn) {
             // MultiUpdate: extended transaction that updates multiple accounts
             // Used for variable transaction length experiments
             txn.exec(R"SQL(
-            CREATE OR REPLACE FUNCTION sp_multi_update(ids INT[], val INT)
+            CREATE OR REPLACE FUNCTION sp_multi_update(ids INT[], rw_flags BOOLEAN[], val INT)
             RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
             LANGUAGE plpgsql AS $$
             DECLARE
+                idx INT;
                 target_id INT;
+                is_write BOOLEAN;
                 c_ctid TID;
                 c_bal INT;
             BEGIN
-                FOREACH target_id IN ARRAY ids
+                FOR idx IN 1..COALESCE(array_length(ids, 1), 0)
                 LOOP
-                    UPDATE checking c
-                    SET balance = c.balance + val
-                    WHERE c.id = target_id
-                    RETURNING c.ctid, c.balance INTO c_ctid, c_bal;
+                    target_id := ids[idx];
+                    is_write := COALESCE(rw_flags[idx], false);
+
+                    IF is_write THEN
+                        UPDATE checking c
+                        SET balance = c.balance + val
+                        WHERE c.id = target_id
+                        RETURNING c.ctid, c.balance INTO c_ctid, c_bal;
+                    ELSE
+                        SELECT c.ctid, c.balance
+                        INTO c_ctid, c_bal
+                        FROM checking c
+                        WHERE c.id = target_id;
+                    END IF;
                     
                     RETURN QUERY SELECT 'checking'::text, target_id, c_ctid, c_bal, txid_current();
                 END LOOP;

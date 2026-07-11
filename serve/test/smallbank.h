@@ -99,7 +99,7 @@ public:
             RW_FLAGS_ARR[3] = {false, true};
             RW_FLAGS_ARR[4] = {false, false};
             RW_FLAGS_ARR[5] = {true};
-            RW_FLAGS_ARR[6] = std::vector<bool>(Long_Txn_Length, true);
+            RW_FLAGS_ARR[6] = std::vector<bool>(Long_Txn_Length, false);
         }
 
     std::vector<std::vector<table_id_t>> TABLE_IDS_ARR;

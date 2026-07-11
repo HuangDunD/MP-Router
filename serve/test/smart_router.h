@@ -1207,6 +1207,10 @@ public:
                                 smallbank_->get_keys_by_txn_type(txn_type, account1, account2, keys);
                             }
                             rw = smallbank_->get_rw_by_txn_type(txn_type);
+                            if (txn_type == 6) {
+                                rw = txn_entry->ycsb_rw_flags.empty() ?
+                                    std::vector<bool>(keys.size(), false) : txn_entry->ycsb_rw_flags;
+                            }
                         } else if (Workload_Type == 1) { 
                             table_ids = ycsb_->get_table_ids_by_txn_type();
                             keys = txn_entry->ycsb_keys;
