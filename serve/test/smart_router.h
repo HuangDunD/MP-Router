@@ -2479,8 +2479,9 @@ public:
     void schedule_ready_txn(std::vector<TxnQueueEntry*> entries, int finish_call_id);
 
     PendingTxnSet* pending_txn_queue_;
-    // Page Fences for dependency management
-    std::unordered_map<uint64_t, std::shared_ptr<DependencyGroup>> page_fences;
+    // Cross-batch transfer-page fences for mode 11 dependency management.
+    std::mutex global_page_fences_mutex_;
+    std::unordered_map<uint64_t, std::shared_ptr<DependencyGroup>> global_page_fences_;
 
     // for chimer phase
     std::thread chimera_phase_switch_thread_;
