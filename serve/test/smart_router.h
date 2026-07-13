@@ -134,9 +134,22 @@ public:
             uint64_t batch_local_total_txn_count = 0;
             uint64_t batch_local_conflict_free_txn_count = 0;
             uint64_t batch_local_conflicted_txn_count = 0;
+            uint64_t conflicted_txn_page_diag_count = 0;
+            uint64_t conflicted_txn_involved_page_total = 0;
+            uint64_t conflicted_txn_dependency_page_total = 0;
+            uint64_t conflict_transfer_plan_count = 0;
+            uint64_t conflict_transfer_page_total = 0;
             uint64_t conflict_free_path_txn_count = 0;
             uint64_t conflicting_critical_path_txn_count = 0;
             uint64_t conflicting_non_critical_path_txn_count = 0;
+            uint64_t prior_txn_count = 0;
+            // Classify prior txns by their accesses to the pages transferred in the
+            // current scheduling step, not by whether the whole txn is read-only.
+            uint64_t prior_read_only_on_transfer_count = 0;
+            uint64_t prior_write_on_transfer_count = 0;
+            uint64_t prior_dag_push_batch_count = 0;
+            uint64_t prior_dag_push_txn_count = 0;
+            uint64_t prior_dag_push_max_batch_size = 0;
             std::array<uint64_t, 4> tpcc_conflict_pages_by_table = {0, 0, 0, 0};
             std::array<uint64_t, 4> tpcc_conflict_txns_by_table = {0, 0, 0, 0};
                 double merge_and_construct_ipq_ms = 0.0;
@@ -159,7 +172,12 @@ public:
         std::vector<std::vector<double>> pop_txn_from_queue_ms_per_thread;
             std::vector<std::vector<double>> pop_txn_empty_ms_per_thread;
             std::vector<std::vector<double>> pop_txn_dag_ms_per_thread;
+            std::vector<std::vector<double>> pop_txn_prior_read_ms_per_thread;
             std::vector<std::vector<double>> pop_txn_regular_ms_per_thread;
+            std::vector<std::vector<double>> pop_txn_empty_wait_ms_per_thread;
+            std::vector<std::vector<double>> pop_txn_dag_wait_ms_per_thread;
+            std::vector<std::vector<double>> pop_txn_prior_read_wait_ms_per_thread;
+            std::vector<std::vector<double>> pop_txn_regular_wait_ms_per_thread;
         std::vector<std::vector<double>> wait_next_batch_ms_per_thread;
         std::vector<std::vector<double>> mark_done_ms_per_thread;
         std::vector<std::vector<double>> log_debug_info_ms_per_thread;
@@ -167,7 +185,20 @@ public:
         std::vector<double> pop_txn_total_ms_per_node;
             std::vector<double> pop_txn_empty_total_ms_per_node;
             std::vector<double> pop_txn_dag_total_ms_per_node;
+            std::vector<double> pop_txn_prior_read_total_ms_per_node;
             std::vector<double> pop_txn_regular_total_ms_per_node;
+            std::vector<double> pop_txn_empty_wait_total_ms_per_node;
+            std::vector<double> pop_txn_dag_wait_total_ms_per_node;
+            std::vector<double> pop_txn_prior_read_wait_total_ms_per_node;
+            std::vector<double> pop_txn_regular_wait_total_ms_per_node;
+        std::vector<uint64_t> pop_txn_empty_batch_count_per_node;
+        std::vector<uint64_t> pop_txn_empty_txn_count_per_node;
+        std::vector<uint64_t> pop_txn_dag_batch_count_per_node;
+        std::vector<uint64_t> pop_txn_dag_txn_count_per_node;
+        std::vector<uint64_t> pop_txn_prior_read_batch_count_per_node;
+        std::vector<uint64_t> pop_txn_prior_read_txn_count_per_node;
+        std::vector<uint64_t> pop_txn_regular_batch_count_per_node;
+        std::vector<uint64_t> pop_txn_regular_txn_count_per_node;
         std::vector<double> wait_next_batch_total_ms_per_node;
         std::vector<double> sum_worker_thread_exec_time_ms_per_node;
         std::vector<double> sum_worker_thread_update_key_page_time_ms_per_node;
@@ -314,7 +345,12 @@ public:
         time_stats_.pop_txn_from_queue_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
         time_stats_.pop_txn_empty_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
         time_stats_.pop_txn_dag_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.pop_txn_prior_read_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
         time_stats_.pop_txn_regular_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.pop_txn_empty_wait_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.pop_txn_dag_wait_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.pop_txn_prior_read_wait_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
+        time_stats_.pop_txn_regular_wait_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
         time_stats_.wait_next_batch_ms_per_thread.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
         time_stats_.worker_thread_exec_time_ms.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
         time_stats_.worker_thread_update_key_page_time_ms.resize(ComputeNodeCount, std::vector<double>(db_con_worker_threads, 0.0));
@@ -324,7 +360,20 @@ public:
         time_stats_.pop_txn_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.pop_txn_empty_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.pop_txn_dag_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_prior_read_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.pop_txn_regular_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_empty_wait_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_dag_wait_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_prior_read_wait_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_regular_wait_total_ms_per_node.resize(ComputeNodeCount, 0.0);
+        time_stats_.pop_txn_empty_batch_count_per_node.resize(ComputeNodeCount, 0);
+        time_stats_.pop_txn_empty_txn_count_per_node.resize(ComputeNodeCount, 0);
+        time_stats_.pop_txn_dag_batch_count_per_node.resize(ComputeNodeCount, 0);
+        time_stats_.pop_txn_dag_txn_count_per_node.resize(ComputeNodeCount, 0);
+        time_stats_.pop_txn_prior_read_batch_count_per_node.resize(ComputeNodeCount, 0);
+        time_stats_.pop_txn_prior_read_txn_count_per_node.resize(ComputeNodeCount, 0);
+        time_stats_.pop_txn_regular_batch_count_per_node.resize(ComputeNodeCount, 0);
+        time_stats_.pop_txn_regular_txn_count_per_node.resize(ComputeNodeCount, 0);
         time_stats_.wait_next_batch_total_ms_per_node.resize(ComputeNodeCount, 0.0);
         time_stats_.sum_worker_thread_exec_time_ms_per_node.resize(ComputeNodeCount, 0.0); 
         time_stats_.sum_worker_thread_update_key_page_time_ms_per_node.resize(ComputeNodeCount, 0.0);
@@ -780,6 +829,7 @@ public:
         int batch_dense_id = -1; // batch内稠密ID, 用于避免调度热路径反复hash tx_id
         bool is_conflicted = false;
         int valid_page_count = 0; // 有效页面数量
+        int dependency_conflict_page_count = 0; // Pages with batch-local RW conflict, excluding read-read/private pages.
     };
 
     struct PreparedBatch {
@@ -796,6 +846,9 @@ public:
         std::vector<uint64_t> unique_conflict_pages;
         std::vector<uint64_t> unique_ownership_pages;
         std::vector<std::vector<SchedulingCandidateTxn*>> conflicted_txn_partitions;
+        uint64_t conflicted_txn_page_diag_count = 0;
+        uint64_t conflicted_txn_involved_page_total = 0;
+        uint64_t conflicted_txn_dependency_page_total = 0;
     };
 
     void compute_benefit_for_node(SchedulingCandidateTxn* sc, std::vector<int>& ownership_node_count, std::vector<double>& compute_node_workload_benefit,
@@ -1644,8 +1697,54 @@ public:
         time_stats_.pop_txn_dag_ms_per_thread[node_id][thread_id] += pop_dag_time_ms;
     }
 
+    void add_worker_thread_pop_prior_read_time(node_id_t node_id, int thread_id, double pop_prior_read_time_ms) {
+        time_stats_.pop_txn_prior_read_ms_per_thread[node_id][thread_id] += pop_prior_read_time_ms;
+    }
+
     void add_worker_thread_pop_regular_time(node_id_t node_id, int thread_id, double pop_regular_time_ms) {
         time_stats_.pop_txn_regular_ms_per_thread[node_id][thread_id] += pop_regular_time_ms;
+    }
+
+    void add_worker_thread_pop_batch_stats(node_id_t node_id, int ret_type, size_t txn_count) {
+        switch (ret_type) {
+            case 0:
+                time_stats_.pop_txn_empty_batch_count_per_node[node_id]++;
+                time_stats_.pop_txn_empty_txn_count_per_node[node_id] += txn_count;
+                break;
+            case 1:
+                time_stats_.pop_txn_dag_batch_count_per_node[node_id]++;
+                time_stats_.pop_txn_dag_txn_count_per_node[node_id] += txn_count;
+                break;
+            case 2:
+                time_stats_.pop_txn_regular_batch_count_per_node[node_id]++;
+                time_stats_.pop_txn_regular_txn_count_per_node[node_id] += txn_count;
+                break;
+            case 3:
+                time_stats_.pop_txn_prior_read_batch_count_per_node[node_id]++;
+                time_stats_.pop_txn_prior_read_txn_count_per_node[node_id] += txn_count;
+                break;
+            default:
+                break;
+        }
+    }
+
+    void add_worker_thread_pop_wait_time(node_id_t node_id, int thread_id, int ret_type, double wait_time_ms) {
+        switch (ret_type) {
+            case 0:
+                time_stats_.pop_txn_empty_wait_ms_per_thread[node_id][thread_id] += wait_time_ms;
+                break;
+            case 1:
+                time_stats_.pop_txn_dag_wait_ms_per_thread[node_id][thread_id] += wait_time_ms;
+                break;
+            case 2:
+                time_stats_.pop_txn_regular_wait_ms_per_thread[node_id][thread_id] += wait_time_ms;
+                break;
+            case 3:
+                time_stats_.pop_txn_prior_read_wait_ms_per_thread[node_id][thread_id] += wait_time_ms;
+                break;
+            default:
+                break;
+        }
     }
 
     void add_worker_thread_wait_next_batch_time(node_id_t node_id, int thread_id, double wait_time_ms) {
@@ -1716,9 +1815,34 @@ public:
                 time_stats_.pop_txn_dag_total_ms_per_node[i] += t;
             }
 
+            time_stats_.pop_txn_prior_read_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_prior_read_ms_per_thread[i]) {
+                time_stats_.pop_txn_prior_read_total_ms_per_node[i] += t;
+            }
+
             time_stats_.pop_txn_regular_total_ms_per_node[i] = 0.0;
             for (const auto& t : time_stats_.pop_txn_regular_ms_per_thread[i]) {
                 time_stats_.pop_txn_regular_total_ms_per_node[i] += t;
+            }
+
+            time_stats_.pop_txn_empty_wait_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_empty_wait_ms_per_thread[i]) {
+                time_stats_.pop_txn_empty_wait_total_ms_per_node[i] += t;
+            }
+
+            time_stats_.pop_txn_dag_wait_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_dag_wait_ms_per_thread[i]) {
+                time_stats_.pop_txn_dag_wait_total_ms_per_node[i] += t;
+            }
+
+            time_stats_.pop_txn_prior_read_wait_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_prior_read_wait_ms_per_thread[i]) {
+                time_stats_.pop_txn_prior_read_wait_total_ms_per_node[i] += t;
+            }
+
+            time_stats_.pop_txn_regular_wait_total_ms_per_node[i] = 0.0;
+            for (const auto& t : time_stats_.pop_txn_regular_wait_ms_per_thread[i]) {
+                time_stats_.pop_txn_regular_wait_total_ms_per_node[i] += t;
             }
 
             time_stats_.wait_next_batch_total_ms_per_node[i] = 0.0;

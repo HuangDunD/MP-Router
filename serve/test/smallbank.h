@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cassert>
+#include <atomic>
 #include <cstdint>
 #include <vector>
 #include <fstream>
@@ -120,7 +121,11 @@ public:
     }
 
     void set_zipfian_theta(double theta) {
-        zipfian_theta = theta;
+        zipfian_theta.store(theta, std::memory_order_relaxed);
+    }
+
+    double get_zipfian_theta() const {
+        return zipfian_theta.load(std::memory_order_relaxed);
     }
 
     void set_zipfian_generator(bool use_finite) {
@@ -174,6 +179,29 @@ public:
         }
     }
 
+    bool generate_affinity_account_id(itemkey_t anchor, itemkey_t &acc) {
+        if (anchor == 0 || anchor > static_cast<itemkey_t>(smallbank_account)) return false;
+
+        std::vector<std::pair<int, float>> friends;
+        if(dynamic_workload && change_friend)
+            friends = user_friend_graph_dynamic[anchor - 1];
+        else
+            friends = user_friend_graph[anchor - 1];
+        if (friends.empty()) return false;
+
+        double p = (double)rand() / RAND_MAX;
+        double cumulative_prob = 0.0;
+        for (const auto &[friend_id, prob] : friends) {
+            cumulative_prob += prob;
+            if (p <= cumulative_prob) {
+                acc = friend_id + 1;
+                return true;
+            }
+        }
+        acc = friends.back().first + 1;
+        return true;
+    }
+
     void generate_two_account_ids(itemkey_t &acc1, itemkey_t &acc2, ZipfGen* zipfian_gen, FiniteZipfGen* finite_zipfian_gen) {
         // 先生成第一个账号
         generate_account_id(acc1, zipfian_gen, finite_zipfian_gen);
@@ -181,26 +209,7 @@ public:
         // 生成一个随机小数，决定是否使用亲和性账号
         double r = (double)rand() / RAND_MAX;
         if (r < AffinityTxnRatio) {
-            // 使用亲和性账号
-            std::vector<std::pair<int, float>> friends;
-            if(dynamic_workload && change_friend)
-                friends = user_friend_graph_dynamic[acc1 - 1]; // acc1
-            else
-                friends = user_friend_graph[acc1 - 1]; // acc1
-            if (!friends.empty()) {
-                // 根据朋友的权重选择一个朋友账号
-                double p = (double)rand() / RAND_MAX;
-                double cumulative_prob = 0.0;
-                for (const auto &[friend_id, prob] : friends) {
-                    cumulative_prob += prob;
-                    if (p <= cumulative_prob) {
-                        acc2 = friend_id + 1; // friend_id 是从0开始的，账号从1开始
-                        return;
-                    }
-                }
-                // 如果没有选中任何朋友（理论上不应该发生），则随机选择一个
-                acc2 = friends.back().first + 1;
-            } else {
+            if (!generate_affinity_account_id(acc1, acc2)) {
                 // 如果没有朋友，则随机选择一个账号
                 acc2 = rand() % smallbank_account + 1;
             }
@@ -406,7 +415,7 @@ private:
     int access_pattern;
     double hotspot_fraction;
     double hotspot_access_prob;
-    double zipfian_theta;
+    std::atomic<double> zipfian_theta;
     bool use_finite_zipfian;
     std::vector<std::vector<std::pair<int, float>>> user_friend_graph; // 每个用户的朋友图, 模拟亲和性
     std::vector<std::vector<std::pair<int, float>>> user_friend_graph_dynamic; // 这个数据结构仅对于动态workload有用, 朋友关系进行改变的第二张图

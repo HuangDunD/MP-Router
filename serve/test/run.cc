@@ -38,6 +38,31 @@ std::vector<TxnQueue*> txn_queues; // one queue per compute node
 std::vector<std::atomic<int>> exec_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
 static std::atomic<bool> warmup_transition_started{false};
 
+static YashanConnInfo parse_yashan_conninfo(const std::string& conninfo) {
+    std::unordered_map<std::string, std::string> kv;
+    std::istringstream iss(conninfo);
+    std::string token;
+    while (iss >> token) {
+        auto pos = token.find('=');
+        if (pos == std::string::npos) {
+            if (kv.find("ip_port") == kv.end()) kv["ip_port"] = token;
+            continue;
+        }
+        kv[token.substr(0, pos)] = token.substr(pos + 1);
+    }
+
+    YashanConnInfo info;
+    if (kv.find("ip_port") != kv.end()) {
+        info.ip_port = kv["ip_port"];
+    } else if (kv.find("host") != kv.end()) {
+        info.ip_port = kv["host"];
+        if (kv.find("port") != kv.end()) info.ip_port += ":" + kv["port"];
+    }
+    info.user = kv.count("user") ? kv["user"] : "sys";
+    info.password = kv.count("password") ? kv["password"] : "";
+    return info;
+}
+
 static bool measurement_window_open() {
     return !time_based_run || !stop_benchmark.load(std::memory_order_relaxed);
 }
@@ -838,7 +863,8 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
         int call_id, ret;
-        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id, &ret);
+        double pop_wait_time = 0.0;
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id, &ret, &pop_wait_time);
         // if(WarmupEnd)
         //     logger_->info("Compute Node " + std::to_string(compute_node_id) + 
         //                 " Thread " + std::to_string(params->thread_id) + 
@@ -856,6 +882,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         // }
         if(ret == 0) smart_router->add_worker_thread_pop_empty_time(params->compute_node_id_connecter, params->thread_id, pop_time);
         else if (ret == 1) smart_router->add_worker_thread_pop_dag_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 3) smart_router->add_worker_thread_pop_prior_read_time(params->compute_node_id_connecter, params->thread_id, pop_time);
         else if (ret == 2) {
             if(pop_time > 100) {
                 logger_->info("High regular pop_time: " + std::to_string(pop_time) + " ms at Compute Node " + 
@@ -866,6 +893,10 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             }
             smart_router->add_worker_thread_pop_regular_time(params->compute_node_id_connecter, params->thread_id, pop_time);
         }
+        smart_router->add_worker_thread_pop_batch_stats(
+            params->compute_node_id_connecter, ret, txn_entries.size());
+        smart_router->add_worker_thread_pop_wait_time(
+            params->compute_node_id_connecter, params->thread_id, ret, pop_wait_time);
 
         smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
 
@@ -1981,10 +2012,36 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
     // for dynamic workload
     auto start_experiment_time = steady_clock::now(); // dynamic workload start time
     int current_phase = 0;
-    int phase1_end_time = 3 * 60;
-    int phase2_end_time = 8 * 60;
-    int phase3_end_time = 13 * 60;
-    int phase4_end_time = 18 * 60;
+    int phase1_end_time = 5 * 60;
+    int phase2_end_time = 10 * 60;
+    int phase3_end_time = 15 * 60;
+    int phase4_end_time = 20 * 60;
+    int phase5_end_time = 25 * 60;
+    RouterStatSnapshot dynamic_phase_snapshot;
+    bool dynamic_phase_snapshot_valid = false;
+    if (dynamic_workload && smart_router != nullptr) {
+        dynamic_phase_snapshot = take_router_snapshot(smart_router);
+        dynamic_phase_snapshot_valid = true;
+    }
+    auto print_dynamic_phase_state = [&](const std::string& phase_label) {
+        if (!dynamic_workload || smart_router == nullptr || !dynamic_phase_snapshot_valid) return;
+        RouterStatSnapshot phase_end_snapshot = take_router_snapshot(smart_router);
+        std::cout << "\n========== Dynamic Workload Phase End: "
+                  << phase_label << " ==========" << std::endl;
+        print_diff_snapshot(dynamic_phase_snapshot, phase_end_snapshot,
+                            "Dynamic Workload " + phase_label);
+        std::cout << "[Dynamic Workload Phase Queue State] ";
+        for (int i = 0; i < ComputeNodeCount; i++) {
+            std::cout << "Node " << i << " queue remain: "
+                      << txn_queues[i]->size() << ' ';
+        }
+        std::cout << "Txn pool size: " << txn_pool->size() << std::endl;
+        std::cout << "============================================================\n" << std::endl;
+        if (logger_) {
+            logger_->info("[Dynamic Workload] Phase ended: " + phase_label);
+        }
+        dynamic_phase_snapshot = phase_end_snapshot;
+    };
 
     // for dynamic workload end
     while (true) {
@@ -1996,36 +2053,53 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
             
             // Phase transitions
             if (current_phase == 0 && elapsed_seconds > phase1_end_time) {
-                // T=3m. Start recording stats.
-                std::cout << "\033[33m[Dynamic Workload] Warmup ended at 3m. Starting Stats Collection.\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Warmup ended at 3m. Starting Stats Collection.");
+                // T=5m. Start recording stats and trigger Metis partition.
+                print_dynamic_phase_state("phase 0 [0m,5m)");
+                std::cout << "\033[33m[Dynamic Workload] Warmup ended at 5m. Triggering Metis Partition.\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Warmup ended at 5m. Triggering Metis Partition.");
                 WarmupEnd = true; // Set warmup end
-                current_phase = 1;
-            }
-            else if (current_phase == 1 && elapsed_seconds > phase2_end_time) {
-                // T=8m. Metis Partition.
-                std::cout << "\033[33m[Dynamic Workload] Triggering Metis Partition at 8m...\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Triggering Metis Partition at 8m...");
                 if (smart_router) {
                     thread_pool->enqueue([smart_router]{
                         smart_router->get_metis_partitioner()->partition_internal_graph("dynamic_partition.csv", ComputeNodeCount);
                     });
                 }
+                current_phase = 1;
+            }
+            else if (current_phase == 1 && elapsed_seconds > phase2_end_time) {
+                // T=10m. Change affinity to 0.2.
+                print_dynamic_phase_state("phase 1 [5m,10m)");
+                std::cout << "\033[33m[Dynamic Workload] Changing AffinityTxnRatio to 0.2 at 10m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Changing AffinityTxnRatio to 0.2 at 10m...");
+                AffinityTxnRatio = 0.2;
+                txn_pool->clear();
                 current_phase = 2;
             }
             else if (current_phase == 2 && elapsed_seconds > phase3_end_time) {
-                // T=13m. Change Friend Graph. the Graph has been created in advance, this step only switch the graph used.
-                std::cout << "\033[33m[Dynamic Workload] Changing User Friend Graph at 13m...\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Changing User Friend Graph at 13m...");
+                // T=15m. Change friend graph and restore affinity to 0.8.
+                print_dynamic_phase_state("phase 2 [10m,15m)");
+                std::cout << "\033[33m[Dynamic Workload] Changing User Friend Graph at 15m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Changing User Friend Graph at 15m...");
                 change_friend = true;
+                AffinityTxnRatio = 0.8;
+                txn_pool->clear();
                 current_phase = 3;
             }
             else if (current_phase == 3 && elapsed_seconds > phase4_end_time) {
-                // T=18m. Stop.
-                std::cout << "\033[31m[Dynamic Workload] Stopping benchmark at 18m...\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Stopping benchmark at 18m...");
+                // T=20m. Change skewness to Zipfian theta=1.1.
+                print_dynamic_phase_state("phase 3 [15m,20m)");
+                std::cout << "\033[33m[Dynamic Workload] Changing access pattern to Zipfian (theta=1.1) at 20m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Changing access pattern to Zipfian (theta=1.1) at 20m...");
+                if (smallbank) smallbank->set_zipfian_theta(1.1);
+                txn_pool->clear();
+                current_phase = 4;
+            }
+            else if (current_phase == 4 && elapsed_seconds > phase5_end_time) {
+                // T=25m. Stop.
+                print_dynamic_phase_state("phase 4 [20m,25m)");
+                std::cout << "\033[31m[Dynamic Workload] Stopping benchmark at 25m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Stopping benchmark at 25m...");
                 stop_benchmark = true;
-                current_phase = 4; // Done
+                current_phase = 5; // Done
                 break; 
             }
         }
@@ -2160,13 +2234,22 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         timespec pop_start_time, pop_end_time;
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
-        int call_id;
-        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
+        int call_id, ret;
+        double pop_wait_time = 0.0;
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id, &ret, &pop_wait_time);
 
 
         clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
         double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
                           (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
+        if(ret == 0) smart_router->add_worker_thread_pop_empty_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 1) smart_router->add_worker_thread_pop_dag_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 3) smart_router->add_worker_thread_pop_prior_read_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 2) smart_router->add_worker_thread_pop_regular_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        smart_router->add_worker_thread_pop_batch_stats(
+            params->compute_node_id_connecter, ret, txn_entries.size());
+        smart_router->add_worker_thread_pop_wait_time(
+            params->compute_node_id_connecter, params->thread_id, ret, pop_wait_time);
         smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
 
         // 2. Handle Empty/Batch Finish
@@ -3318,12 +3401,24 @@ int main(int argc, char *argv[]) {
         std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
     } else if (DB_TYPE == 1) {
         std::cout << "Database Type: YashanDB" << std::endl;
-        // 崖山RAC
         YashanDBConnections.clear();
-        YashanDBConnections.push_back({"10.10.2.35:1688", "sys", "Rdjc#2025"});
-        YashanDBConnections.push_back({"10.10.2.36:1688", "sys", "Rdjc#2025"});
-        YashanDBConnections.push_back({"10.10.2.39:1688", "sys", "Rdjc#2025"});
-        YashanDBConnections.push_back({"10.10.2.40:1688", "sys", "Rdjc#2025"});
+        if (!cli_db_connections.empty()) {
+            std::cout << "Using YashanDB connection strings provided via command line:" << std::endl;
+            for (const auto& conninfo : cli_db_connections) {
+                auto parsed = parse_yashan_conninfo(conninfo);
+                if (parsed.ip_port.empty()) {
+                    std::cerr << "Error: invalid YashanDB --db-connection: " << conninfo << std::endl;
+                    return -1;
+                }
+                YashanDBConnections.push_back(parsed);
+            }
+        } else {
+            // 崖山RAC
+            YashanDBConnections.push_back({"10.10.2.35:1688", "sys", "Rdjc#2025"});
+            YashanDBConnections.push_back({"10.10.2.36:1688", "sys", "Rdjc#2025"});
+            YashanDBConnections.push_back({"10.10.2.39:1688", "sys", "Rdjc#2025"});
+            YashanDBConnections.push_back({"10.10.2.40:1688", "sys", "Rdjc#2025"});
+        }
         ComputeNodeCount = YashanDBConnections.size();
         std::cout << "YashanDB connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
     } else if (DB_TYPE == 2) {
@@ -3853,6 +3948,11 @@ int main(int argc, char *argv[]) {
             std::this_thread::sleep_for(std::chrono::seconds(warmup_seconds));
         }
         finish_warmup_now(logger_, "time-based warmup");
+    } else if (dynamic_workload) {
+        std::cout << "Dynamic workload run: waiting for dynamic warmup phase to end." << std::endl;
+        while(!WarmupEnd && !stop_benchmark.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     } else {
         while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -3895,6 +3995,20 @@ int main(int argc, char *argv[]) {
         std::cout << "Time-based run duration ended. Stopping transaction generation and worker queues." << std::endl;
         if (logger_) {
             logger_->info("Time-based run duration ended. Stopping transaction generation and worker queues.");
+        }
+    } else if (dynamic_workload) {
+        std::cout << "Dynamic workload measurement phase started; waiting for dynamic stop signal." << std::endl;
+        if (logger_) {
+            logger_->info("Dynamic workload measurement phase started; waiting for dynamic stop signal.");
+        }
+        while(!stop_benchmark.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        txn_pool->stop_pool();
+        force_stop_txn_queues();
+        std::cout << "Dynamic workload duration ended. Stopping transaction generation and worker queues." << std::endl;
+        if (logger_) {
+            logger_->info("Dynamic workload duration ended. Stopping transaction generation and worker queues.");
         }
     }
 
