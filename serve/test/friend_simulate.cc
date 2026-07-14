@@ -8,6 +8,7 @@
 #include <numeric>
 #include <iostream>
 #include <cassert>
+#include <cmath>
 #include <fstream>
 
 // 生成模拟社交网络图的函数
@@ -187,10 +188,12 @@ void change_friends_dynamic(std::vector<std::vector<std::pair<int, float>>> &ori
             const auto& old_friends = orig_graph[u];
             int total_friends = old_friends.size();
             
-            // Determine how many friends to change for this user
-            // Using binomial distribution to simulate "randomly change X friends" based on probability
-            std::binomial_distribution<int> change_dist(total_friends, change_ratio);
-            int num_change = change_dist(gen);
+            // Keep the changed degree stable for every user. Which old friends
+            // are retained and which new users are selected remain random.
+            int num_change = std::clamp(
+                static_cast<int>(std::lround(total_friends * change_ratio)),
+                0,
+                total_friends);
             int num_keep = total_friends - num_change;
             
             std::vector<std::pair<int, float>> next_friends;

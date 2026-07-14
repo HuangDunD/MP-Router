@@ -2085,11 +2085,11 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
                 current_phase = 3;
             }
             else if (current_phase == 3 && elapsed_seconds > phase4_end_time) {
-                // T=20m. Change skewness to Zipfian theta=1.1.
+                // T=20m. Change skewness to Zipfian theta=0.95.
                 print_dynamic_phase_state("phase 3 [15m,20m)");
-                std::cout << "\033[33m[Dynamic Workload] Changing access pattern to Zipfian (theta=1.1) at 20m...\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Changing access pattern to Zipfian (theta=1.1) at 20m...");
-                if (smallbank) smallbank->set_zipfian_theta(1.1);
+                std::cout << "\033[33m[Dynamic Workload] Changing access pattern to Zipfian (theta=0.95) at 20m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Changing access pattern to Zipfian (theta=0.95) at 20m...");
+                if (smallbank) smallbank->set_zipfian_theta(0.95);
                 txn_pool->clear();
                 current_phase = 4;
             }
@@ -2208,14 +2208,41 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
     
     if (USE_SCALAR_PARAM) {
         for(int i = 0; i < 6; i++) {
-            yacAllocHandle(YAC_HANDLE_STMT, conn, &stmts_scalar[i]);
-            if((YacResult)yacPrepare(stmts_scalar[i], (YacChar*)sp_sqls_scalar[i], YAC_NULL_TERM_STR) != YAC_SUCCESS) {
-                std::cerr << "Pre-Prepare failed for txn type " << i << " at YashanDB." << std::endl;
-                YacInt32 errCode; 
+            constexpr int kPrepareRetryLimit = 5;
+            bool prepare_success = false;
+            for (int attempt = 1; attempt <= kPrepareRetryLimit; attempt++) {
+                if (stmts_scalar[i]) {
+                    yacFreeHandle(YAC_HANDLE_STMT, stmts_scalar[i]);
+                    stmts_scalar[i] = NULL;
+                }
+                yacAllocHandle(YAC_HANDLE_STMT, conn, &stmts_scalar[i]);
+                if((YacResult)yacPrepare(stmts_scalar[i], (YacChar*)sp_sqls_scalar[i], YAC_NULL_TERM_STR) == YAC_SUCCESS) {
+                    prepare_success = true;
+                    break;
+                }
+
+                YacInt32 errCode;
                 char msg[1024];
                 YacTextPos pos;
                 yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
-                std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+                std::string error_msg = "Pre-Prepare failed for txn type " + std::to_string(i) +
+                    " at YashanDB node=" + std::to_string(compute_node_id) +
+                    " thread=" + std::to_string(params->thread_id) +
+                    " ip=" + info.ip_port +
+                    " attempt=" + std::to_string(attempt) + "/" + std::to_string(kPrepareRetryLimit) +
+                    ". Error Code: " + std::to_string(errCode) + ", Message: " + std::string(msg);
+                std::cerr << error_msg << std::endl;
+                if (logger_) logger_->warning(error_msg);
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+
+            if (!prepare_success) {
+                std::string fatal_msg = "Failed to prepare YashanDB scalar statement after retries; aborting run. txn type " +
+                    std::to_string(i) + ", node=" + std::to_string(compute_node_id) +
+                    ", thread=" + std::to_string(params->thread_id) + ", ip=" + info.ip_port;
+                std::cerr << fatal_msg << std::endl;
+                if (logger_) logger_->warning(fatal_msg);
+                exit(-1);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }

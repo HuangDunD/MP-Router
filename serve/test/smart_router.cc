@@ -1,6 +1,8 @@
 #include "smart_router.h"
 #include "indexed_priority_queue.h"
 
+#include <numeric>
+
 std::atomic<int> g_chimera_phase{0};
 std::atomic<uint64_t> g_chimera_phase1_exec_cnt{0};
 std::atomic<uint64_t> g_chimera_phase2_exec_cnt{0};
@@ -282,7 +284,8 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                 // benefit 计算：满足metis分区结果的页面比例，这里是hash分区结果
                 benefit1 = static_cast<double>(key_hash_cnt[i]) / page_to_node_map.size();
                 // benefit 计算: 负载均衡，当前节点路由的事务越少，benefit越高
-                benefit3 = workload_balance_penalty_weights_[i] + remain_queue_balance_penalty_weights_[i];
+                benefit3 = workload_balance_penalty_weights_[i].load(std::memory_order_relaxed) +
+                           remain_queue_balance_penalty_weights_[i].load(std::memory_order_relaxed);
                 // 综合benefit
                 double total_benefit = benefit1 + benefit3; 
                 node_benefit_map[i] = total_benefit;
@@ -437,11 +440,13 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                     // 随机选择出现次数最多的节点
                     node_id_t min_txn_node = -1;
                     // 选择负载最低的节点进行路由, 找到workload_balance_penalty_weights_ 中最大的那个
-                    size_t max_txn_workload_penalty_weight = 0;
+                    double max_txn_workload_penalty_weight =
+                        -std::numeric_limits<double>::infinity();
                     for (int i=0; i<owner_candidates.size(); i++) {
                         auto node = owner_candidates[i];
-                        if (workload_balance_penalty_weights_[node] > max_txn_workload_penalty_weight) {
-                            max_txn_workload_penalty_weight = workload_balance_penalty_weights_[node];
+                        double node_weight = workload_balance_penalty_weights_[node].load(std::memory_order_relaxed);
+                        if (node_weight > max_txn_workload_penalty_weight) {
+                            max_txn_workload_penalty_weight = node_weight;
                             min_txn_node = node;
                         }
                     }
@@ -474,11 +479,13 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                         // candidates中没有metis_decision_node, 那就根据负载选择一个节点
                         node_id_t min_txn_node = -1;
                         // 选择负载最低的节点进行路由, 找到workload_balance_penalty_weights_ 中最大的那个
-                        size_t max_txn_workload_penalty_weight = 0;
+                        double max_txn_workload_penalty_weight =
+                            -std::numeric_limits<double>::infinity();
                         for (int i=0; i<owner_candidates.size(); i++) {
                             auto node = owner_candidates[i];
-                            if (workload_balance_penalty_weights_[node] > max_txn_workload_penalty_weight) {
-                                max_txn_workload_penalty_weight = workload_balance_penalty_weights_[node];
+                            double node_weight = workload_balance_penalty_weights_[node].load(std::memory_order_relaxed);
+                            if (node_weight > max_txn_workload_penalty_weight) {
+                                max_txn_workload_penalty_weight = node_weight;
                                 min_txn_node = node;
                             }
                         }
@@ -541,11 +548,13 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                     // 找到routed_txn_cnt_per_node中最小的节点
                     node_id_t min_txn_node = -1;
                     // 选择负载最低的节点进行路由, 找到workload_balance_penalty_weights_ 中最大的那个
-                    size_t max_txn_workload_penalty_weight = 0;
+                    double max_txn_workload_penalty_weight =
+                        -std::numeric_limits<double>::infinity();
                     for (int i=0; i<owner_candidates.size(); i++) {
                         auto node = owner_candidates[i];
-                        if (workload_balance_penalty_weights_[node] > max_txn_workload_penalty_weight) {
-                            max_txn_workload_penalty_weight = workload_balance_penalty_weights_[node];
+                        double node_weight = workload_balance_penalty_weights_[node].load(std::memory_order_relaxed);
+                        if (node_weight > max_txn_workload_penalty_weight) {
+                            max_txn_workload_penalty_weight = node_weight;
                             min_txn_node = node;
                         }
                     }
@@ -617,7 +626,8 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                 benefit2 = metis_benefit[i];
                 // benefit 计算： 负载均衡, 当前节点路由的事务越少，benefit越高
                 // benefit3 = 2 * workload_balance_penalty_weights_[i];
-                benefit3 = workload_balance_penalty_weights_[i] + remain_queue_balance_penalty_weights_[i];
+                benefit3 = workload_balance_penalty_weights_[i].load(std::memory_order_relaxed) +
+                           remain_queue_balance_penalty_weights_[i].load(std::memory_order_relaxed);
                 double total_benefit = 0.0;
                 if(SYSTEM_MODE == 23) {
                     // 考虑Metis 分区和Load Balance
@@ -629,7 +639,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                 }
                 else if(SYSTEM_MODE == 25) {
                     // 仅考虑Load Balance
-                    total_benefit = remain_queue_balance_penalty_weights_[i];
+                    total_benefit = remain_queue_balance_penalty_weights_[i].load(std::memory_order_relaxed);
                 }
                 else if (SYSTEM_MODE == 13){ 
                     // 考虑Ownership, Metis 分区和Load Balance
@@ -1759,7 +1769,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
     std::vector<std::atomic<int>> schedule_txn_cnt_per_node_this_batch(ComputeNodeCount);
     futs.clear();
     futs.reserve(thread_count);
-    std::vector<double> compute_node_workload_benefit = this->workload_balance_penalty_weights_; // 负载均衡因子
+    std::vector<double> compute_node_workload_benefit = this->load_workload_balance_penalty_weights(); // 负载均衡因子
     
     for (size_t t = 0; t < thread_count; ++t) {
         size_t start = t * chunk;
@@ -2725,8 +2735,8 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
     }
 
     // --- Phase 2: 处理跨区分区的事务 ---
-    std::vector<double> current_workload_weights = this->workload_balance_penalty_weights_;
-    std::vector<double> current_queue_weights = this->remain_queue_balance_penalty_weights_;
+    std::vector<double> current_workload_weights = this->load_workload_balance_penalty_weights();
+    std::vector<double> current_queue_weights = this->load_remain_queue_balance_penalty_weights();
 
     // --- 依据 majority routing 和负载均衡 处理跨区事务 ---
     for (auto& pair : cross_partition_txns) {
@@ -3328,17 +3338,23 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
         expected_page_transfer_count_per_node[i].store(0, std::memory_order_relaxed);
     }
     futs.clear();
+    // Mode 11 can finish this phase in less than the background refresh period.
+    // Refresh synchronously at the phase boundary so every worker starts from a
+    // current, consistently computed load/queue snapshot.
+    std::vector<double> total_load_balance_penalty_weights =
+        this->compute_load_balance_penalty_weights();
+    std::vector<double> compute_node_workload_benefit =
+        this->load_workload_balance_penalty_weights();
     size_t conflict_free_thread_count = std::min<size_t>(std::min<size_t>(worker_threads_, 64ul), n);
     if (conflict_free_thread_count == 0) conflict_free_thread_count = 1;
     size_t conflict_free_chunk = (n + conflict_free_thread_count - 1) / conflict_free_thread_count;
     futs.reserve(conflict_free_thread_count);
     std::vector<double> conflict_free_worker_wall_ms(conflict_free_thread_count, 0.0);
-    std::vector<double> compute_node_workload_benefit = this->workload_balance_penalty_weights_; // 负载均衡因子
-    std::vector<double> remain_queue_balance_penalty_weights = this->remain_queue_balance_penalty_weights_; // 剩余队列负载均衡因子
-    std::vector<double>  total_load_balance_penalty_weights(ComputeNodeCount);
-    for(int i=0; i<ComputeNodeCount; i++) {
-        total_load_balance_penalty_weights[i] = compute_node_workload_benefit[i] + remain_queue_balance_penalty_weights[i];
-    }
+    // Workers publish scan progress in small blocks. The midpoint is only a
+    // heuristic trigger, so conflicting and conflict-free entries count alike.
+    std::atomic<size_t> batch_entries_visited{0};
+    std::atomic<bool> midpoint_refresh_done{false};
+    const size_t midpoint_refresh_target = (n + 1) / 2;
     
     for (size_t t = 0; t < conflict_free_thread_count; ++t) {
         size_t start = t * conflict_free_chunk;
@@ -3347,28 +3363,52 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                 &conflicted_txns, &page_ownership_to_node_map, &candidate_txn_cnt, &ownership_ok_txn_cnt_per_node, &page_to_txn_range_map,
                 &unconflict_and_ownership_ok_txn_cnt, &unconflict_and_ownership_cross_txn_cnt, &unconflict_and_shared_txn_cnt, 
                 &schedule_txn_cnt_per_node_this_batch, &expected_page_transfer_count_per_node, &candidates,
-                &conflict_free_worker_wall_ms]() {
+                &conflict_free_worker_wall_ms, &batch_entries_visited, &midpoint_refresh_done,
+                midpoint_refresh_target]() {
             struct timespec worker_start_time, worker_end_time;
             clock_gettime(CLOCK_MONOTONIC, &worker_start_time);
             
-            // Local copy of weights to update periodically
+            // Local immutable snapshot between the two explicit refresh points.
             std::vector<double> current_weights = total_load_balance_penalty_weights;
-            
+            constexpr size_t kProgressPublishInterval = 64;
+            size_t local_unpublished_progress = 0;
+            bool loaded_midpoint_weights = false;
+
+            auto publish_progress = [&]() {
+                size_t published = local_unpublished_progress;
+                if (published == 0) return;
+                local_unpublished_progress = 0;
+                size_t previous = batch_entries_visited.fetch_add(
+                    published, std::memory_order_relaxed);
+                size_t current = previous + published;
+
+                if (midpoint_refresh_target > 0 &&
+                    previous < midpoint_refresh_target && current >= midpoint_refresh_target) {
+                    current_weights = this->compute_load_balance_penalty_weights();
+                    midpoint_refresh_done.store(true, std::memory_order_release);
+                    loaded_midpoint_weights = true;
+                } else if (!loaded_midpoint_weights &&
+                           midpoint_refresh_done.load(std::memory_order_acquire)) {
+                    current_weights = this->load_total_balance_penalty_weights();
+                    loaded_midpoint_weights = true;
+                }
+            };
+
+            auto record_progress = [&]() {
+                ++local_unpublished_progress;
+                if (local_unpublished_progress == kProgressPublishInterval) {
+                    publish_progress();
+                }
+            };
+
             std::vector<std::list<TxnQueueEntry*>> node_routed_txns(ComputeNodeCount);
             for (size_t idx = start; idx < end; ++idx) {
-                // Periodically update weights based on current batch progress
-                if ((idx - start) % 500 == 0) {
-                    std::vector<double> compute_node_workload_benefit = this->workload_balance_penalty_weights_;
-                    std::vector<double> remain_queue_balance_penalty_weights = this->remain_queue_balance_penalty_weights_;
-                    for(int node_id=0; node_id<ComputeNodeCount; node_id++) {
-                        current_weights[node_id] =
-                            compute_node_workload_benefit[node_id] + remain_queue_balance_penalty_weights[node_id];
-                    }
-                }
-
                 // ! Phase A: Only process Non-Conflicting transactions
                 SchedulingCandidateTxn* sc = &candidates[idx];
-                if (sc->is_conflicted) continue;
+                // record_progress();
+                if (sc->is_conflicted) {
+                    continue;
+                }
 
                 // 填充 page_to_ownership_node_vec
                 if(sc->ownership_node_count.size() != ComputeNodeCount) sc->ownership_node_count.assign(ComputeNodeCount, 0);
@@ -3388,7 +3428,8 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                     if((ownership_ok.node_mask & (ownership_ok.node_mask - 1)) != 0) {
                         // 多个节点满足ownership entirely，选择负载最轻的节点
                         node_id_t best_node = -1;
-                        int max_compute_node_workload_benefit = -1;
+                        double max_compute_node_workload_benefit =
+                            -std::numeric_limits<double>::infinity();
                         for(int node_id = 0; node_id < ComputeNodeCount; ++node_id) {
                             if ((ownership_ok.node_mask & (1ull << node_id)) == 0) continue;
                             if(current_weights[node_id] > max_compute_node_workload_benefit) {
@@ -3485,6 +3526,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                     }
                 }
             } // End of Non-Conflict Loop
+            publish_progress();
 
             // 将剩余的node_routed_txns批量推送到txn_queues_
             struct timespec push_begin_time, push_end_time;
@@ -5292,171 +5334,99 @@ static double smoothstep(double t) {
     return t * t * (3.0 - 2.0 * t);
 }
 
+static std::vector<double> calculate_balance_penalty_weights(const std::vector<int>& loads) {
+    const double EPS = 0.10;
+    const double THR = 0.30;
+    const double small_m = 0.02;
+    const double large_m = 0.30;
+    const double base = 0.5;
+
+    std::vector<double> penalty_weights(loads.size(), base);
+    long long total = std::accumulate(loads.begin(), loads.end(), 0LL);
+    double avg = loads.empty() ? 0.0 : static_cast<double>(total) / loads.size();
+    if (avg <= 0.0) return penalty_weights;
+
+    for (size_t i = 0; i < loads.size(); ++i) {
+        double r = (static_cast<double>(loads[i]) - avg) / avg;
+        double absr = std::abs(r);
+        double mag;
+        if (absr <= EPS) {
+            mag = (absr / EPS) * small_m;
+        } else if (absr >= THR) {
+            mag = large_m;
+        } else {
+            double t = (absr - EPS) / (THR - EPS);
+            mag = small_m + smoothstep(t) * (large_m - small_m);
+        }
+        double direction = r >= 0.0 ? -1.0 : 1.0;
+        penalty_weights[i] = std::clamp(base + direction * mag, 0.0, 1.0);
+    }
+    return penalty_weights;
+}
+
 /*
  * 说明：
  *  - ComputeNodeCount: 节点数（类成员或全局）
  *  - routed_txn_cnt_per_node: 各节点已路由事务计数（类成员）
  */
 std::vector<double> SmartRouter::compute_load_balance_penalty_weights() {
-    const double EPS = 0.10;     // 小变动阈值 10%
-    const double THR = 0.30;     // 明显区分阈值 30%
-    const double small_m = 0.02; // 在 <=EPS 时的最大微小幅度（可调）
-    const double large_m = 0.30; // 在 >=THR 时的最大幅度（可调）
-    const double base = 0.5;     // 中心值
+    std::lock_guard<std::mutex> lock(load_balance_compute_mutex_);
 
-    std::vector<double> penalty_weights(ComputeNodeCount, base);
-    std::vector<int> compute_vector(ComputeNodeCount, 0);
-
-    // 复制计数
-    long long total = 0;
-    // for(int i=0; i<ComputeNodeCount; i++) {
-    //     compute_vector[i] = this->txn_queues_[i]->size();
-    //     total += compute_vector[i];
-    // }
-    // for (int i = 0; i < ComputeNodeCount; ++i) {
-    //     compute_vector[i] = this->routed_txn_cnt_per_node[i];
-    //     total += compute_vector[i];
-    // }
-    compute_vector = load_tracker_.get_loads(); // 使用滑动窗口负载
+    std::vector<int> workload = load_tracker_.get_loads();
+    std::vector<int> remain_queue(ComputeNodeCount, 0);
     for (int i = 0; i < ComputeNodeCount; ++i) {
-        total += compute_vector[i];
-    }
-    // // 在添加上当前队列的大小
-    // for(int i=0; i<ComputeNodeCount; i++) {
-    //     int queue_size = this->txn_queues_[i]->size();
-    //     compute_vector[i] += queue_size;
-    //     total += queue_size;
-    // }
-
-    double avg = (ComputeNodeCount > 0) ? static_cast<double>(total) / ComputeNodeCount : 0.0;
-    if (avg <= 0.0) {
-        // 避免除0：都返回base
-        std::fill(penalty_weights.begin(), penalty_weights.end(), base);
-        workload_balance_penalty_weights_ = penalty_weights;
-        return penalty_weights;
+        remain_queue[i] = txn_queues_[i]->size();
     }
 
+    std::vector<double> workload_weights = calculate_balance_penalty_weights(workload);
+    std::vector<double> queue_weights = calculate_balance_penalty_weights(remain_queue);
+    std::vector<double> total_weights(ComputeNodeCount, 0.0);
     for (int i = 0; i < ComputeNodeCount; ++i) {
-        double r = (static_cast<double>(compute_vector[i]) - avg) / avg; // 相对差
-        double sgn = (r >= 0.0) ? -1.0 : +1.0;
-        double absr = std::abs(r);
-
-        double mag = 0.0;
-        if (absr <= EPS) {
-            // 线性微小增长到 small_m
-            mag = (absr / EPS) * small_m;
-        } else if (absr >= THR) {
-            // 超过 THR，直接最大幅度
-            mag = large_m;
-        } else {
-            // 在 (EPS, THR) 之间做平滑过渡
-            double t = (absr - EPS) / (THR - EPS); // 0..1
-            double s = smoothstep(t);
-            mag = small_m + s * (large_m - small_m);
-        }
-
-        double p = base + sgn * mag;
-        // 限幅到 0..1（一般可选地限制到 [0.2,0.8]）
-        p = std::clamp(p, 0.0, 1.0);
-        penalty_weights[i] = p;
+        workload_balance_penalty_weights_[i].store(workload_weights[i], std::memory_order_relaxed);
+        remain_queue_balance_penalty_weights_[i].store(queue_weights[i], std::memory_order_relaxed);
+        total_weights[i] = workload_weights[i] + queue_weights[i];
     }
 
-    // 记录到成员变量（如果需要）
-    workload_balance_penalty_weights_ = penalty_weights;
+    if (LOG_LOAD_BALANCE) {
+        logger->info("Compute node load balance penalty: " + [&]() {
+            std::string s;
+            for (int i = 0; i < ComputeNodeCount; ++i) {
+                s += "Node " + std::to_string(i) +
+                     " workload:" + std::to_string(workload[i]) +
+                     " queue:" + std::to_string(remain_queue[i]) +
+                     " workload penalty:" + std::to_string(workload_weights[i]) +
+                     " queue penalty:" + std::to_string(queue_weights[i]) + ", ";
+            }
+            return s;
+        }());
+    }
 
-    // 可选：打印/记录用于调试
-    if(LOG_LOAD_BALANCE)
-    logger->info("Compute node workload penalty: " + [&]() {
-        std::string s;
-        for (size_t i = 0; i < penalty_weights.size(); ++i) {
-            s += "Node " + std::to_string(i) + " workload:" + std::to_string(compute_vector[i]) + 
-                 " Penalty:" + std::to_string(penalty_weights[i]) + ", ";
-        }
-        return s;
-    }());
-
-    return penalty_weights;
+    return total_weights;
 }
 
-std::vector<double> SmartRouter::compute_remain_queue_balance_penalty_weights() {
-    const double EPS = 0.10;     // 小变动阈值 10%
-    const double THR = 0.30;     // 明显区分阈值 30%
-    const double small_m = 0.02; // 在 <=EPS 时的最大微小幅度（可调）
-    const double large_m = 0.30; // 在 >=THR 时的最大幅度（可调）
-    const double base = 0.5;     // 中心值
-
-    std::vector<double> penalty_weights(ComputeNodeCount, base);
-    std::vector<int> compute_vector(ComputeNodeCount, 0);
-
-    // 复制计数
-    long long total = 0;
-    // for(int i=0; i<ComputeNodeCount; i++) {
-    //     compute_vector[i] = this->txn_queues_[i]->size();
-    //     total += compute_vector[i];
-    // }
-    // for (int i = 0; i < ComputeNodeCount; ++i) {
-    //     compute_vector[i] = this->routed_txn_cnt_per_node[i];
-    //     total += compute_vector[i];
-    // }
-    // compute_vector = load_tracker_.get_loads(); // 使用滑动窗口负载
-    // for (int i = 0; i < ComputeNodeCount; ++i) {
-    //     total += compute_vector[i];
-    // }
-    // // 在添加上当前队列的大小
-    for(int i=0; i<ComputeNodeCount; i++) {
-        int queue_size = this->txn_queues_[i]->size();
-        compute_vector[i] += queue_size;
-        total += queue_size;
-    }
-
-    double avg = (ComputeNodeCount > 0) ? static_cast<double>(total) / ComputeNodeCount : 0.0;
-    if (avg <= 0.0) {
-        // 避免除0：都返回base
-        std::fill(penalty_weights.begin(), penalty_weights.end(), base);
-        remain_queue_balance_penalty_weights_ = penalty_weights;
-        return penalty_weights;
-    }
-
+std::vector<double> SmartRouter::load_workload_balance_penalty_weights() const {
+    std::vector<double> weights(ComputeNodeCount, 0.0);
     for (int i = 0; i < ComputeNodeCount; ++i) {
-        double r = (static_cast<double>(compute_vector[i]) - avg) / avg; // 相对差
-        double sgn = (r >= 0.0) ? -1.0 : +1.0;
-        double absr = std::abs(r);
-
-        double mag = 0.0;
-        if (absr <= EPS) {
-            // 线性微小增长到 small_m
-            mag = (absr / EPS) * small_m;
-        } else if (absr >= THR) {
-            // 超过 THR，直接最大幅度
-            mag = large_m;
-        } else {
-            // 在 (EPS, THR) 之间做平滑过渡
-            double t = (absr - EPS) / (THR - EPS); // 0..1
-            double s = smoothstep(t);
-            mag = small_m + s * (large_m - small_m);
-        }
-
-        double p = base + sgn * mag;
-        // 限幅到 0..1（一般可选地限制到 [0.2,0.8]）
-        p = std::clamp(p, 0.0, 1.0);
-        penalty_weights[i] = p;
+        weights[i] = workload_balance_penalty_weights_[i].load(std::memory_order_relaxed);
     }
+    return weights;
+}
 
-    // 记录到成员变量（如果需要）
-    remain_queue_balance_penalty_weights_ = penalty_weights;
+std::vector<double> SmartRouter::load_remain_queue_balance_penalty_weights() const {
+    std::vector<double> weights(ComputeNodeCount, 0.0);
+    for (int i = 0; i < ComputeNodeCount; ++i) {
+        weights[i] = remain_queue_balance_penalty_weights_[i].load(std::memory_order_relaxed);
+    }
+    return weights;
+}
 
-    // 可选：打印/记录用于调试
-    if(LOG_LOAD_BALANCE)
-    logger->info("Compute node remain queue penalty: " + [&]() {
-        std::string s;
-        for (size_t i = 0; i < penalty_weights.size(); ++i) {
-            s += "Node " + std::to_string(i) + " workload:" + std::to_string(compute_vector[i]) + 
-                 " Penalty:" + std::to_string(penalty_weights[i]) + ", ";
-        }
-        return s;
-    }());
-
-    return penalty_weights;
+std::vector<double> SmartRouter::load_total_balance_penalty_weights() const {
+    std::vector<double> weights(ComputeNodeCount, 0.0);
+    for (int i = 0; i < ComputeNodeCount; ++i) {
+        weights[i] = workload_balance_penalty_weights_[i].load(std::memory_order_relaxed) +
+                     remain_queue_balance_penalty_weights_[i].load(std::memory_order_relaxed);
+    }
+    return weights;
 }
 
 void SmartRouter::run_chimera_phase_switch() {

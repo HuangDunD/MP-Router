@@ -322,14 +322,16 @@ public:
           cleanup_threadpool(1, *logger),
           routed_txn_cnt_per_node(MaxComputeNodeCount), 
           batch_finished_flags(MaxComputeNodeCount, 0),
-          workload_balance_penalty_weights_(MaxComputeNodeCount, 0),
-          remain_queue_balance_penalty_weights_(MaxComputeNodeCount, 0),
           load_tracker_(ComputeNodeCount),
           pending_txn_queue_(pending_txn_queue_),
           smallbank_(smallbank),
           ycsb_(ycsb),
           tpcc_(tpcc)
     {
+        for (int i = 0; i < MaxComputeNodeCount; ++i) {
+            workload_balance_penalty_weights_[i].store(0.0, std::memory_order_relaxed);
+            remain_queue_balance_penalty_weights_[i].store(0.0, std::memory_order_relaxed);
+        }
         metis_->set_thread_pool(&threadpool);
         metis_->init_node_nums(cfg.partition_nums);
         if (SYSTEM_MODE == 4) {
@@ -443,7 +445,6 @@ public:
             pthread_setname_np(pthread_self(), thread_name.c_str());
             while(true){
                 this->compute_load_balance_penalty_weights();
-                this->compute_remain_queue_balance_penalty_weights();
                 std::this_thread::sleep_for(std::chrono::milliseconds(10)); // 每10ms计算一次负载均衡惩罚权重
             }
         });
@@ -1903,7 +1904,9 @@ private:
     void update_sc_ownership_count_fast(SchedulingCandidateTxn* sc, int page_idx, const OwnershipSnapshot& ownership);
 
     std::vector<double> compute_load_balance_penalty_weights();
-    std::vector<double> compute_remain_queue_balance_penalty_weights();
+    std::vector<double> load_workload_balance_penalty_weights() const;
+    std::vector<double> load_remain_queue_balance_penalty_weights() const;
+    std::vector<double> load_total_balance_penalty_weights() const;
 
     std::string get_txn_queue_now_status(){
         std::string res; 
@@ -2424,8 +2427,9 @@ private:
     SlidingWindowLoadTracker load_tracker_; // 维护了上一段时间窗口内每个节点的负载情况
 
     // 负载均衡权重
-    std::vector<double> workload_balance_penalty_weights_; // 权重越高, 说明负载越低; 负载越低的节点被选中的概率越大
-    std::vector<double> remain_queue_balance_penalty_weights_; // 权重越高, 说明剩余队列越短; 剩余队列越短的节点被选中的概率越大;
+    std::array<std::atomic<double>, MaxComputeNodeCount> workload_balance_penalty_weights_; // 权重越高, 说明负载越低; 负载越低的节点被选中的概率越大
+    std::array<std::atomic<double>, MaxComputeNodeCount> remain_queue_balance_penalty_weights_; // 权重越高, 说明剩余队列越短; 剩余队列越短的节点被选中的概率越大;
+    std::mutex load_balance_compute_mutex_; // 串行化后台和batch主动更新；读取仍保持无锁
 
     // log access key
     std::mutex log_mutex;
