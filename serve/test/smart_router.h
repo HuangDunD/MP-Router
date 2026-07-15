@@ -845,6 +845,9 @@ public:
         std::unordered_map<uint64_t, uint32_t> conflict_page_index_map;
         std::vector<std::pair<uint32_t, uint32_t>> conflict_page_ranges;
         std::vector<uint64_t> unique_conflict_pages;
+        // Indexed like unique_conflict_pages. True only for pages with a
+        // batch-local read/write dependency conflict.
+        std::vector<uint8_t> dependency_conflict_page_flags;
         std::vector<uint64_t> unique_ownership_pages;
         std::vector<std::vector<SchedulingCandidateTxn*>> conflicted_txn_partitions;
         uint64_t conflicted_txn_page_diag_count = 0;
@@ -2483,9 +2486,17 @@ public:
     void schedule_ready_txn(std::vector<TxnQueueEntry*> entries, int finish_call_id);
 
     PendingTxnSet* pending_txn_queue_;
-    // Cross-batch transfer-page fences for mode 11 dependency management.
-    std::mutex global_page_fences_mutex_;
-    std::unordered_map<uint64_t, std::shared_ptr<DependencyGroup>> global_page_fences_;
+    // Shared cross-batch page fences for batch-router variants. Sharding keeps
+    // unrelated conflict pages from contending on one table-wide mutex.
+    static constexpr size_t kGlobalPageFenceShardCount = 64;
+    struct GlobalPageFenceShard {
+        std::mutex mutex;
+        std::unordered_map<uint64_t, std::shared_ptr<DependencyGroup>> fences;
+    };
+    std::array<GlobalPageFenceShard, kGlobalPageFenceShardCount> global_page_fence_shards_;
+
+    std::shared_ptr<DependencyGroup> get_global_page_fence(uint64_t page);
+    void set_global_page_fence(uint64_t page, const std::shared_ptr<DependencyGroup>& group);
 
     // for chimer phase
     std::thread chimera_phase_switch_thread_;
