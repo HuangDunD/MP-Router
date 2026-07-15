@@ -1276,7 +1276,7 @@ yashan_db_conninfos = [
     "ip_port=172.16.0.27:1688 user=sys password=Wljwlj123.",
     "ip_port=172.16.0.25:1688 user=sys password=Wljwlj123.",
 ]
-DBType = 0 # 0: PostgreSQL/KES, 1: YashanDB, 2: MySQL
+DBType = 1 # 0: PostgreSQL/KES, 1: YashanDB, 2: MySQL
 UseStoredProcedures = 1
 
 
@@ -1287,7 +1287,7 @@ UseStoredProcedures = 1
 # RunModeType = [11]
 # RunModeType = [26, 27]
 # RunModeType = [23]
-RunModeType = [11]
+RunModeType = [11, 23, 28, 0 , 2, 25]
 # RunModeType = [0, 2, 11, 13, 23, 25, 28]
 TPCCRuleRunModeType = [31]
 # RunModeType = [11, 13, 2]
@@ -1299,7 +1299,7 @@ TPCCRuleRunModeType = [31]
 # RunModeType = [1]
 Workloads = ["smallbank"] # one script run can cover multiple workloads
 WorkloadAccessPatterns = {
-    "smallbank": [1, 2],
+    "smallbank": [1],
     "tpcc": [2,0],
 }
 SweepMode = "axis" # axis: vary one dimension from defaults; full: Cartesian product
@@ -1307,21 +1307,21 @@ AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
 # AccessPattern = [1]
 # ZipfianTheta = [0.4]
 # ZipfianTheta = [0.8]
-ZipfianTheta = [0.8, 0.9, 1.1, 0.6, 1.3, 0.1] 
-# ZipfianTheta = [0.8]
+# ZipfianTheta = [0.8, 0.6, 1.1, 1.3, 0.1, 0.9] 
+ZipfianTheta = [0.8]
 ZipfianGenerator = "finite" # options: finite, legacy
-# HotspotFraction = [0.25]
-HotspotFraction = [0.001, 0.01, 0.1, 1]
-HotspotProb = [0.8]
-# HotspotProb = [0.5, 0.8, 0.9]
+HotspotFraction = [0.25]
+# HotspotFraction = [0.001]
+# HotspotProb = [0.8]
+HotspotProb = [0.5, 0.8, 0.9]
 # account = 100W, 单个表大概14W个页面, 每个页面8KB, 大小约1.1GB
 AccountCount = [10000000]
 WarehouseCount = [500]
-# WorkerThreadCount = [16]
-WorkerThreadCount = [16, 2, 4, 8, 32, 64]
+WorkerThreadCount = [16]
+# WorkerThreadCount = [16, 2, 4, 8, 32, 64]
 try_count = 35000
-TimeRun = 1 # 0:disable, 1:enable
-EnableDynamicWorkload = 0 # 0:disable, 1:enable dynamic workload phases in ./run
+TimeRun = 0 # 0:disable, 1:enable
+EnableDynamicWorkload = 1 # 0:disable, 1:enable dynamic workload phases in ./run
 WarmupSeconds = 15
 RunSeconds = 30
 FillPipelineBubble = 0
@@ -1331,19 +1331,19 @@ RestartDBBeforeEachTPCCMode = True # True: for TPC-C, restart DB before each mod
 workload = Workloads[0]
 sys_extend_size = 300000
 sys_index_extend_size = 30000
-# AffinityTxnRatio = [0.8]
-AffinityTxnRatio = [0.8, 1, 0.6, 0.4, 0.2, 0]
+AffinityTxnRatio = [0.8]
+# AffinityTxnRatio = [0.8, 1, 0.6, 0.4, 0.2, 0]
 # AffinityTxnRatio = [1, 0.8, 0.6, 0.4, 0.2, 0]
-BatchSize = [10000, 5000, 1000, 500, 100, 50000, 100000] # default 10000
-# BatchSize = [10000]
+# BatchSize = [10000, 5000, 1000, 500, 100, 50000, 100000] # default 10000
+BatchSize = [10000]
 NumBucket = [1]
 TPCCPartitionWarehouse = [0] # 0:disable, 1:partition warehouse by w_id range
 EnableLongTxn = 0 # 0:disable, 1:enable
 # LongTxnSize = [8]
 LongTxnSize = [2, 4, 8, 12, 16, 20] # only valid when EnableLongTxn=1
 LongTxnWritePct = 50 # only valid when EnableLongTxn=1; per-operation write probability
-# KeyPageMapCapacity = [1.1]
-KeyPageMapCapacity = [1.1, 1.0, 0.8, 0.6, 0.4, 0.2] # passed to --key-page-ratio
+KeyPageMapCapacity = [1.1]
+# KeyPageMapCapacity = [1.1, 1.0, 0.8, 0.6, 0.4, 0.2] # passed to --key-page-ratio
 EnableMLP = [0]
 # EnableMLP = [0, 1] # 0:disable, 1:enable; changing this requires rebuilding with MLP_PREDICTION
 MLPRunModeType = [11] # MLP-delta cases run only these modes; baseline MLP=0 reuses normal sweep results
@@ -1356,8 +1356,8 @@ DefaultAccessPattern = {
     "smallbank": 1,
     "tpcc": 2,
 }
-DefaultZipfianTheta = 0.9
-DefaultHotspotFraction = 0.01
+DefaultZipfianTheta = 0.8
+DefaultHotspotFraction = 0.25
 DefaultHotspotProb = 0.8
 DefaultWorkerThreads = WorkerThreadCount[0]
 DefaultBatchSize = BatchSize[0]
