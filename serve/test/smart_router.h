@@ -755,7 +755,7 @@ public:
             } else if (Workload_Type == 1) { 
                 table_ids = ycsb_->get_table_ids_by_txn_type();
                 accounts_keys = txn->ycsb_keys;
-            } else if (Workload_Type == 2) {
+            } else if (Workload_Type == 2 || Workload_Type == 3) {
                 accounts_keys = txn->tpcc_keys;
                 table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, accounts_keys);
             }
@@ -1308,7 +1308,7 @@ public:
                                     choose_node = key / (smallbank_->get_account_count() / ComputeNodeCount); // Range partitioning
                                 } else if (Workload_Type == 1) {
                                     choose_node = key / (ycsb_->get_record_count() / ComputeNodeCount); // Range partitioning
-                                } else if (Workload_Type == 2) {
+                                } else if (Workload_Type == 2 || Workload_Type == 3) {
                                     table_id_t tid = TPCC::get_base_table_id_for_router_table(table_ids[i]);
                                     int total = tpcc_->get_total_keys(static_cast<TPCCTableType>(tid));
                                     if (total == 0) total = 1; 

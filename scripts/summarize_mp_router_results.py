@@ -19,6 +19,7 @@ SUMMARY_COLUMNS = [
     "account_count",
     "warehouse_count",
     "worker_threads",
+    "compute_node_count",
     "affinity_txn_ratio",
     "batch_size",
     "num_bucket",

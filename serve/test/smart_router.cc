@@ -767,7 +767,7 @@ std::unique_ptr<std::vector<std::queue<TxnQueueEntry*>>> SmartRouter::get_route_
         } else if (Workload_Type == 1) { 
             table_ids = ycsb_->get_table_ids_by_txn_type();
             accounts_keys = txn->ycsb_keys;
-        } else if (Workload_Type == 2) {
+        } else if (Workload_Type == 2 || Workload_Type == 3) {
             accounts_keys = txn->tpcc_keys;
             table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, accounts_keys);
         }
@@ -1199,7 +1199,7 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                             keys = txn->ycsb_keys;
                             rw = txn->ycsb_rw_flags.empty() ?
                                 ycsb_->get_rw_flags() : txn->ycsb_rw_flags;
-                        } else if (Workload_Type == 2) {
+                        } else if (Workload_Type == 2 || Workload_Type == 3) {
                             keys = txn->tpcc_keys;
                             table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, keys);
                             rw = tpcc_->get_rw_flags_by_txn_type(txn_type, keys.size());
@@ -1293,7 +1293,7 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
                 if (all_page_pairs[j].txn_idx != first_txn) has_distinct_txn = true;
             }
             if (has_writer && has_distinct_txn) {
-                if (Workload_Type == 2) {
+                if (Workload_Type == 2 || Workload_Type == 3) {
                     const table_id_t table_id = static_cast<table_id_t>(all_page_pairs[i].page >> 32);
                     const int table_idx = tpcc_conflict_breakdown_index(table_id);
                     if (table_idx >= 0) {
@@ -1553,7 +1553,7 @@ void SmartRouter::get_route_primary_batch_schedule_v2(std::unique_ptr<std::vecto
                     table_ids = ycsb_->get_table_ids_by_txn_type();
                     accounts_keys = txn->ycsb_keys;
                     rw = ycsb_->get_rw_flags();
-                } else if (Workload_Type == 2) {
+                } else if (Workload_Type == 2 || Workload_Type == 3) {
                     accounts_keys = txn->tpcc_keys;
                     table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, accounts_keys);
                     rw = tpcc_->get_rw_flags_by_txn_type(txn_type, accounts_keys.size());
@@ -2618,7 +2618,7 @@ void SmartRouter::get_route_chimera_batch_schedule(std::unique_ptr<std::vector<T
             table_ids = ycsb_->get_table_ids_by_txn_type();
             accounts_keys = txn->ycsb_keys;
             rw = ycsb_->get_rw_flags();
-        } else if (Workload_Type == 2) {
+        } else if (Workload_Type == 2 || Workload_Type == 3) {
             accounts_keys = txn->tpcc_keys;
             table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, accounts_keys);
             rw = tpcc_->get_rw_flags_by_txn_type(txn_type, accounts_keys.size());
@@ -3009,7 +3009,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                     table_ids = ycsb_->get_table_ids_by_txn_type();
                     accounts_keys = txn->ycsb_keys;
                     rw = ycsb_->get_rw_flags();
-                } else if (Workload_Type == 2) {
+                } else if (Workload_Type == 2 || Workload_Type == 3) {
                     accounts_keys = txn->tpcc_keys;
                     table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, accounts_keys);
                     rw = tpcc_->get_rw_flags_by_txn_type(txn_type, accounts_keys.size());
