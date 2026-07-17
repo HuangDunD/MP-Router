@@ -1046,7 +1046,6 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
 
     const size_t preprocess_thread_count =
         std::max<size_t>(1, std::min<size_t>(std::min<size_t>(std::max(1, PreprocessInternalThreads), 8), n));
-    const size_t chunk = (n + preprocess_thread_count - 1) / preprocess_thread_count;
     struct PageAccessPair {
         uint64_t page;
         uint32_t txn_idx;
@@ -1061,8 +1060,8 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
     struct timespec lookup_start_time, lookup_end_time;
     clock_gettime(CLOCK_MONOTONIC, &lookup_start_time);
     for (size_t t = 0; t < preprocess_thread_count; ++t) {
-        const size_t begin = t * chunk;
-        const size_t end = std::min(n, begin + chunk);
+        const size_t begin = n * t / preprocess_thread_count;
+        const size_t end = n * (t + 1) / preprocess_thread_count;
         futs.push_back(preprocess_threadpool.enqueue(
             [this, &prepared, begin, end, t, &local_page_pairs, &local_hot_hits, &local_hot_misses]() {
                 auto& page_pairs = local_page_pairs[t];
@@ -3436,7 +3435,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
             for (size_t idx = start; idx < end; ++idx) {
                 // ! Phase A: Only process Non-Conflicting transactions
                 SchedulingCandidateTxn* sc = &candidates[idx];
-                // record_progress();
+                record_progress();
                 if (sc->is_conflicted) {
                     continue;
                 }

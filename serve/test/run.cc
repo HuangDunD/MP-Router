@@ -179,23 +179,34 @@ private:
     std::streambuf* sb2_;
 };
 
-int create_perf_kwr_snapshot(){
+int create_perf_kwr_snapshot(size_t node_id){
+    if (node_id >= DBConnection.size()) {
+        std::cerr << "Invalid KWR snapshot node id: " << node_id << std::endl;
+        return -1;
+    }
     // new connection
-    pqxx::connection* conn0 = new pqxx::connection(DBConnection[0]);
+    pqxx::connection* conn0 = new pqxx::connection(DBConnection[node_id]);
     if (conn0 == nullptr || !conn0->is_open()) {
-        std::cerr << "Failed to connect to the database. conninfo: " + DBConnection[0] << std::endl;
+        std::cerr << "Failed to connect to database node " << node_id
+                  << " for KWR snapshot. conninfo: " + DBConnection[node_id] << std::endl;
         return -1;
     }
 
-    std::cout << "Getting the perf snapshot..." << std::endl;
-    int snapshot_id = 0;
+    std::cout << "Getting the perf snapshot on node " << node_id << "..." << std::endl;
+    int snapshot_id = -1;
     std::string create_snapshot_sql = "SELECT * FROM perf.create_snapshot()";
     try {
         pqxx::work txn(*conn0);
         pqxx::result result0 = txn.exec(create_snapshot_sql);
         if (!result0.empty()) {
             snapshot_id = result0[0]["create_snapshot"].as<int>();
-            std::cout << "Snapshot created successfully with ID: " << snapshot_id << std::endl;
+            if (snapshot_id >= 0) {
+                std::cout << "Snapshot created successfully on node " << node_id
+                          << " with ID: " << snapshot_id << std::endl;
+            } else {
+                std::cout << "KWR snapshot is unavailable on node " << node_id
+                          << " (create_snapshot returned " << snapshot_id << ")." << std::endl;
+            }
         } else {
             std::cerr << "Failed to create snapshot." << std::endl;
         }
@@ -208,14 +219,30 @@ int create_perf_kwr_snapshot(){
     return snapshot_id;
 }
 
-void generate_perf_kwr_report(int start_snapshot_id, int end_snapshot_id, std::string file_name) {
-    // new connection
-    pqxx::connection* conn0 = new pqxx::connection(DBConnection[0]);
-    if (conn0 == nullptr || !conn0->is_open()) {
-        std::cerr << "Failed to connect to the database. conninfo: " + DBConnection[0] << std::endl;
+std::vector<int> create_perf_kwr_snapshots(size_t node_count) {
+    std::vector<int> snapshot_ids(node_count, -1);
+    for (size_t node_id = 0; node_id < node_count; ++node_id) {
+        snapshot_ids[node_id] = create_perf_kwr_snapshot(node_id);
+    }
+    return snapshot_ids;
+}
+
+void generate_perf_kwr_report(size_t node_id, int start_snapshot_id, int end_snapshot_id,
+                              const std::string& file_name) {
+    if (node_id >= DBConnection.size() || start_snapshot_id < 0 || end_snapshot_id < 0) {
+        std::cerr << "Skipping invalid KWR report request for node " << node_id
+                  << ": start=" << start_snapshot_id << ", end=" << end_snapshot_id << std::endl;
         return;
     }
-    std::cout << "Generating performance report for snapshot IDs: " << start_snapshot_id << " to " << end_snapshot_id << std::endl;
+    // new connection
+    pqxx::connection* conn0 = new pqxx::connection(DBConnection[node_id]);
+    if (conn0 == nullptr || !conn0->is_open()) {
+        std::cerr << "Failed to connect to database node " << node_id
+                  << " for KWR report. conninfo: " + DBConnection[node_id] << std::endl;
+        return;
+    }
+    std::cout << "Generating performance report on node " << node_id
+              << " for snapshot IDs: " << start_snapshot_id << " to " << end_snapshot_id << std::endl;
     std::string report_sql = "SELECT * FROM perf.kwr_report_to_file(" + std::to_string(start_snapshot_id) + ", " 
             // + std::to_string(end_snapshot_id) + ", 'html', '/home/hcy/MP-Router/build/serve/test/" + file_name + "')";
             + std::to_string(end_snapshot_id) + ", 'html', '/home/kingbase/MP-Router/kwr/" + file_name + "')";
@@ -246,27 +273,34 @@ static bool warmup_end_supported_mode() {
            SYSTEM_MODE == 30 || SYSTEM_MODE == 31;
 }
 
-static void reset_pg_runtime_stats_before_benchmark(Logger* logger_) {
+static void reset_pg_runtime_stats_before_benchmark(Logger* logger_, size_t node_count) {
     if (DB_TYPE != 0 || DBConnection.empty()) {
         return;
     }
 
-    try {
-        pqxx::connection conn(DBConnection[0]);
-        pqxx::work txn(conn);
-        txn.exec("SELECT pg_stat_reset()");
-        txn.exec("DO $$ BEGIN IF to_regproc('pg_stat_reset_logical_fast') IS NOT NULL THEN EXECUTE 'SELECT pg_stat_reset_logical_fast()'; END IF; END $$");
-        txn.exec("SELECT pg_stat_reset_shared('wal')");
-        txn.exec("SELECT pg_stat_reset_shared('bgwriter')");
-        txn.commit();
-        std::cout << "PostgreSQL runtime stats reset before benchmark." << std::endl;
-        if (logger_) {
-            logger_->info("PostgreSQL runtime stats reset before benchmark.");
-        }
-    } catch (const std::exception &e) {
-        std::cerr << "Failed to reset PostgreSQL runtime stats before benchmark: " << e.what() << std::endl;
-        if (logger_) {
-            logger_->warning("Failed to reset PostgreSQL runtime stats before benchmark: " + std::string(e.what()));
+    node_count = std::min(node_count, DBConnection.size());
+    for (size_t node_id = 0; node_id < node_count; ++node_id) {
+        try {
+            pqxx::connection conn(DBConnection[node_id]);
+            pqxx::work txn(conn);
+            txn.exec("SELECT pg_stat_reset()");
+            txn.exec("DO $$ BEGIN IF to_regproc('pg_stat_reset_logical_fast') IS NOT NULL THEN EXECUTE 'SELECT pg_stat_reset_logical_fast()'; END IF; END $$");
+            txn.exec("SELECT pg_stat_reset_shared('wal')");
+            txn.exec("SELECT pg_stat_reset_shared('bgwriter')");
+            txn.commit();
+            std::cout << "PostgreSQL runtime stats reset before benchmark on node "
+                      << node_id << "." << std::endl;
+            if (logger_) {
+                logger_->info("PostgreSQL runtime stats reset before benchmark on node " +
+                              std::to_string(node_id) + ".");
+            }
+        } catch (const std::exception &e) {
+            std::cerr << "Failed to reset PostgreSQL runtime stats before benchmark on node "
+                      << node_id << ": " << e.what() << std::endl;
+            if (logger_) {
+                logger_->warning("Failed to reset PostgreSQL runtime stats before benchmark on node " +
+                                 std::to_string(node_id) + ": " + std::string(e.what()));
+            }
         }
     }
 }
@@ -1983,6 +2017,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --long-txn-write-pct <pct>  Long SmallBank per-op write probability (0-100) [default: 10]" << std::endl;
     std::cout << "  --retry-limit <n>           Retry SQLSTATE 40xxx rollback errors up to n times per txn [default: 0]" << std::endl;
     std::cout << "  --retry-to-commit <n>       Alias for --retry-limit" << std::endl;
+    std::cout << "  --kwr-scope <single|all>    Collect KWR from node0 only or every DB node [default: single]" << std::endl;
     std::cout << "  --db-connection <conninfo>  Add one database conninfo string; repeat for multi-node" << std::endl;
     std::cout << "                               MySQL format: host=127.0.0.1 port=3306 user=root password=... dbname=test [socket=...]" << std::endl;
     std::cout << "  --help                      Show this help message" << std::endl;
@@ -2597,6 +2632,7 @@ int main(int argc, char *argv[]) {
 
     // kwr report name
     std::string kwr_report_name = "kwr_report";
+    bool kwr_all_nodes = false;
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -2966,6 +3002,22 @@ int main(int argc, char *argv[]) {
                 kwr_report_name = "smallbank_report_" + timestamp + "_mode" + std::to_string(SYSTEM_MODE);
                 std::cout << "KWR report name set to: " << kwr_report_name << std::endl;
             }
+        }
+        else if (arg == "--kwr-scope") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --kwr-scope requires single or all" << std::endl;
+                return -1;
+            }
+            std::string scope = argv[++i];
+            if (scope == "single") {
+                kwr_all_nodes = false;
+            } else if (scope == "all") {
+                kwr_all_nodes = true;
+            } else {
+                std::cerr << "Error: --kwr-scope must be single or all" << std::endl;
+                return -1;
+            }
+            std::cout << "KWR scope set to: " << scope << std::endl;
         }
         else if (arg == "--sys_extend_size") {
             if (i + 1 < argc) {
@@ -3847,10 +3899,11 @@ int main(int argc, char *argv[]) {
     // Reset statistics and create the KWR start snapshot before starting load.
     // KWR therefore covers warmup and measurement without snapshot overhead
     // or a statistics reset occurring while the workload is running.
-    int start_snapshot_id = -1;
+    const size_t kwr_node_count = kwr_all_nodes ? DBConnection.size() : std::min<size_t>(1, DBConnection.size());
+    std::vector<int> start_snapshot_ids(kwr_node_count, -1);
     if(DB_TYPE == 0 && !router_only) {
-        reset_pg_runtime_stats_before_benchmark(logger_);
-        start_snapshot_id = create_perf_kwr_snapshot();
+        reset_pg_runtime_stats_before_benchmark(logger_, kwr_node_count);
+        start_snapshot_ids = create_perf_kwr_snapshots(kwr_node_count);
     }
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -4056,10 +4109,15 @@ int main(int argc, char *argv[]) {
 
     // Create a performance snapshot after running transactions
     std::this_thread::sleep_for(std::chrono::seconds(2)); // sleep for a while to ensure all operations are completed
-    int end_snapshot_id = -1;
-    if(DB_TYPE == 0 && !router_only) end_snapshot_id = create_perf_kwr_snapshot();
-    std::cout << "Performance snapshots created: Start ID = " << start_snapshot_id 
-              << ", End ID = " << end_snapshot_id << std::endl;
+    std::vector<int> end_snapshot_ids(kwr_node_count, -1);
+    if(DB_TYPE == 0 && !router_only) {
+        end_snapshot_ids = create_perf_kwr_snapshots(kwr_node_count);
+        for (size_t node_id = 0; node_id < kwr_node_count; ++node_id) {
+            std::cout << "Performance snapshots created on node " << node_id
+                      << ": Start ID = " << start_snapshot_ids[node_id]
+                      << ", End ID = " << end_snapshot_ids[node_id] << std::endl;
+        }
+    }
     
     // Print Report
     std::cout << "\n=== Performance Report ===" << std::endl;
@@ -4232,9 +4290,15 @@ int main(int argc, char *argv[]) {
 
     // std::string report_file_warm_phase = kwr_report_name +  "_fisrt.html";
     // generate_perf_kwr_report(conn0, start_snapshot_id, mid_snapshot_id, report_file_warm_phase);
-    std::string report_file_run_phase = kwr_report_name +  "_end.html";
-    // generate_perf_kwr_report(conn0, mid_snapshot_id, end_snapshot_id, report_file_run_phase);
-    if(DB_TYPE == 0 && !router_only) generate_perf_kwr_report(start_snapshot_id, end_snapshot_id, report_file_run_phase);
+    if(DB_TYPE == 0 && !router_only) {
+        for (size_t node_id = 0; node_id < kwr_node_count; ++node_id) {
+            const std::string report_file_run_phase = kwr_all_nodes
+                ? kwr_report_name + "_node" + std::to_string(node_id) + "_end.html"
+                : kwr_report_name + "_end.html";
+            generate_perf_kwr_report(node_id, start_snapshot_ids[node_id],
+                                     end_snapshot_ids[node_id], report_file_run_phase);
+        }
+    }
 
     // restore streams (best-effort; program may exit via signal handler earlier)
     std::cout.rdbuf(old_cout);

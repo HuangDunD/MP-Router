@@ -28,6 +28,11 @@ SUMMARY_COLUMNS = [
     "scan_axis",
     "use_data_cache",
     "data_cache_path",
+    "router_only",
+    "build_type",
+    "preprocess_batch_concurrency",
+    "kwr_scope",
+    "kwr_node_report_count",
     "throughput_after_warmup_tps",
     "exec_latency_p50_ms",
     "exec_latency_p95_ms",
@@ -279,6 +284,26 @@ def parse_kwr(path):
     return result
 
 
+def parse_and_merge_kwr(paths):
+    parsed_reports = [parse_kwr(path) for path in paths]
+    if len(parsed_reports) <= 1:
+        return parsed_reports[0] if parsed_reports else {}
+
+    result = {}
+    for field in ("kwr_business_sql_exec_count", "cf_wait_count", "cf_total_time_s"):
+        values = [to_float(report.get(field)) for report in parsed_reports]
+        values = [value for value in values if value is not None]
+        if values:
+            total = sum(values)
+            result[field] = str(int(total)) if field != "cf_total_time_s" else f"{total:.6f}"
+
+    wait_count = to_float(result.get("cf_wait_count"))
+    total_time_s = to_float(result.get("cf_total_time_s"))
+    if wait_count is not None and wait_count > 0 and total_time_s is not None:
+        result["cf_avg_ms"] = f"{total_time_s * 1000.0 / wait_count:.6f}"
+    return result
+
+
 def add_app_txn_cache_fusion_metrics(row):
     app_txn_count = to_float(row.get("committed_transactions_after_warmup"))
     if app_txn_count is None or app_txn_count <= 0:
@@ -340,17 +365,20 @@ def collect_rows(result_dir):
     rows = []
     for result_path in sorted(result_dir.rglob("result.txt")):
         case_dir = result_path.parent
-        kwr_files = sorted(case_dir.glob("*_end.html"))
-        kwr_path = kwr_files[-1] if kwr_files else Path()
+        kwr_files = sorted(
+            path for path in case_dir.glob("*_end.html")
+            if path.is_file() and path.stat().st_size > 0
+        )
         row = {column: "" for column in SUMMARY_COLUMNS}
         row.update(load_metadata(case_dir))
         row.update(parse_result(result_path))
         if kwr_files:
-            row.update(parse_kwr(kwr_path))
+            row.update(parse_and_merge_kwr(kwr_files))
         add_app_txn_cache_fusion_metrics(row)
         add_kwr_business_cache_fusion_metrics(row)
         row["result_file"] = str(result_path)
-        row["kwr_file"] = str(kwr_path) if kwr_files else ""
+        row["kwr_node_report_count"] = str(len(kwr_files))
+        row["kwr_file"] = ";".join(str(path) for path in kwr_files)
         rows.append(row)
     return sort_rows(rows)
 
@@ -367,6 +395,11 @@ def write_markdown(path, rows):
     columns = [
         "case_id",
         "run_mode",
+        "router_only",
+        "build_type",
+        "preprocess_batch_concurrency",
+        "kwr_scope",
+        "kwr_node_report_count",
         "throughput_after_warmup_tps",
         "exec_latency_p50_ms",
         "exec_latency_p95_ms",
