@@ -154,6 +154,7 @@ public:
             std::array<uint64_t, 4> tpcc_conflict_txns_by_table = {0, 0, 0, 0};
                 double merge_and_construct_ipq_ms = 0.0;
                 double select_condidate_txns_ms = 0.0;
+                double queue_backpressure_sleep_ms = 0.0;
                 double compute_transfer_page_ms = 0.0;
                 double find_affected_txns_ms = 0.0;
                 double decide_txn_schedule_ms = 0.0;

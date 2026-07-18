@@ -3435,7 +3435,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
             for (size_t idx = start; idx < end; ++idx) {
                 // ! Phase A: Only process Non-Conflicting transactions
                 SchedulingCandidateTxn* sc = &candidates[idx];
-                record_progress();
+                if (SYSTEM_MODE != 27) record_progress();
                 if (sc->is_conflicted) {
                     continue;
                 }
@@ -3823,6 +3823,8 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     std::atomic<int> scheduled_counter{0};
     std::atomic<int> scheduled_front_txn_cnt{0};
     std::atomic<int> dependency_group_id_source{1};
+    std::vector<double> conflict_worker_wall_ms(thread_count, 0.0);
+    std::vector<double> conflict_worker_backpressure_sleep_ms(thread_count, 0.0);
     for (size_t t = 0; t < thread_count; ++t) {
         // Resize the local vector for this thread
         local_ownership_ok_txn_queues_list[t].resize(ComputeNodeCount);
@@ -3842,7 +3844,11 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                                             &prior_write_on_transfer_cnt, &prior_dag_push_batch_cnt,
                                             &prior_dag_push_txn_cnt, &prior_dag_push_max_batch_size,
                                             &conflict_transfer_plan_cnt, &conflict_transfer_page_cnt,
+                                            &conflict_worker_wall_ms, &conflict_worker_backpressure_sleep_ms,
                                             &update_atomic_max]() {
+            struct timespec worker_start_time, worker_end_time;
+            clock_gettime(CLOCK_MONOTONIC, &worker_start_time);
+            double queue_backpressure_sleep_ms = 0.0;
             
             struct timespec r_start_time, r_end_time;
             clock_gettime(CLOCK_MONOTONIC, &r_start_time);
@@ -4201,7 +4207,13 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                         //                 " Min node: " + std::to_string(min_txn_node) + 
                         //                 " Min count: " + std::to_string(min_txn_count) + 
                         //                 " Max count: " + std::to_string(max_txn_count));
+                        struct timespec sleep_start_time, sleep_end_time;
+                        clock_gettime(CLOCK_MONOTONIC, &sleep_start_time);
                         std::this_thread::sleep_for(std::chrono::milliseconds(5)); // Sleep a bit before next scheduling round
+                        clock_gettime(CLOCK_MONOTONIC, &sleep_end_time);
+                        queue_backpressure_sleep_ms +=
+                            (sleep_end_time.tv_sec - sleep_start_time.tv_sec) * 1000.0 +
+                            (sleep_end_time.tv_nsec - sleep_start_time.tv_nsec) / 1000000.0;
                         // continue;
                     } 
                     // select new min node, reset plan transfer count
@@ -5236,11 +5248,25 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
             if(t==0)
             time_stats_.final_push_to_queues_ms += (push_remaining_end_time.tv_sec - push_remaining_start_time.tv_sec) * 1000.0 + 
                 (push_remaining_end_time.tv_nsec - push_remaining_start_time.tv_nsec) / 1000000.0;
+
+            clock_gettime(CLOCK_MONOTONIC, &worker_end_time);
+            conflict_worker_wall_ms[t] =
+                (worker_end_time.tv_sec - worker_start_time.tv_sec) * 1000.0 +
+                (worker_end_time.tv_nsec - worker_start_time.tv_nsec) / 1000000.0;
+            conflict_worker_backpressure_sleep_ms[t] = queue_backpressure_sleep_ms;
         }));
     }
 
     // Join workers
     for(auto& fut : futs) fut.get();
+    if (!conflict_worker_wall_ms.empty()) {
+        const auto critical_worker = std::max_element(
+            conflict_worker_wall_ms.begin(), conflict_worker_wall_ms.end());
+        const size_t critical_worker_id =
+            static_cast<size_t>(std::distance(conflict_worker_wall_ms.begin(), critical_worker));
+        time_stats_.queue_backpressure_sleep_ms +=
+            conflict_worker_backpressure_sleep_ms[critical_worker_id];
+    }
     time_stats_.conflicting_critical_path_txn_count +=
         conflicting_critical_path_txn_cnt.load(std::memory_order_relaxed);
     time_stats_.conflicting_non_critical_path_txn_count +=

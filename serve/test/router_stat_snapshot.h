@@ -125,6 +125,7 @@ struct RouterStatSnapshot {
     std::array<uint64_t, 4> tpcc_conflict_txns_by_table = {0, 0, 0, 0};
     double merge_and_construct_ipq_ms = 0.0;
     double select_condidate_txns_ms = 0.0;
+    double queue_backpressure_sleep_ms = 0.0;
     double compute_transfer_page_ms = 0.0;
     double find_affected_txns_ms = 0.0;
     double decide_txn_schedule_ms = 0.0;
@@ -405,6 +406,7 @@ struct RouterStatSnapshot {
                   << " TPS" << std::endl;
         std::cout << "      Merge And Construct IPQ Time: " << merge_and_construct_ipq_ms << " ms" << std::endl;
         std::cout << "      Select Condidate Txns Time: " << select_condidate_txns_ms << " ms" << std::endl;
+        std::cout << "        Queue Backpressure Sleep Time: " << queue_backpressure_sleep_ms << " ms" << std::endl;
         std::cout << "      Compute Transfer Page Time: " << compute_transfer_page_ms << " ms" << std::endl;
         std::cout << "      Find Affected Txns Time: " << find_affected_txns_ms << " ms" << std::endl;
         std::cout << "      Decide Txn Schedule Time: " << decide_txn_schedule_ms << " ms" << std::endl;
@@ -572,6 +574,7 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.merge_and_construct_ipq_ms = tdb.merge_and_construct_ipq_ms;
     snap.process_conflicted_txn_ms = tdb.process_conflicted_txn_ms;
     snap.select_condidate_txns_ms = tdb.select_condidate_txns_ms;
+    snap.queue_backpressure_sleep_ms = tdb.queue_backpressure_sleep_ms;
     snap.compute_transfer_page_ms = tdb.compute_transfer_page_ms;
     snap.find_affected_txns_ms = tdb.find_affected_txns_ms;
     snap.decide_txn_schedule_ms = tdb.decide_txn_schedule_ms;
@@ -778,6 +781,7 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.merge_and_construct_ipq_ms = b.merge_and_construct_ipq_ms - a.merge_and_construct_ipq_ms;
     d.process_conflicted_txn_ms = b.process_conflicted_txn_ms - a.process_conflicted_txn_ms;
     d.select_condidate_txns_ms = b.select_condidate_txns_ms - a.select_condidate_txns_ms;
+    d.queue_backpressure_sleep_ms = b.queue_backpressure_sleep_ms - a.queue_backpressure_sleep_ms;
     d.compute_transfer_page_ms = b.compute_transfer_page_ms - a.compute_transfer_page_ms;
     d.find_affected_txns_ms = b.find_affected_txns_ms - a.find_affected_txns_ms;
     d.decide_txn_schedule_ms = b.decide_txn_schedule_ms - a.decide_txn_schedule_ms;
