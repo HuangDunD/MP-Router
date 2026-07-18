@@ -451,7 +451,11 @@ public:
         compute_workload_balance_thread.detach();
 
         if (SYSTEM_MODE == 28) {
-            chimera_phase_switch_thread_ = std::thread(&SmartRouter::run_chimera_phase_switch, this);
+            if (ComputeNodeCount == 1) {
+                g_chimera_phase.store(0, std::memory_order_relaxed);
+            } else {
+                chimera_phase_switch_thread_ = std::thread(&SmartRouter::run_chimera_phase_switch, this);
+            }
         }
     }
 

@@ -2002,6 +2002,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --account-count <number>    Number of accounts to load [default: 300000]" << std::endl;
     std::cout << "  --worker-threads <n>        DB/client worker threads per compute node [default: 16]" << std::endl;
     std::cout << "  --router-threads <n>        SmartRouter internal parallelism [default: worker-threads]" << std::endl;
+    std::cout << "  --generator-threads <n>     Workload generator threads [default: 2 * worker-threads]" << std::endl;
     std::cout << "  --unlog                     Create UNLOGGED tables (default follows workload)" << std::endl;
     std::cout << "  --enable-autovacuum         Keep table autovacuum enabled after table creation [default: off]" << std::endl;
     std::cout << "  --without-kpmap             Skip key-page map initialization for client-only experiments" << std::endl;
@@ -2611,6 +2612,7 @@ int main(int argc, char *argv[]) {
     int access_pattern = 0; // 0: uniform, 1: zipfian, 2: hotspot
     bool without_kpmap = false;
     bool router_only = false;
+    int generator_threads = -1;
     // default parameters
     double zipfian_theta = 0.99; // Zipfian distribution parameter
     std::string zipfian_generator = "legacy";
@@ -2855,6 +2857,20 @@ int main(int argc, char *argv[]) {
                 std::cout << "Router internal threads set to: " << RouterInternalThreads << std::endl;
             } else {
                 std::cerr << "Error: --router-threads requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--generator-threads") {
+            if (i + 1 < argc) {
+                generator_threads = std::stoi(argv[++i]);
+                if (generator_threads <= 0) {
+                    std::cerr << "Error: Generator threads must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Generator threads set to: " << generator_threads << std::endl;
+            } else {
+                std::cerr << "Error: --generator-threads requires a value" << std::endl;
                 print_usage(argv[0]);
                 return -1;
             }
@@ -3336,6 +3352,9 @@ int main(int argc, char *argv[]) {
     if (PreprocessInternalThreads <= 0) {
         PreprocessInternalThreads = RouterInternalThreads;
     }
+    if (generator_threads <= 0) {
+        generator_threads = worker_threads * 2;
+    }
 
     switch (access_pattern) {
         case 0: access_pattern_name = "Uniform"; break;
@@ -3352,6 +3371,7 @@ int main(int argc, char *argv[]) {
     std::cout << "Preprocess batch concurrency: " << PreprocessBatchConcurrency << std::endl;
     std::cout << "Prepared batch queue limit: " << PreparedBatchQueueLimit << std::endl;
     std::cout << "Preprocess internal threads: " << PreprocessInternalThreads << std::endl;
+    std::cout << "Generator threads: " << generator_threads << std::endl;
 
     if (router_only && Workload_Type != 0) {
         std::cerr << "Error: --router-only currently supports SmallBank only." << std::endl;
@@ -3920,7 +3940,7 @@ int main(int argc, char *argv[]) {
     
     // !start the client transaction generation threads
     std::vector<std::thread> client_gen_txn_threads;
-    for(int i = 0; i < worker_threads * 2; i++) {
+    for(int i = 0; i < generator_threads; i++) {
         if(Workload_Type == 0) {
             client_gen_txn_threads.emplace_back([i, txn_pool, smallbank]() {
                 smallbank->generate_smallbank_txns_worker(i, txn_pool);
