@@ -40,16 +40,11 @@ def kill_server():
 def build():
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8") as outfile:
-        build_type = "Release" if RouterOnly else "Debug (project default)"
-        logging.info(f"Rebuilding MP-Router binary with {build_type} configuration.")
+        logging.info("Rebuilding MP-Router binary.")
         build_dir = os.path.join(workspace, "build")
         shutil.rmtree(build_dir, ignore_errors=True)
         os.makedirs(build_dir, exist_ok=True)
-        cmake_cmd = ["cmake"]
-        if RouterOnly:
-            cmake_cmd.append("-DCMAKE_BUILD_TYPE=Release")
-        cmake_cmd.append("..")
-        subprocess.run(cmake_cmd, cwd=build_dir, stdout=outfile,
+        subprocess.run(["cmake", ".."], cwd=build_dir, stdout=outfile,
                        stderr=subprocess.STDOUT, check=True)
         subprocess.run(["make", "-j8"], cwd=build_dir, stdout=outfile,
                        stderr=subprocess.STDOUT, check=True)
@@ -233,28 +228,12 @@ def sync_remote_servers_after_case():
     for host in hosts:
         run_remote_cmd("sync", check=False, max_retries=1, host=host, display_cmd="sync")
 
-def configured_db_conninfos():
+def build_db_connection_args():
     if int(DBType) == 1:
-        return yashan_db_conninfos
+        return "".join(f" --db-connection {shlex.quote(conninfo)}" for conninfo in yashan_db_conninfos)
     if is_postgres_like_db():
-        return db_ready_probe_conninfos
-    return []
-
-def build_db_connection_args(node_count=None):
-    conninfos = configured_db_conninfos()
-    if not conninfos:
-        return ""
-    if node_count is None:
-        node_count = len(conninfos)
-    if node_count < 1 or node_count > len(conninfos):
-        raise ValueError(
-            f"compute node count {node_count} is outside the configured connection range "
-            f"[1, {len(conninfos)}] for DB_TYPE={DBType}"
-        )
-    return "".join(
-        f" --db-connection {shlex.quote(conninfo)}"
-        for conninfo in conninfos[:node_count]
-    )
+        return "".join(f" --db-connection {shlex.quote(conninfo)}" for conninfo in db_ready_probe_conninfos)
+    return ""
 
 def drop_public_tables():
     if not shutil.which("psql"):
@@ -752,7 +731,6 @@ def base_case_config(workload_name, account_count=None, warehouse_count=None):
         "affinity_txn_ratio": DefaultAffinityTxnRatio,
         "batch_size": DefaultBatchSize,
         "num_bucket": DefaultNumBucket,
-        "compute_node_count": DefaultComputeNodeCount,
         "tpcc_partition_warehouses": DefaultTPCCPartitionWarehouses if workload_name in ("tpcc", "tpcc-standard") else 0,
         "long_txn_length": DefaultLongTxnLength if EnableLongTxn else None,
         "long_txn_write_pct": LongTxnWritePct if EnableLongTxn else None,
@@ -781,7 +759,6 @@ def dedupe_case_configs(configs):
             case["affinity_txn_ratio"],
             case["batch_size"],
             case["num_bucket"],
-            case["compute_node_count"],
             case.get("tpcc_partition_warehouses"),
             case.get("long_txn_length"),
             case.get("long_txn_write_pct"),
@@ -821,12 +798,6 @@ def build_axis_case_configs(workload_name, account_count=None, warehouse_count=N
             case = dict(base)
             case.update(access_config)
             case["scan_axis"] = "access"
-            configs.append(case)
-
-        for compute_node_count in values_except_default(ComputeNodeCounts, DefaultComputeNodeCount):
-            case = dict(base)
-            case["compute_node_count"] = compute_node_count
-            case["scan_axis"] = "compute_node_count"
             configs.append(case)
 
     if workload_name != "smallbank":
@@ -903,28 +874,26 @@ def build_full_case_configs(workload_name, account_count=None, warehouse_count=N
                     for mlp_enabled in EnableMLP:
                         for affinity_ratio in AffinityTxnRatio:
                             for num_bucket in NumBucket:
-                                for compute_node_count in ComputeNodeCounts:
-                                    for partition_warehouses in tpcc_partition_values:
-                                        for long_txn_length in long_txn_sizes:
-                                            case = {
-                                                "workload": workload_name,
-                                                "account_count": account_count,
-                                                "warehouse_count": warehouse_count,
-                                                "worker_threads": worker_threads,
-                                                "affinity_txn_ratio": affinity_ratio,
-                                                "batch_size": batch_size,
-                                                "num_bucket": num_bucket,
-                                                "compute_node_count": compute_node_count,
-                                                "tpcc_partition_warehouses": partition_warehouses,
-                                                "long_txn_length": long_txn_length,
-                                                "long_txn_write_pct": LongTxnWritePct if EnableLongTxn else None,
-                                                "key_page_ratio": key_page_ratio,
-                                                "mlp_enabled": mlp_enabled,
-                                                "use_data_cache": UseDataCache,
-                                                "scan_axis": "full",
-                                            }
-                                            case.update(access_config)
-                                            configs.append(case)
+                                for partition_warehouses in tpcc_partition_values:
+                                    for long_txn_length in long_txn_sizes:
+                                        case = {
+                                            "workload": workload_name,
+                                            "account_count": account_count,
+                                            "warehouse_count": warehouse_count,
+                                            "worker_threads": worker_threads,
+                                            "affinity_txn_ratio": affinity_ratio,
+                                            "batch_size": batch_size,
+                                            "num_bucket": num_bucket,
+                                            "tpcc_partition_warehouses": partition_warehouses,
+                                            "long_txn_length": long_txn_length,
+                                            "long_txn_write_pct": LongTxnWritePct if EnableLongTxn else None,
+                                            "key_page_ratio": key_page_ratio,
+                                            "mlp_enabled": mlp_enabled,
+                                            "use_data_cache": UseDataCache,
+                                            "scan_axis": "full",
+                                        }
+                                        case.update(access_config)
+                                        configs.append(case)
     return dedupe_case_configs(configs)
 
 def build_case_configs_for_workload(workload_name, account_count=None, warehouse_count=None):
@@ -957,7 +926,6 @@ def build_case_plan():
             case_config["affinity_txn_ratio"],
             case_config["batch_size"],
             case_config["num_bucket"],
-            case_config["compute_node_count"],
             case_config.get("tpcc_partition_warehouses"),
             case_config.get("long_txn_length"),
             case_config.get("long_txn_write_pct"),
@@ -1047,7 +1015,7 @@ def normalize_case_from_plan(row):
     case = dict(row)
     int_fields = [
         "case_id", "case_group_id", "run_mode", "access_pattern",
-        "worker_threads", "batch_size", "num_bucket", "compute_node_count", "mlp_enabled",
+        "worker_threads", "batch_size", "num_bucket", "mlp_enabled",
         "account_count", "warehouse_count", "tpcc_partition_warehouses", "long_txn_length",
         "long_txn_write_pct",
     ]
@@ -1068,7 +1036,6 @@ def normalize_case_from_plan(row):
             case[field] = None
     if "use_data_cache" in case:
         case["use_data_cache"] = parse_bool_value(case["use_data_cache"])
-    case.setdefault("compute_node_count", DefaultComputeNodeCount)
     return case
 
 def read_case_plan(plan_path):
@@ -1077,70 +1044,13 @@ def read_case_plan(plan_path):
 
 def write_case_metadata(case, dest_dir, kwr_report_name, command):
     metadata = dict(case)
-    if RouterOnly:
-        metadata["configured_worker_threads"] = case["worker_threads"]
-        metadata["worker_threads"] = runtime_worker_threads(case)
-        metadata["router_threads"] = runtime_router_threads(case)
-        metadata["generator_threads"] = runtime_generator_threads(case)
     metadata["kwr_report_name"] = kwr_report_name
-    metadata["kwr_scope"] = KWRScope
-    metadata["router_only"] = RouterOnly
-    metadata["build_type"] = "Release" if RouterOnly else "Debug"
-    metadata["preprocess_batch_concurrency"] = runtime_preprocess_batch_concurrency()
     metadata["command"] = command
     with open(os.path.join(dest_dir, "metadata.json"), "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
-def download_kwr_reports(case, dest_dir, kwr_report_name):
-    conninfos = configured_db_conninfos()[:case["compute_node_count"]]
-    targets = list(enumerate(conninfos)) if KWRScope == "all" else list(enumerate(conninfos[:1]))
-    for node_id, conninfo in targets:
-        host = parse_conninfo(conninfo).get("host", kwr_report_ip)
-        report_file = (
-            f"{kwr_report_name}_node{node_id}_end.html"
-            if KWRScope == "all"
-            else f"{kwr_report_name}_end.html"
-        )
-        remote_run_report = os.path.join(kwr_report_path, report_file)
-        local_run_report = os.path.join(dest_dir, report_file)
-        local_temp_report = local_run_report + ".part"
-
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            ssh.connect(host, username="root", password=kwr_ip_password, timeout=30)
-            sftp = ssh.open_sftp()
-            try:
-                if os.path.exists(local_temp_report):
-                    os.remove(local_temp_report)
-                sftp.get(remote_run_report, local_temp_report)
-                os.replace(local_temp_report, local_run_report)
-                logging.info(f"Collected node {node_id} KWR report from {host}: {report_file}")
-            finally:
-                sftp.close()
-        except Exception as e:
-            if os.path.exists(local_temp_report):
-                os.remove(local_temp_report)
-            logging.warning(
-                f"Node {node_id} KWR report is unavailable on {host}: {e}"
-            )
-        finally:
-            ssh.close()
-
 def value_for_path(value):
     return str(value).replace("/", "_")
-
-def runtime_worker_threads(case):
-    return RouterOnlyWorkerThreads if RouterOnly else case["worker_threads"]
-
-def runtime_router_threads(case):
-    return RouterOnlyRouterThreads if RouterOnly else case["worker_threads"]
-
-def runtime_preprocess_batch_concurrency():
-    return RouterOnlyPreprocessBatchConcurrency if RouterOnly else PreprocessBatchConcurrency
-
-def runtime_generator_threads(case):
-    return RouterOnlyGeneratorThreads if RouterOnly else case["worker_threads"] * 2
 
 def case_group_dir_name(case):
     parts = [
@@ -1157,18 +1067,14 @@ def case_group_dir_name(case):
         parts.append(f"HsProb{value_for_path(case['hotspot_prob'])}")
     parts.extend([
         workload_scale_label(case["workload"], case.get("account_count"), case.get("warehouse_count")),
-        f"t{runtime_worker_threads(case)}",
+        f"t{case['worker_threads']}",
         f"r{value_for_path(case['affinity_txn_ratio'])}",
         f"b{case['batch_size']}",
-        f"n{case.get('compute_node_count', DefaultComputeNodeCount)}",
         f"nb{case['num_bucket']}",
         f"whpart{case.get('tpcc_partition_warehouses', 0)}",
         f"kp{value_for_path(case['key_page_ratio'])}",
         f"mlp{case['mlp_enabled']}",
     ])
-    if RouterOnly:
-        parts.append(f"rt{runtime_router_threads(case)}")
-        parts.append(f"gt{runtime_generator_threads(case)}")
     if case.get("long_txn_length") is not None:
         parts.append(f"lt{case['long_txn_length']}")
     if case.get("long_txn_write_pct") is not None:
@@ -1183,14 +1089,11 @@ def case_progress_label(case, case_index, total_cases, attempt):
     elif case["access_pattern"] == 2:
         extras.append(f"hotspot={case['hotspot_fraction']}/{case['hotspot_prob']}")
     extras.extend([
-        f"threads={runtime_worker_threads(case)}",
-        f"nodes={case.get('compute_node_count', DefaultComputeNodeCount)}",
+        f"threads={case['worker_threads']}",
         f"batch={case['batch_size']}",
         f"affinity={case['affinity_txn_ratio']}",
         f"kp={case['key_page_ratio']}",
     ])
-    if RouterOnly:
-        extras.append(f"router_threads={runtime_router_threads(case)}")
     if case.get("tpcc_partition_warehouses"):
         extras.append("tpcc_wh_part=1")
     if case.get("long_txn_length") is not None:
@@ -1292,7 +1195,7 @@ def prepare_backup_data(case, backup_path):
         f"--db-type {DBType} --use-sp {UseStoredProcedures} "
         f"--access-pattern {case['access_pattern']}{access_extra_args(case)} "
         f"{workload_scale_arg(case['workload'], case.get('account_count'), case.get('warehouse_count'))} "
-        f"{build_db_connection_args(case['compute_node_count'])} "
+        f"{build_db_connection_args()} "
         f"--worker-threads {case['worker_threads']} "
         f"--sys_extend_size {sys_extend} --sys_index_extend_size {sys_index_extend}"
     )
@@ -1347,7 +1250,6 @@ Run_Path = workspace + "/build/serve/test/"
 kwr_report_ip = "172.16.0.24"
 kwr_ip_password = "Wljwlj123."
 kwr_report_path = "/home/kingbase/MP-Router/kwr/"
-KWRScope = "single" # single: node0 only; all: one snapshot/report per active database node
 database_data_path = "/sharedata/kingbase/data-hot/"
 db_resource_name = "clone-DB"
 remote_retry_sleep_seconds = 3
@@ -1367,21 +1269,15 @@ db_ready_probe_conninfos = [
     "host=172.16.0.26 port=44321 user=system password=123456 dbname=smallbank",
     "host=172.16.0.27 port=44321 user=system password=123456 dbname=smallbank",
     "host=172.16.0.25 port=44321 user=system password=123456 dbname=smallbank",
-    # "host=172.16.0.30 port=44321 user=system password=123456 dbname=smallbank",
-    # "host=172.16.0.29 port=44321 user=system password=123456 dbname=smallbank",
-    # "host=172.16.0.31 port=44321 user=system password=123456 dbname=smallbank",
-    # "host=172.16.0.32 port=44321 user=system password=123456 dbname=smallbank",
 ]
-
 yashan_db_conninfos = [
     "ip_port=172.16.0.24:1688 user=sys password=Wljwlj123.",
     "ip_port=172.16.0.26:1688 user=sys password=Wljwlj123.",
     "ip_port=172.16.0.27:1688 user=sys password=Wljwlj123.",
     "ip_port=172.16.0.25:1688 user=sys password=Wljwlj123.",
 ]
-DBType = 0 # 0: PostgreSQL/KES, 1: YashanDB, 2: MySQL
+DBType = 1 # 0: PostgreSQL/KES, 1: YashanDB, 2: MySQL
 UseStoredProcedures = 1
-RouterOnly = False
 
 
 # !      !       !            注意：根据实际环境修改以上路径和参数                  !        !        !
@@ -1389,10 +1285,10 @@ RouterOnly = False
 # dynamic
 # RunModeType = [0, 3, 8, 11, 4, 13]
 # RunModeType = [11]
-RunModeType = [11]
+# RunModeType = [26, 27]
 # RunModeType = [23]
-# RunModeType = [11]
-# RunModeType = [28]
+RunModeType = [11, 23, 28, 0 , 2, 25]
+# RunModeType = [0, 2, 11, 13, 23, 25, 28]
 TPCCRuleRunModeType = [31]
 # RunModeType = [11, 13, 2]
 # RunModeType = [28]
@@ -1405,36 +1301,30 @@ Workloads = ["smallbank"] # one script run can cover multiple workloads
 WorkloadAccessPatterns = {
     "smallbank": [1],
     "tpcc": [2,0],
-    "tpcc-standard": [2,0],
 }
 SweepMode = "axis" # axis: vary one dimension from defaults; full: Cartesian product
 AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
 # AccessPattern = [1]
 # ZipfianTheta = [0.4]
 # ZipfianTheta = [0.8]
-ZipfianTheta = [0.9, 0.8, 0.6]
-# ZipfianTheta = [0.8]
+# ZipfianTheta = [0.8, 0.6, 1.1, 1.3, 0.1, 0.9] 
+ZipfianTheta = [0.8]
 ZipfianGenerator = "finite" # options: finite, legacy
-# HotspotFraction = [0.25]
-HotspotFraction = [0.001, 0.01, 0.1, 1]
-HotspotProb = [0.8]
-# HotspotProb = [0.5, 0.8, 0.9]
+HotspotFraction = [0.25]
+# HotspotFraction = [0.001]
+# HotspotProb = [0.8]
+HotspotProb = [0.5, 0.8, 0.9]
 # account = 100W, 单个表大概14W个页面, 每个页面8KB, 大小约1.1GB
 AccountCount = [10000000]
 WarehouseCount = [500]
 WorkerThreadCount = [16]
 # WorkerThreadCount = [16, 2, 4, 8, 32, 64]
 try_count = 35000
-TimeRun = 1 # 0:disable, 1:enable
-EnableDynamicWorkload = 0 # 0:disable, 1:enable dynamic workload phases in ./run
+TimeRun = 0 # 0:disable, 1:enable
+EnableDynamicWorkload = 1 # 0:disable, 1:enable dynamic workload phases in ./run
 WarmupSeconds = 15
 RunSeconds = 30
 FillPipelineBubble = 0
-PreprocessBatchConcurrency = 1
-RouterOnlyWorkerThreads = 4
-RouterOnlyRouterThreads = 16
-RouterOnlyPreprocessBatchConcurrency = 2
-RouterOnlyGeneratorThreads = 8
 Unlog = 1
 UseDataCache = False # True: restore workload data cache before each case; False: do not restart DB, load data in each run
 RestartDBBeforeEachTPCCMode = True # True: for TPC-C, restart DB before each mode when UseDataCache=False
@@ -1444,11 +1334,9 @@ sys_index_extend_size = 30000
 AffinityTxnRatio = [0.8]
 # AffinityTxnRatio = [0.8, 1, 0.6, 0.4, 0.2, 0]
 # AffinityTxnRatio = [1, 0.8, 0.6, 0.4, 0.2, 0]
-# BatchSize = [10000, 5000, 1000, 500, 100, 50000, 100000, 10, 50] # default 10000
+# BatchSize = [10000, 5000, 1000, 500, 100, 50000, 100000] # default 10000
 BatchSize = [10000]
 NumBucket = [1]
-ComputeNodeCounts = [4] # first value is the default; remaining values form the node-count axis
-# ComputeNodeCounts = [8, 6, 4, 2, 1, 7, 5, 3] # first value is the default; remaining values form the node-count axis
 TPCCPartitionWarehouse = [0] # 0:disable, 1:partition warehouse by w_id range
 EnableLongTxn = 0 # 0:disable, 1:enable
 # LongTxnSize = [8]
@@ -1467,10 +1355,9 @@ RestoreConfigAfterRun = True
 DefaultAccessPattern = {
     "smallbank": 1,
     "tpcc": 2,
-    "tpcc-standard": 2,
 }
 DefaultZipfianTheta = 0.8
-DefaultHotspotFraction = 0.01
+DefaultHotspotFraction = 0.25
 DefaultHotspotProb = 0.8
 DefaultWorkerThreads = WorkerThreadCount[0]
 DefaultBatchSize = BatchSize[0]
@@ -1478,7 +1365,6 @@ DefaultKeyPageMapCapacity = KeyPageMapCapacity[0]
 DefaultEnableMLP = 0
 DefaultAffinityTxnRatio = AffinityTxnRatio[0]
 DefaultNumBucket = NumBucket[0]
-DefaultComputeNodeCount = ComputeNodeCounts[0]
 DefaultTPCCPartitionWarehouses = TPCCPartitionWarehouse[0]
 DefaultLongTxnLength = LongTxnSize[0]
 
@@ -1504,19 +1390,6 @@ if __name__ == "__main__":
     parser.add_argument("--warmup-seconds", type=int, default=None, help="Override WarmupSeconds for --time-run")
     parser.add_argument("--run-seconds", type=int, default=None, help="Override RunSeconds for --time-run")
     parser.add_argument("--num-bucket", type=int, default=None, help="Override NumBucket for this script run")
-    parser.add_argument("--node-count", type=int, default=None, help="Run with only the first N configured database nodes")
-    parser.add_argument("--kwr-scope", choices=("single", "all"), default=None, help="Collect KWR from node0 only or every active DB node")
-    parser.add_argument(
-        "--preprocess-batch-concurrency",
-        type=int,
-        default=None,
-        help="Number of mode11 batches preprocessed concurrently [default: 2].",
-    )
-    parser.add_argument(
-        "--router-only",
-        action="store_true",
-        help="Measure SmallBank router capacity with empty consumers; automatically builds Release/O3.",
-    )
     parser.add_argument("--disable-dynamic", action="store_true", help="Disable --enable-dynamic for this run")
     parser.add_argument(
         "--resume-result-dir",
@@ -1545,31 +1418,8 @@ if __name__ == "__main__":
     if args.num_bucket is not None:
         NumBucket = [args.num_bucket]
         DefaultNumBucket = args.num_bucket
-    if args.node_count is not None:
-        ComputeNodeCounts = [args.node_count]
-        DefaultComputeNodeCount = args.node_count
-    if args.kwr_scope is not None:
-        KWRScope = args.kwr_scope
-    if args.preprocess_batch_concurrency is not None:
-        if args.preprocess_batch_concurrency <= 0:
-            raise ValueError("--preprocess-batch-concurrency must be greater than 0")
-        PreprocessBatchConcurrency = args.preprocess_batch_concurrency
-    RouterOnly = args.router_only
     if args.disable_dynamic:
         EnableDynamicWorkload = 0
-    if RouterOnly and any(workload_name != "smallbank" for workload_name in Workloads):
-        raise ValueError("--router-only currently supports SmallBank workloads only")
-    configured_node_count = len(configured_db_conninfos())
-    if configured_node_count:
-        invalid_node_counts = [
-            node_count for node_count in ComputeNodeCounts
-            if node_count < 1 or node_count > configured_node_count
-        ]
-        if invalid_node_counts:
-            raise ValueError(
-                f"Invalid ComputeNodeCounts {invalid_node_counts}; DB_TYPE={DBType} has "
-                f"{configured_node_count} configured database connections"
-            )
     UseDataCache = UseDataCache and not args.no_data_cache
     if UseDataCache and not is_postgres_like_db():
         raise RuntimeError("UseDataCache is only wired for the PostgreSQL/KES data directory workflow.")
@@ -1578,19 +1428,6 @@ if __name__ == "__main__":
     logging.info(f"DBType = {DBType}")
     logging.info(f"EnableDynamicWorkload = {EnableDynamicWorkload}")
     logging.info(f"ZipfianGenerator = {ZipfianGenerator}")
-    logging.info(f"ComputeNodeCounts = {ComputeNodeCounts}")
-    logging.info(f"KWRScope = {KWRScope}")
-    logging.info(f"RouterOnly = {RouterOnly}")
-    logging.info(f"BuildType = {'Release' if RouterOnly else 'Debug'}")
-    if RouterOnly:
-        logging.info(
-            "RouteOnlyThreads = "
-            f"workers:{RouterOnlyWorkerThreads}, router:{RouterOnlyRouterThreads}, "
-            f"preprocess_batches:{RouterOnlyPreprocessBatchConcurrency}, "
-            f"generators:{RouterOnlyGeneratorThreads}"
-        )
-    else:
-        logging.info(f"PreprocessBatchConcurrency = {PreprocessBatchConcurrency}")
 
     # 删除之前的结果
     if os.path.exists(result):
@@ -1644,15 +1481,13 @@ if __name__ == "__main__":
         logging.info("Dropping public tables once before starting this script run.")
         wait_for_db_start()
         drop_public_tables()
-        if not RouterOnly:
-            truncate_kwr_tables()
-            sync_remote_servers_after_case()
+        truncate_kwr_tables()
+        sync_remote_servers_after_case()
     elif not resume_result_dir:
         logging.info(f"Skipping PostgreSQL/KES table cleanup for DB_TYPE={DBType}.")
     
     # 标记是否已经准备好备份数据
-    current_backup_key = None
-    router_only_loaded_data_key = None
+    current_backup_key = None 
 
     for case_index, case in enumerate(planned_cases):
         ensure_build_for_mlp(case["mlp_enabled"])
@@ -1664,15 +1499,11 @@ if __name__ == "__main__":
         attempt = 0
         success = False
 
-        router_only_data_key = (case["workload"], case.get("account_count"), case.get("warehouse_count"))
-        reuse_router_only_data = RouterOnly and router_only_loaded_data_key == router_only_data_key
-
-        if UseDataCache and not reuse_router_only_data:
+        if UseDataCache:
             reset_db_data(backup_path)
         # 确保 server 进程被清理
         kill_server()
-        if not RouterOnly:
-            restart_database_before_tpcc_mode(case)
+        restart_database_before_tpcc_mode(case)
 
         # 删除之前的结果文件，防止误判
         if os.path.exists(result):
@@ -1694,8 +1525,7 @@ if __name__ == "__main__":
             kwr_report_name = (
                 f"kwr_{time_str}_case{case['case_id']:03d}"
                 f"_mode{case['run_mode']}_access{case['access_pattern']}"
-                f"_{case['workload']}_{scale_label}_n{case['compute_node_count']}"
-                f"_thd{runtime_worker_threads(case)}"
+                f"_{case['workload']}_{scale_label}_thd{case['worker_threads']}"
             )
 
             sys_extend, sys_index_extend = extend_sizes_for_case(case)
@@ -1704,18 +1534,16 @@ if __name__ == "__main__":
                 f"--db-type {DBType} --use-sp {UseStoredProcedures} "
                 f"--access-pattern {case['access_pattern']}{access_extra_args(case)} "
                 f"{workload_scale_arg(case['workload'], case.get('account_count'), case.get('warehouse_count'))} "
-                f"{build_db_connection_args(case['compute_node_count'])} "
-                f"--worker-threads {runtime_worker_threads(case)} --kwr-name {kwr_report_name}"
-                f" --kwr-scope {KWRScope}"
+                f"{build_db_connection_args()} "
+                f"--worker-threads {case['worker_threads']} --kwr-name {kwr_report_name}"
                 f" --sys_extend_size {sys_extend} --sys_index_extend_size {sys_index_extend} "
                 f"--affinity-txn-ratio {case['affinity_txn_ratio']} "
                 f" --batch-size {case['batch_size']} --num-bucket {case['num_bucket']}"
                 f" --key-page-ratio {case['key_page_ratio']}"
-                f" --preprocess-batch-concurrency {runtime_preprocess_batch_concurrency()}"
             )
             if case.get("tpcc_partition_warehouses"):
                 cmd += " --tpcc-partition-warehouses"
-            if UseDataCache or reuse_router_only_data:
+            if UseDataCache:
                 cmd += " --skip-load-data"
 
             if TimeRun:
@@ -1736,12 +1564,6 @@ if __name__ == "__main__":
                 )
             if EnableDynamicWorkload:
                 cmd += " --enable-dynamic"
-            if RouterOnly:
-                cmd += (
-                    f" --router-threads {runtime_router_threads(case)}"
-                    f" --generator-threads {runtime_generator_threads(case)}"
-                    " --router-only --important-router-batch-log 0"
-                )
 
             wait_for_db_start()
 
@@ -1750,8 +1572,6 @@ if __name__ == "__main__":
                 return_code = process.wait()
             if return_code == 0 and os.path.exists(result):
                 success = True
-                if RouterOnly:
-                    router_only_loaded_data_key = router_only_data_key
                 logging.info(f"Case {case['case_id']} completed successfully.")
 
                 # 同一组负载参数放在一个目录下，mode 作为下一层目录，避免顶层结果过散。
@@ -1769,8 +1589,20 @@ if __name__ == "__main__":
                 log_file = os.path.join(dest_dir, "partitioning_log.log")
                 shutil.copy2(log, log_file)
 
-                if is_postgres_like_db() and not RouterOnly:
-                    download_kwr_reports(case, dest_dir, kwr_report_name)
+                if is_postgres_like_db():
+                    # scp 将远程服务器的 kwr 报告文件复制到本地对应的结果文件夹中
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    ssh.connect(kwr_report_ip, username="root", password=kwr_ip_password)
+                    sftp = ssh.open_sftp()
+                    remote_run_report = os.path.join(kwr_report_path, f"{kwr_report_name}_end.html")
+                    local_run_report = os.path.join(dest_dir, f"{kwr_report_name}_end.html")
+                    try:
+                        sftp.get(remote_run_report, local_run_report)
+                    except Exception as e:
+                        logging.error(f"\033[31m Failed to retrieve KWR report files: {e} \033[0m")
+                    sftp.close()
+                    ssh.close()
                 summarize_result_dir(figure_path)
             else:
                 if return_code != 0:
@@ -1784,12 +1616,10 @@ if __name__ == "__main__":
                 f"Scale={workload_scale_label(case['workload'], case.get('account_count'), case.get('warehouse_count'))}"
             )
 
-        if not RouterOnly:
-            sync_remote_servers_after_case()
-            time.sleep(test_interval_seconds)
+        sync_remote_servers_after_case()
+        time.sleep(test_interval_seconds)
         next_case = planned_cases[case_index + 1] if case_index + 1 < len(planned_cases) else None
-        if (not RouterOnly and next_case is not None and
-                next_case.get("case_group_id") != case.get("case_group_id")):
+        if next_case is not None and next_case.get("case_group_id") != case.get("case_group_id"):
             logging.info(
                 f"Completed config group {case.get('case_group_id')}; "
                 f"sleeping {config_group_interval_seconds}s before the next config group."

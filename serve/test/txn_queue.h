@@ -469,7 +469,7 @@ public:
         queue_cv_.notify_all();
     }
 
-    std::vector<TxnQueueEntry*> pop_txn_chimera(int* ret_call_id = nullptr, int* ret_type = nullptr) {
+    std::vector<TxnQueueEntry*> pop_txn_chimera(int* ret_call_id = nullptr, int* ret_type = nullptr, double* ret_wait_ms = nullptr) {
         int call_id = rand();
         if(ret_call_id != nullptr) *ret_call_id = call_id;
         std::vector<TxnQueueEntry*> batch_entries;
@@ -482,7 +482,8 @@ public:
                 if(ret_type != nullptr) *ret_type = 0;
                 return {};
             }
-            bool all_queues_empty = txn_queue_.empty() && dag_txn_queue_->empty_unlocked() && phase2_txn_queue_.empty();
+            bool all_queues_empty = prior_read_txn_queue_.empty() && txn_queue_.empty() &&
+                                    dag_txn_queue_->empty_unlocked() && phase2_txn_queue_.empty();
             bool can_exit_completely = all_queues_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
 
             if (g_chimera_phase == 1) { // Phase 2: Global
@@ -495,16 +496,24 @@ public:
                     batch_entries = std::move(shared_txn_queue_->pop_txn()); 
                     return batch_entries;
                 } else {
-                    queue_cv_.wait(lock, [this]() { 
-                        if (force_stopped_) return true;
-                        bool has_txn = !phase2_txn_queue_.empty();
-                        bool all_empty = txn_queue_.empty() && dag_txn_queue_->empty_unlocked() && phase2_txn_queue_.empty();
-                        bool can_exit = all_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
-                        return has_txn || can_exit || g_chimera_phase != 1;
-                    });
+	                    struct timespec wait_start, wait_end;
+	                    clock_gettime(CLOCK_MONOTONIC, &wait_start);
+	                    queue_cv_.wait(lock, [this]() { 
+	                        if (force_stopped_) return true;
+	                        bool has_txn = !phase2_txn_queue_.empty();
+	                        bool all_empty = prior_read_txn_queue_.empty() && txn_queue_.empty() &&
+	                                         dag_txn_queue_->empty_unlocked() && phase2_txn_queue_.empty();
+	                        bool can_exit = all_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
+	                        return has_txn || can_exit || g_chimera_phase != 1;
+	                    });
+	                    clock_gettime(CLOCK_MONOTONIC, &wait_end);
+	                    if (ret_wait_ms != nullptr) {
+	                        *ret_wait_ms += (wait_end.tv_sec - wait_start.tv_sec) * 1000.0 +
+	                                        (wait_end.tv_nsec - wait_start.tv_nsec) / 1000000.0;
+	                    }
                 }
             } else { // Phase 1: Partition
-                if(!txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
+                if(!prior_read_txn_queue_.empty() || !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
                     is_phase2_pop = false;
                     break; 
                 }
@@ -514,13 +523,21 @@ public:
                     return batch_entries;
                 }
                 else { 
-                    queue_cv_.wait(lock, [this]() { 
-                        if (force_stopped_) return true;
-                        bool has_txn = !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked();
-                        bool all_empty = txn_queue_.empty() && dag_txn_queue_->empty_unlocked() && phase2_txn_queue_.empty();
-                        bool can_exit = all_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
-                        return has_txn || can_exit || g_chimera_phase == 1; 
-                    });
+	                    struct timespec wait_start, wait_end;
+	                    clock_gettime(CLOCK_MONOTONIC, &wait_start);
+	                    queue_cv_.wait(lock, [this]() { 
+	                        if (force_stopped_) return true;
+	                        bool has_txn = !prior_read_txn_queue_.empty() || !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked();
+	                        bool all_empty = prior_read_txn_queue_.empty() && txn_queue_.empty() &&
+	                                         dag_txn_queue_->empty_unlocked() && phase2_txn_queue_.empty();
+	                        bool can_exit = all_empty && pending_txn_queue_->empty_node(node_id_) && finished_;
+	                        return has_txn || can_exit || g_chimera_phase == 1; 
+	                    });
+	                    clock_gettime(CLOCK_MONOTONIC, &wait_end);
+	                    if (ret_wait_ms != nullptr) {
+	                        *ret_wait_ms += (wait_end.tv_sec - wait_start.tv_sec) * 1000.0 +
+	                                        (wait_end.tv_nsec - wait_start.tv_nsec) / 1000000.0;
+	                    }
                 }
             }
         }
@@ -533,6 +550,20 @@ public:
             queue_cv_.notify_all();
             
             g_chimera_phase2_exec_cnt.fetch_add(batch_entries.size(), std::memory_order_relaxed);
+            return batch_entries;
+        }
+
+        if(!prior_read_txn_queue_.empty()) {
+            if(ret_type != nullptr) *ret_type = 3; // prior-read type
+            batch_entries = std::move(prior_read_txn_queue_.front());
+            prior_read_txn_queue_.pop_front();
+            current_queue_size_ -= static_cast<int>(batch_entries.size());
+            prior_read_txn_cnt -= static_cast<int>(batch_entries.size());
+            prior_read_txn_vec_cnt -= 1;
+
+            queue_cv_.notify_all();
+
+            g_chimera_phase1_exec_cnt.fetch_add(batch_entries.size(), std::memory_order_relaxed);
             return batch_entries;
         }
 
@@ -559,8 +590,9 @@ public:
         return batch_entries;
     }
 
-    std::vector<TxnQueueEntry*> pop_txn(int* ret_call_id = nullptr, int* ret_type = nullptr) {
-        if (SYSTEM_MODE == 28) return pop_txn_chimera(ret_call_id, ret_type);
+    std::vector<TxnQueueEntry*> pop_txn(int* ret_call_id = nullptr, int* ret_type = nullptr, double* ret_wait_ms = nullptr) {
+        if (ret_wait_ms != nullptr) *ret_wait_ms = 0.0;
+        if (SYSTEM_MODE == 28) return pop_txn_chimera(ret_call_id, ret_type, ret_wait_ms);
         
         int call_id = rand();
         if(ret_call_id != nullptr) *ret_call_id = call_id;
@@ -597,10 +629,11 @@ public:
                 if(ret_type != nullptr) *ret_type = 0;
                 return {};
             }
-            if(!txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
+            if(!prior_read_txn_queue_.empty() || !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
                 break; // 有事务可弹出
             }
-            if(txn_queue_.empty() && dag_txn_queue_->empty_unlocked() && pending_txn_queue_->empty_node(node_id_) && (finished_ || batch_finished_)) {
+            if(prior_read_txn_queue_.empty() && txn_queue_.empty() && dag_txn_queue_->empty_unlocked() &&
+               pending_txn_queue_->empty_node(node_id_) && (finished_ || batch_finished_)) {
             // batch end
                 if(ret_type != nullptr) *ret_type = 0; // finished type
                 // indicate finished or batch finished, pop one from shared_queue, if shared_queue is empty, will returen {}
@@ -614,16 +647,42 @@ public:
             }
             else { 
                 // 目前无事务, 等待
-                queue_cv_.wait(lock, [this]() { 
-                    if (force_stopped_) return true;
-                    bool has_txn = !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked();
-                    bool can_exit = (finished_ || batch_finished_) && pending_txn_queue_->empty_node(node_id_);
-                    return has_txn || can_exit;
-                });
+	                struct timespec wait_start, wait_end;
+	                clock_gettime(CLOCK_MONOTONIC, &wait_start);
+	                queue_cv_.wait(lock, [this]() { 
+	                    if (force_stopped_) return true;
+	                    bool has_txn = !prior_read_txn_queue_.empty() || !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked();
+	                    bool can_exit = (finished_ || batch_finished_) && pending_txn_queue_->empty_node(node_id_);
+	                    return has_txn || can_exit;
+	                });
+	                clock_gettime(CLOCK_MONOTONIC, &wait_end);
+	                if (ret_wait_ms != nullptr) {
+	                    *ret_wait_ms += (wait_end.tv_sec - wait_start.tv_sec) * 1000.0 +
+	                                    (wait_end.tv_nsec - wait_start.tv_nsec) / 1000000.0;
+	                }
             }
         }
 
-        if(!dag_txn_queue_->empty_unlocked()){
+        if(!prior_read_txn_queue_.empty()) {
+            if(ret_type != nullptr) *ret_type = 3; // prior-read type
+            batch_entries = std::move(prior_read_txn_queue_.front());
+            assert(!batch_entries.empty());
+            assert(batch_entries.front() != nullptr);
+            prior_read_txn_queue_.pop_front();
+            current_queue_size_ -= static_cast<int>(batch_entries.size());
+            prior_read_txn_cnt -= static_cast<int>(batch_entries.size());
+            prior_read_txn_vec_cnt -= 1;
+        #if LOG_QUEUE_STATUS
+            logger_->info("[TxnQueue Pop] call_id: " + std::to_string(call_id) +
+                            " Popping prior-read txn batch of size " +
+                            std::to_string(batch_entries.size()) + " from txn queue of compute node " +
+                            std::to_string(node_id_) + ", current queue size: " +
+                            std::to_string(current_queue_size_) + ", prior_read_txn_cnt: " +
+                            std::to_string(prior_read_txn_cnt) + ", prior_read_txn_vec_cnt: " +
+                            std::to_string(prior_read_txn_vec_cnt));
+        #endif
+        }
+        else if(!dag_txn_queue_->empty_unlocked()){
             if(ret_type != nullptr) *ret_type = 1; // dag type
             // 优先取 DAG-ready，若过大则分块，并与 regular 批次做混合以降低冲突
             bool inflight_active = dag_txn_queue_->is_inflight_active_unlocked();
@@ -671,7 +730,8 @@ public:
             #endif
 
                 // ! Fix: Notify waiting threads (producers or other consumers)
-                if(current_queue_size_ <= max_queue_size_ * 0.8 || !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
+                if(current_queue_size_ <= max_queue_size_ * 0.8 || !prior_read_txn_queue_.empty() ||
+                   !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
                     queue_cv_.notify_all();
                 }
 
@@ -777,7 +837,8 @@ public:
         }
 
         // 通知可能阻塞的生产者线程或消费者线程
-        if(current_queue_size_ <= max_queue_size_ * 0.8 || !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
+        if(current_queue_size_ <= max_queue_size_ * 0.8 || !prior_read_txn_queue_.empty() ||
+           !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
             queue_cv_.notify_all();
         }
         if(current_queue_size_ == 0) {
@@ -844,6 +905,34 @@ public:
     #endif
         if(finished_) queue_cv_.notify_all();
         else queue_cv_.notify_one();
+    }
+
+    void push_txn_prior_read_ready(std::vector<TxnQueueEntry*> entries) {
+        if(entries.empty()) return;
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        queue_cv_.wait(lock, [this, &entries]() {
+            return force_stopped_ || current_queue_size_ + entries.size() < max_queue_size_;
+        });
+        if (force_stopped_) {
+            return;
+        }
+
+        size_t i = 0;
+        while(i < entries.size()) {
+            std::vector<TxnQueueEntry*> batch;
+            batch.reserve(BatchExecutorPOPTxnSize);
+            for(int j = 0; j < BatchExecutorPOPTxnSize && i < entries.size(); ++j, ++i) {
+                batch.push_back(entries[i]);
+            }
+            if(!batch.empty() && batch.front() != nullptr) {
+                batch.front()->combine_txn_count = static_cast<int>(batch.size());
+            }
+            current_queue_size_ += static_cast<int>(batch.size());
+            prior_read_txn_cnt += static_cast<int>(batch.size());
+            prior_read_txn_vec_cnt += 1;
+            prior_read_txn_queue_.emplace_back(std::move(batch));
+        }
+        queue_cv_.notify_all();
     }
 
     // // push 绑定到指定位置的事务到队列指定位置
@@ -1109,6 +1198,7 @@ public:
     }
 
 private:
+    std::deque<std::vector<TxnQueueEntry*>> prior_read_txn_queue_;
     std::deque<std::vector<TxnQueueEntry*>> txn_queue_;
     std::deque<std::vector<TxnQueueEntry*>> phase2_txn_queue_; // 用于 Phase 2 跨区事务的独立积压队列
     std::mutex queue_mutex_;
@@ -1137,6 +1227,8 @@ private:
     int regular_txn_vec_cnt = 0;
     int schedule_txn_cnt = 0;
     int schedule_txn_vec_cnt = 0;
+    int prior_read_txn_cnt = 0;
+    int prior_read_txn_vec_cnt = 0;
 
     static std::vector<TxnQueueEntry*> make_vector_batch(TxnQueueEntry* entry) {
         std::vector<TxnQueueEntry*> batch;
@@ -1213,6 +1305,16 @@ public:
         pool_cv_.notify_all();
     }
 
+    void clear() {
+        std::unique_lock<std::mutex> lock(pool_mutex_);
+        for (auto* entry : txn_pool_) {
+            delete entry;
+        }
+        txn_pool_.clear();
+        current_pool_size_ = 0;
+        pool_cv_.notify_all();
+    }
+
     void register_batch_with_tit(const std::vector<TxnQueueEntry*>& batch_txns) {
         tit->push_batch(batch_txns);
     }
@@ -1261,6 +1363,12 @@ public:
         stop_ = true;
         for(int i = 0; i < num_sub_pool_; i++){
             pools[i]->stop_pool();
+        }
+    }
+
+    void clear() {
+        for(int i = 0; i < num_sub_pool_; i++){
+            pools[i]->clear();
         }
     }
 

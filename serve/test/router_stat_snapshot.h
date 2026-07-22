@@ -107,13 +107,25 @@ struct RouterStatSnapshot {
     uint64_t batch_local_total_txn_count = 0;
     uint64_t batch_local_conflict_free_txn_count = 0;
     uint64_t batch_local_conflicted_txn_count = 0;
+    uint64_t conflicted_txn_page_diag_count = 0;
+    uint64_t conflicted_txn_involved_page_total = 0;
+    uint64_t conflicted_txn_dependency_page_total = 0;
+    uint64_t conflict_transfer_plan_count = 0;
+    uint64_t conflict_transfer_page_total = 0;
     uint64_t conflict_free_path_txn_count = 0;
     uint64_t conflicting_critical_path_txn_count = 0;
     uint64_t conflicting_non_critical_path_txn_count = 0;
+    uint64_t prior_txn_count = 0;
+    uint64_t prior_read_only_on_transfer_count = 0;
+    uint64_t prior_write_on_transfer_count = 0;
+    uint64_t prior_dag_push_batch_count = 0;
+    uint64_t prior_dag_push_txn_count = 0;
+    uint64_t prior_dag_push_max_batch_size = 0;
     std::array<uint64_t, 4> tpcc_conflict_pages_by_table = {0, 0, 0, 0};
     std::array<uint64_t, 4> tpcc_conflict_txns_by_table = {0, 0, 0, 0};
     double merge_and_construct_ipq_ms = 0.0;
     double select_condidate_txns_ms = 0.0;
+    double queue_backpressure_sleep_ms = 0.0;
     double compute_transfer_page_ms = 0.0;
     double find_affected_txns_ms = 0.0;
     double decide_txn_schedule_ms = 0.0;
@@ -128,7 +140,20 @@ struct RouterStatSnapshot {
     std::vector<double> pop_txn_total_ms_per_node;
         std::vector<double> pop_txn_empty_total_ms_per_node;
         std::vector<double> pop_txn_dag_total_ms_per_node;
+        std::vector<double> pop_txn_prior_read_total_ms_per_node;
         std::vector<double> pop_txn_regular_total_ms_per_node;
+    std::vector<double> pop_txn_empty_wait_total_ms_per_node;
+    std::vector<double> pop_txn_dag_wait_total_ms_per_node;
+    std::vector<double> pop_txn_prior_read_wait_total_ms_per_node;
+    std::vector<double> pop_txn_regular_wait_total_ms_per_node;
+    std::vector<uint64_t> pop_txn_empty_batch_count_per_node;
+    std::vector<uint64_t> pop_txn_empty_txn_count_per_node;
+    std::vector<uint64_t> pop_txn_dag_batch_count_per_node;
+    std::vector<uint64_t> pop_txn_dag_txn_count_per_node;
+    std::vector<uint64_t> pop_txn_prior_read_batch_count_per_node;
+    std::vector<uint64_t> pop_txn_prior_read_txn_count_per_node;
+    std::vector<uint64_t> pop_txn_regular_batch_count_per_node;
+    std::vector<uint64_t> pop_txn_regular_txn_count_per_node;
     std::vector<double> wait_next_batch_total_ms_per_node;
     std::vector<double> sum_worker_thread_exec_time_ms_per_node;
     std::vector<double> sum_worker_thread_update_key_page_time_ms_per_node;
@@ -305,6 +330,50 @@ struct RouterStatSnapshot {
                               : 0.0)
                       << "% of total)" << std::endl;
         }
+        std::cout << "    Conflict Page Diagnostics:" << std::endl;
+        std::cout << "      Conflicted Txns Sampled: " << conflicted_txn_page_diag_count << std::endl;
+        std::cout << "      Avg Valid Involved Pages / Conflicted Txn: "
+                  << (conflicted_txn_page_diag_count > 0
+                          ? static_cast<double>(conflicted_txn_involved_page_total) / conflicted_txn_page_diag_count
+                          : 0.0)
+                  << std::endl;
+        std::cout << "      Avg Dependency-Conflict Pages / Conflicted Txn: "
+                  << (conflicted_txn_page_diag_count > 0
+                          ? static_cast<double>(conflicted_txn_dependency_page_total) / conflicted_txn_page_diag_count
+                          : 0.0)
+                  << std::endl;
+        std::cout << "      Dependency/Involved Page Ratio: "
+                  << (conflicted_txn_involved_page_total > 0
+                          ? 100.0 * conflicted_txn_dependency_page_total / conflicted_txn_involved_page_total
+                          : 0.0)
+                  << "%" << std::endl;
+        std::cout << "      Transfer Plans: " << conflict_transfer_plan_count
+                  << ", Avg Transfer Pages / Plan: "
+                  << (conflict_transfer_plan_count > 0
+                          ? static_cast<double>(conflict_transfer_page_total) / conflict_transfer_plan_count
+                          : 0.0)
+                  << std::endl;
+        std::cout << "    Prior Txn Diagnostics:" << std::endl;
+        std::cout << "      Prior Txns: " << prior_txn_count << std::endl;
+        std::cout << "      Prior Txns Read-Only On Touched Transfer Pages: "
+                  << prior_read_only_on_transfer_count << " ("
+                  << (prior_txn_count > 0
+                          ? 100.0 * prior_read_only_on_transfer_count / prior_txn_count
+                          : 0.0)
+                  << "% of prior)" << std::endl;
+        std::cout << "      Prior Txns With Write On Touched Transfer Pages: "
+                  << prior_write_on_transfer_count << " ("
+                  << (prior_txn_count > 0
+                          ? 100.0 * prior_write_on_transfer_count / prior_txn_count
+                          : 0.0)
+                  << "% of prior)" << std::endl;
+        std::cout << "      Prior DAG Push Batches: " << prior_dag_push_batch_count
+                  << ", Txns: " << prior_dag_push_txn_count
+                  << ", Avg Batch Size: "
+                  << (prior_dag_push_batch_count > 0
+                          ? static_cast<double>(prior_dag_push_txn_count) / prior_dag_push_batch_count
+                          : 0.0)
+                  << ", Max Batch Size: " << prior_dag_push_max_batch_size << std::endl;
         const uint64_t tpcc_conflict_pages_total =
             tpcc_conflict_pages_by_table[0] + tpcc_conflict_pages_by_table[1] +
             tpcc_conflict_pages_by_table[2] + tpcc_conflict_pages_by_table[3];
@@ -337,6 +406,7 @@ struct RouterStatSnapshot {
                   << " TPS" << std::endl;
         std::cout << "      Merge And Construct IPQ Time: " << merge_and_construct_ipq_ms << " ms" << std::endl;
         std::cout << "      Select Condidate Txns Time: " << select_condidate_txns_ms << " ms" << std::endl;
+        std::cout << "        Queue Backpressure Sleep Time: " << queue_backpressure_sleep_ms << " ms" << std::endl;
         std::cout << "      Compute Transfer Page Time: " << compute_transfer_page_ms << " ms" << std::endl;
         std::cout << "      Find Affected Txns Time: " << find_affected_txns_ms << " ms" << std::endl;
         std::cout << "      Decide Txn Schedule Time: " << decide_txn_schedule_ms << " ms" << std::endl;
@@ -356,7 +426,27 @@ struct RouterStatSnapshot {
             std::cout << "  Average Pop Txn From Queue Time: " << pop_txn_total_ms_per_node[i] / worker_threads << " ms" << std::endl; 
             std::cout << "    Average Pop Empty Time: " << pop_txn_empty_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
             std::cout << "    Average Pop DAG Time: " << pop_txn_dag_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            std::cout << "    Average Pop Prior-Read Time: " << pop_txn_prior_read_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
             std::cout << "    Average Pop Regular Time: " << pop_txn_regular_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            std::cout << "    Average Pop Empty Queue-CV Wait Time: " << pop_txn_empty_wait_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            std::cout << "    Average Pop DAG Queue-CV Wait Time: " << pop_txn_dag_wait_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            std::cout << "    Average Pop Prior-Read Queue-CV Wait Time: " << pop_txn_prior_read_wait_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            std::cout << "    Average Pop Regular Queue-CV Wait Time: " << pop_txn_regular_wait_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
+            auto print_pop_batch_stats = [](const char* label, uint64_t batches, uint64_t txns) {
+                std::cout << "    Pop " << label << " Batches: " << batches
+                          << ", Txns: " << txns
+                          << ", Avg Batch Size: "
+                          << (batches > 0 ? static_cast<double>(txns) / batches : 0.0)
+                          << std::endl;
+            };
+            print_pop_batch_stats("Empty", pop_txn_empty_batch_count_per_node[i],
+                                  pop_txn_empty_txn_count_per_node[i]);
+            print_pop_batch_stats("DAG", pop_txn_dag_batch_count_per_node[i],
+                                  pop_txn_dag_txn_count_per_node[i]);
+            print_pop_batch_stats("Prior-Read", pop_txn_prior_read_batch_count_per_node[i],
+                                  pop_txn_prior_read_txn_count_per_node[i]);
+            print_pop_batch_stats("Regular", pop_txn_regular_batch_count_per_node[i],
+                                  pop_txn_regular_txn_count_per_node[i]);
             std::cout << "  Average Wait Next Batch Time: " << wait_next_batch_total_ms_per_node[i] / worker_threads << " ms" << std::endl;
             std::cout << "  Average Worker Thread Exec Time: " << sum_worker_thread_exec_time_ms_per_node[i] / worker_threads << " ms" << std::endl;
             std::cout << "    Average Worker Thread Update Key Page Time: " << sum_worker_thread_update_key_page_time_ms_per_node[i] / worker_threads << " ms" << std::endl;
@@ -465,14 +555,26 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.batch_local_total_txn_count = tdb.batch_local_total_txn_count;
     snap.batch_local_conflict_free_txn_count = tdb.batch_local_conflict_free_txn_count;
     snap.batch_local_conflicted_txn_count = tdb.batch_local_conflicted_txn_count;
+    snap.conflicted_txn_page_diag_count = tdb.conflicted_txn_page_diag_count;
+    snap.conflicted_txn_involved_page_total = tdb.conflicted_txn_involved_page_total;
+    snap.conflicted_txn_dependency_page_total = tdb.conflicted_txn_dependency_page_total;
+    snap.conflict_transfer_plan_count = tdb.conflict_transfer_plan_count;
+    snap.conflict_transfer_page_total = tdb.conflict_transfer_page_total;
     snap.conflict_free_path_txn_count = tdb.conflict_free_path_txn_count;
     snap.conflicting_critical_path_txn_count = tdb.conflicting_critical_path_txn_count;
     snap.conflicting_non_critical_path_txn_count = tdb.conflicting_non_critical_path_txn_count;
+    snap.prior_txn_count = tdb.prior_txn_count;
+    snap.prior_read_only_on_transfer_count = tdb.prior_read_only_on_transfer_count;
+    snap.prior_write_on_transfer_count = tdb.prior_write_on_transfer_count;
+    snap.prior_dag_push_batch_count = tdb.prior_dag_push_batch_count;
+    snap.prior_dag_push_txn_count = tdb.prior_dag_push_txn_count;
+    snap.prior_dag_push_max_batch_size = tdb.prior_dag_push_max_batch_size;
     snap.tpcc_conflict_pages_by_table = tdb.tpcc_conflict_pages_by_table;
     snap.tpcc_conflict_txns_by_table = tdb.tpcc_conflict_txns_by_table;
     snap.merge_and_construct_ipq_ms = tdb.merge_and_construct_ipq_ms;
     snap.process_conflicted_txn_ms = tdb.process_conflicted_txn_ms;
     snap.select_condidate_txns_ms = tdb.select_condidate_txns_ms;
+    snap.queue_backpressure_sleep_ms = tdb.queue_backpressure_sleep_ms;
     snap.compute_transfer_page_ms = tdb.compute_transfer_page_ms;
     snap.find_affected_txns_ms = tdb.find_affected_txns_ms;
     snap.decide_txn_schedule_ms = tdb.decide_txn_schedule_ms;
@@ -486,7 +588,20 @@ inline RouterStatSnapshot take_router_snapshot(SmartRouter* router) {
     snap.pop_txn_total_ms_per_node = tdb.pop_txn_total_ms_per_node;
     snap.pop_txn_empty_total_ms_per_node = tdb.pop_txn_empty_total_ms_per_node;
     snap.pop_txn_dag_total_ms_per_node = tdb.pop_txn_dag_total_ms_per_node;
+    snap.pop_txn_prior_read_total_ms_per_node = tdb.pop_txn_prior_read_total_ms_per_node;
     snap.pop_txn_regular_total_ms_per_node = tdb.pop_txn_regular_total_ms_per_node;
+    snap.pop_txn_empty_wait_total_ms_per_node = tdb.pop_txn_empty_wait_total_ms_per_node;
+    snap.pop_txn_dag_wait_total_ms_per_node = tdb.pop_txn_dag_wait_total_ms_per_node;
+    snap.pop_txn_prior_read_wait_total_ms_per_node = tdb.pop_txn_prior_read_wait_total_ms_per_node;
+    snap.pop_txn_regular_wait_total_ms_per_node = tdb.pop_txn_regular_wait_total_ms_per_node;
+    snap.pop_txn_empty_batch_count_per_node = tdb.pop_txn_empty_batch_count_per_node;
+    snap.pop_txn_empty_txn_count_per_node = tdb.pop_txn_empty_txn_count_per_node;
+    snap.pop_txn_dag_batch_count_per_node = tdb.pop_txn_dag_batch_count_per_node;
+    snap.pop_txn_dag_txn_count_per_node = tdb.pop_txn_dag_txn_count_per_node;
+    snap.pop_txn_prior_read_batch_count_per_node = tdb.pop_txn_prior_read_batch_count_per_node;
+    snap.pop_txn_prior_read_txn_count_per_node = tdb.pop_txn_prior_read_txn_count_per_node;
+    snap.pop_txn_regular_batch_count_per_node = tdb.pop_txn_regular_batch_count_per_node;
+    snap.pop_txn_regular_txn_count_per_node = tdb.pop_txn_regular_txn_count_per_node;
     snap.wait_next_batch_total_ms_per_node = tdb.wait_next_batch_total_ms_per_node;
     snap.sum_worker_thread_exec_time_ms_per_node = tdb.sum_worker_thread_exec_time_ms_per_node;
     snap.sum_worker_thread_update_key_page_time_ms_per_node = tdb.sum_worker_thread_update_key_page_time_ms_per_node;
@@ -615,6 +730,21 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.batch_local_conflicted_txn_count = b.batch_local_conflicted_txn_count >= a.batch_local_conflicted_txn_count
                                             ? b.batch_local_conflicted_txn_count - a.batch_local_conflicted_txn_count
                                             : 0;
+    d.conflicted_txn_page_diag_count = b.conflicted_txn_page_diag_count >= a.conflicted_txn_page_diag_count
+                                           ? b.conflicted_txn_page_diag_count - a.conflicted_txn_page_diag_count
+                                           : 0;
+    d.conflicted_txn_involved_page_total = b.conflicted_txn_involved_page_total >= a.conflicted_txn_involved_page_total
+                                               ? b.conflicted_txn_involved_page_total - a.conflicted_txn_involved_page_total
+                                               : 0;
+    d.conflicted_txn_dependency_page_total = b.conflicted_txn_dependency_page_total >= a.conflicted_txn_dependency_page_total
+                                                 ? b.conflicted_txn_dependency_page_total - a.conflicted_txn_dependency_page_total
+                                                 : 0;
+    d.conflict_transfer_plan_count = b.conflict_transfer_plan_count >= a.conflict_transfer_plan_count
+                                         ? b.conflict_transfer_plan_count - a.conflict_transfer_plan_count
+                                         : 0;
+    d.conflict_transfer_page_total = b.conflict_transfer_page_total >= a.conflict_transfer_page_total
+                                         ? b.conflict_transfer_page_total - a.conflict_transfer_page_total
+                                         : 0;
     d.conflict_free_path_txn_count = b.conflict_free_path_txn_count >= a.conflict_free_path_txn_count
                                         ? b.conflict_free_path_txn_count - a.conflict_free_path_txn_count
                                         : 0;
@@ -624,6 +754,22 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.conflicting_non_critical_path_txn_count = b.conflicting_non_critical_path_txn_count >= a.conflicting_non_critical_path_txn_count
                                                     ? b.conflicting_non_critical_path_txn_count - a.conflicting_non_critical_path_txn_count
                                                     : 0;
+    d.prior_txn_count = b.prior_txn_count >= a.prior_txn_count
+                            ? b.prior_txn_count - a.prior_txn_count
+                            : 0;
+    d.prior_read_only_on_transfer_count = b.prior_read_only_on_transfer_count >= a.prior_read_only_on_transfer_count
+                                              ? b.prior_read_only_on_transfer_count - a.prior_read_only_on_transfer_count
+                                              : 0;
+    d.prior_write_on_transfer_count = b.prior_write_on_transfer_count >= a.prior_write_on_transfer_count
+                                          ? b.prior_write_on_transfer_count - a.prior_write_on_transfer_count
+                                          : 0;
+    d.prior_dag_push_batch_count = b.prior_dag_push_batch_count >= a.prior_dag_push_batch_count
+                                       ? b.prior_dag_push_batch_count - a.prior_dag_push_batch_count
+                                       : 0;
+    d.prior_dag_push_txn_count = b.prior_dag_push_txn_count >= a.prior_dag_push_txn_count
+                                     ? b.prior_dag_push_txn_count - a.prior_dag_push_txn_count
+                                     : 0;
+    d.prior_dag_push_max_batch_size = b.prior_dag_push_max_batch_size;
     for (size_t i = 0; i < d.tpcc_conflict_pages_by_table.size(); ++i) {
         d.tpcc_conflict_pages_by_table[i] = b.tpcc_conflict_pages_by_table[i] >= a.tpcc_conflict_pages_by_table[i]
                                                 ? b.tpcc_conflict_pages_by_table[i] - a.tpcc_conflict_pages_by_table[i]
@@ -635,6 +781,7 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
     d.merge_and_construct_ipq_ms = b.merge_and_construct_ipq_ms - a.merge_and_construct_ipq_ms;
     d.process_conflicted_txn_ms = b.process_conflicted_txn_ms - a.process_conflicted_txn_ms;
     d.select_condidate_txns_ms = b.select_condidate_txns_ms - a.select_condidate_txns_ms;
+    d.queue_backpressure_sleep_ms = b.queue_backpressure_sleep_ms - a.queue_backpressure_sleep_ms;
     d.compute_transfer_page_ms = b.compute_transfer_page_ms - a.compute_transfer_page_ms;
     d.find_affected_txns_ms = b.find_affected_txns_ms - a.find_affected_txns_ms;
     d.decide_txn_schedule_ms = b.decide_txn_schedule_ms - a.decide_txn_schedule_ms;
@@ -649,7 +796,20 @@ inline RouterStatSnapshot diff_snapshot(const RouterStatSnapshot &a, const Route
         d.pop_txn_total_ms_per_node.push_back( b.pop_txn_total_ms_per_node[i] - a.pop_txn_total_ms_per_node[i] );
         d.pop_txn_empty_total_ms_per_node.push_back( b.pop_txn_empty_total_ms_per_node[i] - a.pop_txn_empty_total_ms_per_node[i] );
         d.pop_txn_dag_total_ms_per_node.push_back( b.pop_txn_dag_total_ms_per_node[i] - a.pop_txn_dag_total_ms_per_node[i] );
+        d.pop_txn_prior_read_total_ms_per_node.push_back( b.pop_txn_prior_read_total_ms_per_node[i] - a.pop_txn_prior_read_total_ms_per_node[i] );
         d.pop_txn_regular_total_ms_per_node.push_back( b.pop_txn_regular_total_ms_per_node[i] - a.pop_txn_regular_total_ms_per_node[i] );
+        d.pop_txn_empty_wait_total_ms_per_node.push_back(b.pop_txn_empty_wait_total_ms_per_node[i] - a.pop_txn_empty_wait_total_ms_per_node[i]);
+        d.pop_txn_dag_wait_total_ms_per_node.push_back(b.pop_txn_dag_wait_total_ms_per_node[i] - a.pop_txn_dag_wait_total_ms_per_node[i]);
+        d.pop_txn_prior_read_wait_total_ms_per_node.push_back(b.pop_txn_prior_read_wait_total_ms_per_node[i] - a.pop_txn_prior_read_wait_total_ms_per_node[i]);
+        d.pop_txn_regular_wait_total_ms_per_node.push_back(b.pop_txn_regular_wait_total_ms_per_node[i] - a.pop_txn_regular_wait_total_ms_per_node[i]);
+        d.pop_txn_empty_batch_count_per_node.push_back(b.pop_txn_empty_batch_count_per_node[i] - a.pop_txn_empty_batch_count_per_node[i]);
+        d.pop_txn_empty_txn_count_per_node.push_back(b.pop_txn_empty_txn_count_per_node[i] - a.pop_txn_empty_txn_count_per_node[i]);
+        d.pop_txn_dag_batch_count_per_node.push_back(b.pop_txn_dag_batch_count_per_node[i] - a.pop_txn_dag_batch_count_per_node[i]);
+        d.pop_txn_dag_txn_count_per_node.push_back(b.pop_txn_dag_txn_count_per_node[i] - a.pop_txn_dag_txn_count_per_node[i]);
+        d.pop_txn_prior_read_batch_count_per_node.push_back(b.pop_txn_prior_read_batch_count_per_node[i] - a.pop_txn_prior_read_batch_count_per_node[i]);
+        d.pop_txn_prior_read_txn_count_per_node.push_back(b.pop_txn_prior_read_txn_count_per_node[i] - a.pop_txn_prior_read_txn_count_per_node[i]);
+        d.pop_txn_regular_batch_count_per_node.push_back(b.pop_txn_regular_batch_count_per_node[i] - a.pop_txn_regular_batch_count_per_node[i]);
+        d.pop_txn_regular_txn_count_per_node.push_back(b.pop_txn_regular_txn_count_per_node[i] - a.pop_txn_regular_txn_count_per_node[i]);
         d.wait_next_batch_total_ms_per_node.push_back( b.wait_next_batch_total_ms_per_node[i] - a.wait_next_batch_total_ms_per_node[i] );
         d.sum_worker_thread_exec_time_ms_per_node.push_back( b.sum_worker_thread_exec_time_ms_per_node[i] - a.sum_worker_thread_exec_time_ms_per_node[i] );
         d.sum_worker_thread_update_key_page_time_ms_per_node.push_back( b.sum_worker_thread_update_key_page_time_ms_per_node[i] - a.sum_worker_thread_update_key_page_time_ms_per_node[i] );

@@ -36,6 +36,7 @@ std::vector<uint64_t> hottest_keys; // for debug
 int NumBucket = 2;
 bool Enable_Long_Txn = false; // 是否启用长事务
 int Long_Txn_Length = 2; // 长事务的长度
+int Long_Txn_Write_Pct = 10; // 长事务中每个操作默认10%概率为写
 double Key_Page_Map_Cache_Ratio = 1.1; // 默认情况可以存的下
 bool Enable_Fill_Pipeline_Bubble = true; // 默认保持原有行为
 bool Enable_Important_Router_Batch_Log = true; // 默认保持原有重要逐batch日志

@@ -38,6 +38,31 @@ std::vector<TxnQueue*> txn_queues; // one queue per compute node
 std::vector<std::atomic<int>> exec_txn_cnt_per_node(MaxComputeNodeCount); // 每个节点路由的事务数
 static std::atomic<bool> warmup_transition_started{false};
 
+static YashanConnInfo parse_yashan_conninfo(const std::string& conninfo) {
+    std::unordered_map<std::string, std::string> kv;
+    std::istringstream iss(conninfo);
+    std::string token;
+    while (iss >> token) {
+        auto pos = token.find('=');
+        if (pos == std::string::npos) {
+            if (kv.find("ip_port") == kv.end()) kv["ip_port"] = token;
+            continue;
+        }
+        kv[token.substr(0, pos)] = token.substr(pos + 1);
+    }
+
+    YashanConnInfo info;
+    if (kv.find("ip_port") != kv.end()) {
+        info.ip_port = kv["ip_port"];
+    } else if (kv.find("host") != kv.end()) {
+        info.ip_port = kv["host"];
+        if (kv.find("port") != kv.end()) info.ip_port += ":" + kv["port"];
+    }
+    info.user = kv.count("user") ? kv["user"] : "sys";
+    info.password = kv.count("password") ? kv["password"] : "";
+    return info;
+}
+
 static bool measurement_window_open() {
     return !time_based_run || !stop_benchmark.load(std::memory_order_relaxed);
 }
@@ -154,23 +179,34 @@ private:
     std::streambuf* sb2_;
 };
 
-int create_perf_kwr_snapshot(){
+int create_perf_kwr_snapshot(size_t node_id){
+    if (node_id >= DBConnection.size()) {
+        std::cerr << "Invalid KWR snapshot node id: " << node_id << std::endl;
+        return -1;
+    }
     // new connection
-    pqxx::connection* conn0 = new pqxx::connection(DBConnection[0]);
+    pqxx::connection* conn0 = new pqxx::connection(DBConnection[node_id]);
     if (conn0 == nullptr || !conn0->is_open()) {
-        std::cerr << "Failed to connect to the database. conninfo: " + DBConnection[0] << std::endl;
+        std::cerr << "Failed to connect to database node " << node_id
+                  << " for KWR snapshot. conninfo: " + DBConnection[node_id] << std::endl;
         return -1;
     }
 
-    std::cout << "Getting the perf snapshot..." << std::endl;
-    int snapshot_id = 0;
+    std::cout << "Getting the perf snapshot on node " << node_id << "..." << std::endl;
+    int snapshot_id = -1;
     std::string create_snapshot_sql = "SELECT * FROM perf.create_snapshot()";
     try {
         pqxx::work txn(*conn0);
         pqxx::result result0 = txn.exec(create_snapshot_sql);
         if (!result0.empty()) {
             snapshot_id = result0[0]["create_snapshot"].as<int>();
-            std::cout << "Snapshot created successfully with ID: " << snapshot_id << std::endl;
+            if (snapshot_id >= 0) {
+                std::cout << "Snapshot created successfully on node " << node_id
+                          << " with ID: " << snapshot_id << std::endl;
+            } else {
+                std::cout << "KWR snapshot is unavailable on node " << node_id
+                          << " (create_snapshot returned " << snapshot_id << ")." << std::endl;
+            }
         } else {
             std::cerr << "Failed to create snapshot." << std::endl;
         }
@@ -183,14 +219,30 @@ int create_perf_kwr_snapshot(){
     return snapshot_id;
 }
 
-void generate_perf_kwr_report(int start_snapshot_id, int end_snapshot_id, std::string file_name) {
-    // new connection
-    pqxx::connection* conn0 = new pqxx::connection(DBConnection[0]);
-    if (conn0 == nullptr || !conn0->is_open()) {
-        std::cerr << "Failed to connect to the database. conninfo: " + DBConnection[0] << std::endl;
+std::vector<int> create_perf_kwr_snapshots(size_t node_count) {
+    std::vector<int> snapshot_ids(node_count, -1);
+    for (size_t node_id = 0; node_id < node_count; ++node_id) {
+        snapshot_ids[node_id] = create_perf_kwr_snapshot(node_id);
+    }
+    return snapshot_ids;
+}
+
+void generate_perf_kwr_report(size_t node_id, int start_snapshot_id, int end_snapshot_id,
+                              const std::string& file_name) {
+    if (node_id >= DBConnection.size() || start_snapshot_id < 0 || end_snapshot_id < 0) {
+        std::cerr << "Skipping invalid KWR report request for node " << node_id
+                  << ": start=" << start_snapshot_id << ", end=" << end_snapshot_id << std::endl;
         return;
     }
-    std::cout << "Generating performance report for snapshot IDs: " << start_snapshot_id << " to " << end_snapshot_id << std::endl;
+    // new connection
+    pqxx::connection* conn0 = new pqxx::connection(DBConnection[node_id]);
+    if (conn0 == nullptr || !conn0->is_open()) {
+        std::cerr << "Failed to connect to database node " << node_id
+                  << " for KWR report. conninfo: " + DBConnection[node_id] << std::endl;
+        return;
+    }
+    std::cout << "Generating performance report on node " << node_id
+              << " for snapshot IDs: " << start_snapshot_id << " to " << end_snapshot_id << std::endl;
     std::string report_sql = "SELECT * FROM perf.kwr_report_to_file(" + std::to_string(start_snapshot_id) + ", " 
             // + std::to_string(end_snapshot_id) + ", 'html', '/home/hcy/MP-Router/build/serve/test/" + file_name + "')";
             + std::to_string(end_snapshot_id) + ", 'html', '/home/kingbase/MP-Router/kwr/" + file_name + "')";
@@ -221,27 +273,34 @@ static bool warmup_end_supported_mode() {
            SYSTEM_MODE == 30 || SYSTEM_MODE == 31;
 }
 
-static void reset_pg_runtime_stats_before_benchmark(Logger* logger_) {
+static void reset_pg_runtime_stats_before_benchmark(Logger* logger_, size_t node_count) {
     if (DB_TYPE != 0 || DBConnection.empty()) {
         return;
     }
 
-    try {
-        pqxx::connection conn(DBConnection[0]);
-        pqxx::work txn(conn);
-        txn.exec("SELECT pg_stat_reset()");
-        txn.exec("DO $$ BEGIN IF to_regproc('pg_stat_reset_logical_fast') IS NOT NULL THEN EXECUTE 'SELECT pg_stat_reset_logical_fast()'; END IF; END $$");
-        txn.exec("SELECT pg_stat_reset_shared('wal')");
-        txn.exec("SELECT pg_stat_reset_shared('bgwriter')");
-        txn.commit();
-        std::cout << "PostgreSQL runtime stats reset before benchmark." << std::endl;
-        if (logger_) {
-            logger_->info("PostgreSQL runtime stats reset before benchmark.");
-        }
-    } catch (const std::exception &e) {
-        std::cerr << "Failed to reset PostgreSQL runtime stats before benchmark: " << e.what() << std::endl;
-        if (logger_) {
-            logger_->warning("Failed to reset PostgreSQL runtime stats before benchmark: " + std::string(e.what()));
+    node_count = std::min(node_count, DBConnection.size());
+    for (size_t node_id = 0; node_id < node_count; ++node_id) {
+        try {
+            pqxx::connection conn(DBConnection[node_id]);
+            pqxx::work txn(conn);
+            txn.exec("SELECT pg_stat_reset()");
+            txn.exec("DO $$ BEGIN IF to_regproc('pg_stat_reset_logical_fast') IS NOT NULL THEN EXECUTE 'SELECT pg_stat_reset_logical_fast()'; END IF; END $$");
+            txn.exec("SELECT pg_stat_reset_shared('wal')");
+            txn.exec("SELECT pg_stat_reset_shared('bgwriter')");
+            txn.commit();
+            std::cout << "PostgreSQL runtime stats reset before benchmark on node "
+                      << node_id << "." << std::endl;
+            if (logger_) {
+                logger_->info("PostgreSQL runtime stats reset before benchmark on node " +
+                              std::to_string(node_id) + ".");
+            }
+        } catch (const std::exception &e) {
+            std::cerr << "Failed to reset PostgreSQL runtime stats before benchmark on node "
+                      << node_id << ": " << e.what() << std::endl;
+            if (logger_) {
+                logger_->warning("Failed to reset PostgreSQL runtime stats before benchmark on node " +
+                                 std::to_string(node_id) + ": " + std::string(e.what()));
+            }
         }
     }
 }
@@ -838,7 +897,8 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
         int call_id, ret;
-        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id, &ret);
+        double pop_wait_time = 0.0;
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id, &ret, &pop_wait_time);
         // if(WarmupEnd)
         //     logger_->info("Compute Node " + std::to_string(compute_node_id) + 
         //                 " Thread " + std::to_string(params->thread_id) + 
@@ -856,6 +916,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         // }
         if(ret == 0) smart_router->add_worker_thread_pop_empty_time(params->compute_node_id_connecter, params->thread_id, pop_time);
         else if (ret == 1) smart_router->add_worker_thread_pop_dag_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 3) smart_router->add_worker_thread_pop_prior_read_time(params->compute_node_id_connecter, params->thread_id, pop_time);
         else if (ret == 2) {
             if(pop_time > 100) {
                 logger_->info("High regular pop_time: " + std::to_string(pop_time) + " ms at Compute Node " + 
@@ -866,6 +927,10 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             }
             smart_router->add_worker_thread_pop_regular_time(params->compute_node_id_connecter, params->thread_id, pop_time);
         }
+        smart_router->add_worker_thread_pop_batch_stats(
+            params->compute_node_id_connecter, ret, txn_entries.size());
+        smart_router->add_worker_thread_pop_wait_time(
+            params->compute_node_id_connecter, params->thread_id, ret, pop_wait_time);
 
         smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
 
@@ -928,7 +993,10 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             assert(tables.size() > 0);
             assert(tables.size() == keys.size());
             std::vector<bool> rw = smallbank->get_rw_by_txn_type(txn_type);
-            if(txn_type == 6) rw.assign(keys.size(), true); // Update RW flags for dynamic length
+            if (txn_type == 6) {
+                rw = txn_entry->ycsb_rw_flags.empty() ?
+                    std::vector<bool>(keys.size(), false) : txn_entry->ycsb_rw_flags;
+            }
 
             std::vector<page_id_t> ctid_ret_page_ids;
 
@@ -991,9 +1059,15 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                                 if (i < keys.size() - 1) ids_str += ",";
                             }
                             ids_str += "]";
+                            std::string rw_flags_str = "array[";
+                            for(size_t i = 0; i < rw.size(); ++i) {
+                                rw_flags_str += rw[i] ? "true" : "false";
+                                if (i < rw.size() - 1) rw_flags_str += ",";
+                            }
+                            rw_flags_str += "]";
 
                             std::string sql = "SELECT rel, id, ctid, balance, txid FROM sp_multi_update(" +
-                                              ids_str + ", 1)";
+                                              ids_str + ", " + rw_flags_str + ", 1)";
                             res = txn.exec(sql);
                             break;
                         }
@@ -1928,6 +2002,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --account-count <number>    Number of accounts to load [default: 300000]" << std::endl;
     std::cout << "  --worker-threads <n>        DB/client worker threads per compute node [default: 16]" << std::endl;
     std::cout << "  --router-threads <n>        SmartRouter internal parallelism [default: worker-threads]" << std::endl;
+    std::cout << "  --generator-threads <n>     Workload generator threads [default: 2 * worker-threads]" << std::endl;
     std::cout << "  --unlog                     Create UNLOGGED tables (default follows workload)" << std::endl;
     std::cout << "  --enable-autovacuum         Keep table autovacuum enabled after table creation [default: off]" << std::endl;
     std::cout << "  --without-kpmap             Skip key-page map initialization for client-only experiments" << std::endl;
@@ -1940,8 +2015,10 @@ void print_usage(const char* program_name) {
     std::cout << "  --time-run                  Run by wall-clock time instead of try-count" << std::endl;
     std::cout << "  --warmup-seconds <sec>      Warmup duration for --time-run [default: 180]" << std::endl;
     std::cout << "  --run-seconds <sec>         Measured duration after warmup for --time-run [default: 60]" << std::endl;
+    std::cout << "  --long-txn-write-pct <pct>  Long SmallBank per-op write probability (0-100) [default: 10]" << std::endl;
     std::cout << "  --retry-limit <n>           Retry SQLSTATE 40xxx rollback errors up to n times per txn [default: 0]" << std::endl;
     std::cout << "  --retry-to-commit <n>       Alias for --retry-limit" << std::endl;
+    std::cout << "  --kwr-scope <single|all>    Collect KWR from node0 only or every DB node [default: single]" << std::endl;
     std::cout << "  --db-connection <conninfo>  Add one database conninfo string; repeat for multi-node" << std::endl;
     std::cout << "                               MySQL format: host=127.0.0.1 port=3306 user=root password=... dbname=test [socket=...]" << std::endl;
     std::cout << "  --help                      Show this help message" << std::endl;
@@ -1971,10 +2048,36 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
     // for dynamic workload
     auto start_experiment_time = steady_clock::now(); // dynamic workload start time
     int current_phase = 0;
-    int phase1_end_time = 3 * 60;
-    int phase2_end_time = 8 * 60;
-    int phase3_end_time = 13 * 60;
-    int phase4_end_time = 18 * 60;
+    int phase1_end_time = 5 * 60;
+    int phase2_end_time = 10 * 60;
+    int phase3_end_time = 15 * 60;
+    int phase4_end_time = 20 * 60;
+    int phase5_end_time = 25 * 60;
+    RouterStatSnapshot dynamic_phase_snapshot;
+    bool dynamic_phase_snapshot_valid = false;
+    if (dynamic_workload && smart_router != nullptr) {
+        dynamic_phase_snapshot = take_router_snapshot(smart_router);
+        dynamic_phase_snapshot_valid = true;
+    }
+    auto print_dynamic_phase_state = [&](const std::string& phase_label) {
+        if (!dynamic_workload || smart_router == nullptr || !dynamic_phase_snapshot_valid) return;
+        RouterStatSnapshot phase_end_snapshot = take_router_snapshot(smart_router);
+        std::cout << "\n========== Dynamic Workload Phase End: "
+                  << phase_label << " ==========" << std::endl;
+        print_diff_snapshot(dynamic_phase_snapshot, phase_end_snapshot,
+                            "Dynamic Workload " + phase_label);
+        std::cout << "[Dynamic Workload Phase Queue State] ";
+        for (int i = 0; i < ComputeNodeCount; i++) {
+            std::cout << "Node " << i << " queue remain: "
+                      << txn_queues[i]->size() << ' ';
+        }
+        std::cout << "Txn pool size: " << txn_pool->size() << std::endl;
+        std::cout << "============================================================\n" << std::endl;
+        if (logger_) {
+            logger_->info("[Dynamic Workload] Phase ended: " + phase_label);
+        }
+        dynamic_phase_snapshot = phase_end_snapshot;
+    };
 
     // for dynamic workload end
     while (true) {
@@ -1986,36 +2089,53 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
             
             // Phase transitions
             if (current_phase == 0 && elapsed_seconds > phase1_end_time) {
-                // T=3m. Start recording stats.
-                std::cout << "\033[33m[Dynamic Workload] Warmup ended at 3m. Starting Stats Collection.\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Warmup ended at 3m. Starting Stats Collection.");
+                // T=5m. Start recording stats and trigger Metis partition.
+                print_dynamic_phase_state("phase 0 [0m,5m)");
+                std::cout << "\033[33m[Dynamic Workload] Warmup ended at 5m. Triggering Metis Partition.\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Warmup ended at 5m. Triggering Metis Partition.");
                 WarmupEnd = true; // Set warmup end
-                current_phase = 1;
-            }
-            else if (current_phase == 1 && elapsed_seconds > phase2_end_time) {
-                // T=8m. Metis Partition.
-                std::cout << "\033[33m[Dynamic Workload] Triggering Metis Partition at 8m...\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Triggering Metis Partition at 8m...");
                 if (smart_router) {
                     thread_pool->enqueue([smart_router]{
                         smart_router->get_metis_partitioner()->partition_internal_graph("dynamic_partition.csv", ComputeNodeCount);
                     });
                 }
+                current_phase = 1;
+            }
+            else if (current_phase == 1 && elapsed_seconds > phase2_end_time) {
+                // T=10m. Change affinity to 0.2.
+                print_dynamic_phase_state("phase 1 [5m,10m)");
+                std::cout << "\033[33m[Dynamic Workload] Changing AffinityTxnRatio to 0.2 at 10m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Changing AffinityTxnRatio to 0.2 at 10m...");
+                AffinityTxnRatio = 0.2;
+                txn_pool->clear();
                 current_phase = 2;
             }
             else if (current_phase == 2 && elapsed_seconds > phase3_end_time) {
-                // T=13m. Change Friend Graph. the Graph has been created in advance, this step only switch the graph used.
-                std::cout << "\033[33m[Dynamic Workload] Changing User Friend Graph at 13m...\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Changing User Friend Graph at 13m...");
+                // T=15m. Change friend graph and restore affinity to 0.8.
+                print_dynamic_phase_state("phase 2 [10m,15m)");
+                std::cout << "\033[33m[Dynamic Workload] Changing User Friend Graph at 15m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Changing User Friend Graph at 15m...");
                 change_friend = true;
+                AffinityTxnRatio = 0.8;
+                txn_pool->clear();
                 current_phase = 3;
             }
             else if (current_phase == 3 && elapsed_seconds > phase4_end_time) {
-                // T=18m. Stop.
-                std::cout << "\033[31m[Dynamic Workload] Stopping benchmark at 18m...\033[0m" << std::endl;
-                logger_->info("[Dynamic Workload] Stopping benchmark at 18m...");
+                // T=20m. Change skewness to Zipfian theta=0.95.
+                print_dynamic_phase_state("phase 3 [15m,20m)");
+                std::cout << "\033[33m[Dynamic Workload] Changing access pattern to Zipfian (theta=0.95) at 20m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Changing access pattern to Zipfian (theta=0.95) at 20m...");
+                if (smallbank) smallbank->set_zipfian_theta(0.95);
+                txn_pool->clear();
+                current_phase = 4;
+            }
+            else if (current_phase == 4 && elapsed_seconds > phase5_end_time) {
+                // T=25m. Stop.
+                print_dynamic_phase_state("phase 4 [20m,25m)");
+                std::cout << "\033[31m[Dynamic Workload] Stopping benchmark at 25m...\033[0m" << std::endl;
+                logger_->info("[Dynamic Workload] Stopping benchmark at 25m...");
                 stop_benchmark = true;
-                current_phase = 4; // Done
+                current_phase = 5; // Done
                 break; 
             }
         }
@@ -2124,14 +2244,41 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
     
     if (USE_SCALAR_PARAM) {
         for(int i = 0; i < 6; i++) {
-            yacAllocHandle(YAC_HANDLE_STMT, conn, &stmts_scalar[i]);
-            if((YacResult)yacPrepare(stmts_scalar[i], (YacChar*)sp_sqls_scalar[i], YAC_NULL_TERM_STR) != YAC_SUCCESS) {
-                std::cerr << "Pre-Prepare failed for txn type " << i << " at YashanDB." << std::endl;
-                YacInt32 errCode; 
+            constexpr int kPrepareRetryLimit = 5;
+            bool prepare_success = false;
+            for (int attempt = 1; attempt <= kPrepareRetryLimit; attempt++) {
+                if (stmts_scalar[i]) {
+                    yacFreeHandle(YAC_HANDLE_STMT, stmts_scalar[i]);
+                    stmts_scalar[i] = NULL;
+                }
+                yacAllocHandle(YAC_HANDLE_STMT, conn, &stmts_scalar[i]);
+                if((YacResult)yacPrepare(stmts_scalar[i], (YacChar*)sp_sqls_scalar[i], YAC_NULL_TERM_STR) == YAC_SUCCESS) {
+                    prepare_success = true;
+                    break;
+                }
+
+                YacInt32 errCode;
                 char msg[1024];
                 YacTextPos pos;
                 yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
-                std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
+                std::string error_msg = "Pre-Prepare failed for txn type " + std::to_string(i) +
+                    " at YashanDB node=" + std::to_string(compute_node_id) +
+                    " thread=" + std::to_string(params->thread_id) +
+                    " ip=" + info.ip_port +
+                    " attempt=" + std::to_string(attempt) + "/" + std::to_string(kPrepareRetryLimit) +
+                    ". Error Code: " + std::to_string(errCode) + ", Message: " + std::string(msg);
+                std::cerr << error_msg << std::endl;
+                if (logger_) logger_->warning(error_msg);
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+
+            if (!prepare_success) {
+                std::string fatal_msg = "Failed to prepare YashanDB scalar statement after retries; aborting run. txn type " +
+                    std::to_string(i) + ", node=" + std::to_string(compute_node_id) +
+                    ", thread=" + std::to_string(params->thread_id) + ", ip=" + info.ip_port;
+                std::cerr << fatal_msg << std::endl;
+                if (logger_) logger_->warning(fatal_msg);
+                exit(-1);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -2150,13 +2297,22 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
         timespec pop_start_time, pop_end_time;
         clock_gettime(CLOCK_MONOTONIC, &pop_start_time);
 
-        int call_id;
-        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id);
+        int call_id, ret;
+        double pop_wait_time = 0.0;
+        std::vector<TxnQueueEntry*> txn_entries = txn_queue->pop_txn(&call_id, &ret, &pop_wait_time);
 
 
         clock_gettime(CLOCK_MONOTONIC, &pop_end_time);
         double pop_time = (pop_end_time.tv_sec - pop_start_time.tv_sec) * 1000.0 +
                           (pop_end_time.tv_nsec - pop_start_time.tv_nsec) / 1000000.0;
+        if(ret == 0) smart_router->add_worker_thread_pop_empty_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 1) smart_router->add_worker_thread_pop_dag_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 3) smart_router->add_worker_thread_pop_prior_read_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        else if (ret == 2) smart_router->add_worker_thread_pop_regular_time(params->compute_node_id_connecter, params->thread_id, pop_time);
+        smart_router->add_worker_thread_pop_batch_stats(
+            params->compute_node_id_connecter, ret, txn_entries.size());
+        smart_router->add_worker_thread_pop_wait_time(
+            params->compute_node_id_connecter, params->thread_id, ret, pop_wait_time);
         smart_router->add_worker_thread_pop_time(params->compute_node_id_connecter, params->thread_id, pop_time);
 
         // 2. Handle Empty/Batch Finish
@@ -2456,6 +2612,7 @@ int main(int argc, char *argv[]) {
     int access_pattern = 0; // 0: uniform, 1: zipfian, 2: hotspot
     bool without_kpmap = false;
     bool router_only = false;
+    int generator_threads = -1;
     // default parameters
     double zipfian_theta = 0.99; // Zipfian distribution parameter
     std::string zipfian_generator = "legacy";
@@ -2477,6 +2634,7 @@ int main(int argc, char *argv[]) {
 
     // kwr report name
     std::string kwr_report_name = "kwr_report";
+    bool kwr_all_nodes = false;
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -2703,6 +2861,20 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--generator-threads") {
+            if (i + 1 < argc) {
+                generator_threads = std::stoi(argv[++i]);
+                if (generator_threads <= 0) {
+                    std::cerr << "Error: Generator threads must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "Generator threads set to: " << generator_threads << std::endl;
+            } else {
+                std::cerr << "Error: --generator-threads requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else if (arg == "--use-sp") {
             if (i + 1 < argc) {
                 int v = std::stoi(argv[++i]);
@@ -2846,6 +3018,22 @@ int main(int argc, char *argv[]) {
                 kwr_report_name = "smallbank_report_" + timestamp + "_mode" + std::to_string(SYSTEM_MODE);
                 std::cout << "KWR report name set to: " << kwr_report_name << std::endl;
             }
+        }
+        else if (arg == "--kwr-scope") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --kwr-scope requires single or all" << std::endl;
+                return -1;
+            }
+            std::string scope = argv[++i];
+            if (scope == "single") {
+                kwr_all_nodes = false;
+            } else if (scope == "all") {
+                kwr_all_nodes = true;
+            } else {
+                std::cerr << "Error: --kwr-scope must be single or all" << std::endl;
+                return -1;
+            }
+            std::cout << "KWR scope set to: " << scope << std::endl;
         }
         else if (arg == "--sys_extend_size") {
             if (i + 1 < argc) {
@@ -3012,6 +3200,22 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--long-txn-write-pct") {
+            if (i + 1 < argc) {
+                Long_Txn_Write_Pct = std::stoi(argv[++i]);
+                if (Long_Txn_Write_Pct < 0 || Long_Txn_Write_Pct > 100) {
+                    std::cerr << "Error: long-txn-write-pct must be between 0 and 100" << std::endl;
+                    return -1;
+                }
+                std::cout << "Long transaction write percentage set to: "
+                          << Long_Txn_Write_Pct << "% (read percentage: "
+                          << (100 - Long_Txn_Write_Pct) << "%)" << std::endl;
+            } else {
+                std::cerr << "Error: --long-txn-write-pct requires a value" << std::endl;
+                print_usage(argv[0]);
+                return -1;
+            }
+        }
         else if (arg == "--enable-dynamic") {
             dynamic_workload = true;
             std::cout << "Enable dynamic workload mode." << std::endl;
@@ -3148,6 +3352,9 @@ int main(int argc, char *argv[]) {
     if (PreprocessInternalThreads <= 0) {
         PreprocessInternalThreads = RouterInternalThreads;
     }
+    if (generator_threads <= 0) {
+        generator_threads = worker_threads * 2;
+    }
 
     switch (access_pattern) {
         case 0: access_pattern_name = "Uniform"; break;
@@ -3164,6 +3371,7 @@ int main(int argc, char *argv[]) {
     std::cout << "Preprocess batch concurrency: " << PreprocessBatchConcurrency << std::endl;
     std::cout << "Prepared batch queue limit: " << PreparedBatchQueueLimit << std::endl;
     std::cout << "Preprocess internal threads: " << PreprocessInternalThreads << std::endl;
+    std::cout << "Generator threads: " << generator_threads << std::endl;
 
     if (router_only && Workload_Type != 0) {
         std::cerr << "Error: --router-only currently supports SmallBank only." << std::endl;
@@ -3292,12 +3500,24 @@ int main(int argc, char *argv[]) {
         std::cout << "Database connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
     } else if (DB_TYPE == 1) {
         std::cout << "Database Type: YashanDB" << std::endl;
-        // 崖山RAC
         YashanDBConnections.clear();
-        YashanDBConnections.push_back({"10.10.2.35:1688", "sys", "Rdjc#2025"});
-        YashanDBConnections.push_back({"10.10.2.36:1688", "sys", "Rdjc#2025"});
-        YashanDBConnections.push_back({"10.10.2.39:1688", "sys", "Rdjc#2025"});
-        YashanDBConnections.push_back({"10.10.2.40:1688", "sys", "Rdjc#2025"});
+        if (!cli_db_connections.empty()) {
+            std::cout << "Using YashanDB connection strings provided via command line:" << std::endl;
+            for (const auto& conninfo : cli_db_connections) {
+                auto parsed = parse_yashan_conninfo(conninfo);
+                if (parsed.ip_port.empty()) {
+                    std::cerr << "Error: invalid YashanDB --db-connection: " << conninfo << std::endl;
+                    return -1;
+                }
+                YashanDBConnections.push_back(parsed);
+            }
+        } else {
+            // 崖山RAC
+            YashanDBConnections.push_back({"10.10.2.35:1688", "sys", "Rdjc#2025"});
+            YashanDBConnections.push_back({"10.10.2.36:1688", "sys", "Rdjc#2025"});
+            YashanDBConnections.push_back({"10.10.2.39:1688", "sys", "Rdjc#2025"});
+            YashanDBConnections.push_back({"10.10.2.40:1688", "sys", "Rdjc#2025"});
+        }
         ComputeNodeCount = YashanDBConnections.size();
         std::cout << "YashanDB connection info loaded. Total nodes: " << ComputeNodeCount << std::endl;
     } else if (DB_TYPE == 2) {
@@ -3699,10 +3919,11 @@ int main(int argc, char *argv[]) {
     // Reset statistics and create the KWR start snapshot before starting load.
     // KWR therefore covers warmup and measurement without snapshot overhead
     // or a statistics reset occurring while the workload is running.
-    int start_snapshot_id = -1;
+    const size_t kwr_node_count = kwr_all_nodes ? DBConnection.size() : std::min<size_t>(1, DBConnection.size());
+    std::vector<int> start_snapshot_ids(kwr_node_count, -1);
     if(DB_TYPE == 0 && !router_only) {
-        reset_pg_runtime_stats_before_benchmark(logger_);
-        start_snapshot_id = create_perf_kwr_snapshot();
+        reset_pg_runtime_stats_before_benchmark(logger_, kwr_node_count);
+        start_snapshot_ids = create_perf_kwr_snapshots(kwr_node_count);
     }
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -3719,7 +3940,7 @@ int main(int argc, char *argv[]) {
     
     // !start the client transaction generation threads
     std::vector<std::thread> client_gen_txn_threads;
-    for(int i = 0; i < worker_threads * 2; i++) {
+    for(int i = 0; i < generator_threads; i++) {
         if(Workload_Type == 0) {
             client_gen_txn_threads.emplace_back([i, txn_pool, smallbank]() {
                 smallbank->generate_smallbank_txns_worker(i, txn_pool);
@@ -3827,6 +4048,11 @@ int main(int argc, char *argv[]) {
             std::this_thread::sleep_for(std::chrono::seconds(warmup_seconds));
         }
         finish_warmup_now(logger_, "time-based warmup");
+    } else if (dynamic_workload) {
+        std::cout << "Dynamic workload run: waiting for dynamic warmup phase to end." << std::endl;
+        while(!WarmupEnd && !stop_benchmark.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     } else {
         while(exe_count <= MetisWarmupRound * PARTITION_INTERVAL * 1.0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -3870,6 +4096,20 @@ int main(int argc, char *argv[]) {
         if (logger_) {
             logger_->info("Time-based run duration ended. Stopping transaction generation and worker queues.");
         }
+    } else if (dynamic_workload) {
+        std::cout << "Dynamic workload measurement phase started; waiting for dynamic stop signal." << std::endl;
+        if (logger_) {
+            logger_->info("Dynamic workload measurement phase started; waiting for dynamic stop signal.");
+        }
+        while(!stop_benchmark.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        txn_pool->stop_pool();
+        force_stop_txn_queues();
+        std::cout << "Dynamic workload duration ended. Stopping transaction generation and worker queues." << std::endl;
+        if (logger_) {
+            logger_->info("Dynamic workload duration ended. Stopping transaction generation and worker queues.");
+        }
     }
 
     // Wait for all threads to complete
@@ -3889,10 +4129,15 @@ int main(int argc, char *argv[]) {
 
     // Create a performance snapshot after running transactions
     std::this_thread::sleep_for(std::chrono::seconds(2)); // sleep for a while to ensure all operations are completed
-    int end_snapshot_id = -1;
-    if(DB_TYPE == 0 && !router_only) end_snapshot_id = create_perf_kwr_snapshot();
-    std::cout << "Performance snapshots created: Start ID = " << start_snapshot_id 
-              << ", End ID = " << end_snapshot_id << std::endl;
+    std::vector<int> end_snapshot_ids(kwr_node_count, -1);
+    if(DB_TYPE == 0 && !router_only) {
+        end_snapshot_ids = create_perf_kwr_snapshots(kwr_node_count);
+        for (size_t node_id = 0; node_id < kwr_node_count; ++node_id) {
+            std::cout << "Performance snapshots created on node " << node_id
+                      << ": Start ID = " << start_snapshot_ids[node_id]
+                      << ", End ID = " << end_snapshot_ids[node_id] << std::endl;
+        }
+    }
     
     // Print Report
     std::cout << "\n=== Performance Report ===" << std::endl;
@@ -4065,9 +4310,15 @@ int main(int argc, char *argv[]) {
 
     // std::string report_file_warm_phase = kwr_report_name +  "_fisrt.html";
     // generate_perf_kwr_report(conn0, start_snapshot_id, mid_snapshot_id, report_file_warm_phase);
-    std::string report_file_run_phase = kwr_report_name +  "_end.html";
-    // generate_perf_kwr_report(conn0, mid_snapshot_id, end_snapshot_id, report_file_run_phase);
-    if(DB_TYPE == 0 && !router_only) generate_perf_kwr_report(start_snapshot_id, end_snapshot_id, report_file_run_phase);
+    if(DB_TYPE == 0 && !router_only) {
+        for (size_t node_id = 0; node_id < kwr_node_count; ++node_id) {
+            const std::string report_file_run_phase = kwr_all_nodes
+                ? kwr_report_name + "_node" + std::to_string(node_id) + "_end.html"
+                : kwr_report_name + "_end.html";
+            generate_perf_kwr_report(node_id, start_snapshot_ids[node_id],
+                                     end_snapshot_ids[node_id], report_file_run_phase);
+        }
+    }
 
     // restore streams (best-effort; program may exit via signal handler earlier)
     std::cout.rdbuf(old_cout);

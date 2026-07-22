@@ -89,7 +89,8 @@ public:
     static const int CUST_PER_DIST = 3000;
     static const int ITEM_COUNT = 10000;
     static const int STANDARD_CUST_PER_DIST = 3000;
-    static const int STANDARD_ITEM_COUNT = 100000;
+    static const int STANDARD_ITEM_COUNT = 10000;
+    // static const int STANDARD_ITEM_COUNT = 100000;
 
     // Key encoding helpers
     static itemkey_t make_warehouse_key(int w_id);

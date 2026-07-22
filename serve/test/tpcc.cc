@@ -1116,20 +1116,17 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
             DECLARE
                 c_ctid TID;
                 o_id INT;
-                o_ctid TID;
             BEGIN
                 SELECT c.ctid INTO c_ctid
                 FROM customer AS c
                 WHERE c.c_w_id = p_w_id AND c.c_d_id = p_d_id AND c.c_id = p_c_id;
                 RETURN QUERY SELECT 'customer'::text, p_w_id, p_d_id, c_ctid;
 
-                SELECT o.o_id, o.ctid INTO o_id, o_ctid
+                SELECT o.o_id INTO o_id
                 FROM orders AS o
                 WHERE o.o_w_id = p_w_id AND o.o_d_id = p_d_id AND o.o_c_id = p_c_id
                 ORDER BY o.o_id DESC
                 LIMIT 1;
-
-                RETURN QUERY SELECT 'orders'::text, p_w_id, p_d_id, o_ctid;
 
                 PERFORM 1
                 FROM order_line AS ol
@@ -1148,13 +1145,16 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                 d INT;
                 oldest_o_id INT;
                 order_c_id INT;
-                no_ctid TID;
-                o_ctid TID;
-                c_ctid TID;
+                w_ctid TID;
                 total_amount DECIMAL(12,2);
             BEGIN
+                SELECT w.ctid INTO w_ctid
+                FROM warehouse AS w
+                WHERE w.w_id = p_w_id;
+                RETURN QUERY SELECT 'warehouse'::text, p_w_id, NULL::INT, w_ctid;
+
                 FOR d IN 1..10 LOOP
-                    SELECT no.no_o_id, no.ctid INTO oldest_o_id, no_ctid
+                    SELECT no.no_o_id INTO oldest_o_id
                     FROM new_order AS no
                     WHERE no.no_w_id = p_w_id AND no.no_d_id = d
                     ORDER BY no.no_o_id
@@ -1166,13 +1166,11 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
 
                     DELETE FROM new_order
                     WHERE no_w_id = p_w_id AND no_d_id = d AND no_o_id = oldest_o_id;
-                    RETURN QUERY SELECT 'new_order'::text, p_w_id, d, no_ctid;
 
                     UPDATE orders AS o
                     SET o_carrier_id = p_carrier_id
                     WHERE o.o_w_id = p_w_id AND o.o_d_id = d AND o.o_id = oldest_o_id
-                    RETURNING o.o_c_id, o.ctid INTO order_c_id, o_ctid;
-                    RETURN QUERY SELECT 'orders'::text, p_w_id, d, o_ctid;
+                    RETURNING o.o_c_id INTO order_c_id;
 
                     UPDATE order_line AS ol
                     SET ol_delivery_d = TIMESTAMP 'epoch' + p_txn_time_ms * INTERVAL '1 millisecond'
@@ -1185,9 +1183,7 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                     UPDATE customer AS c
                     SET c_balance = c.c_balance + total_amount,
                         c_delivery_cnt = c.c_delivery_cnt + 1
-                    WHERE c.c_w_id = p_w_id AND c.c_d_id = d AND c.c_id = order_c_id
-                    RETURNING c.ctid INTO c_ctid;
-                    RETURN QUERY SELECT 'customer'::text, p_w_id, d, c_ctid;
+                    WHERE c.c_w_id = p_w_id AND c.c_d_id = d AND c.c_id = order_c_id;
                 END LOOP;
             END;
             $$;

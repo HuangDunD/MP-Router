@@ -1,4 +1,5 @@
 #include "smallbank.h"
+#include <cmath>
 #include <regex>
 #include <sstream>
 #include <vector>
@@ -975,14 +976,15 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
     FiniteZipfGen* finite_zipfian_gen = nullptr;
     uint64_t zipf_seed = 2 * thread_id * GetCPUCycle();
     uint64_t zipf_seed_mask = (uint64_t(1) << 48) - 1;
+    double current_zipfian_theta = get_zipfian_theta();
     if (use_finite_zipfian) {
         // 仅让线程0负责填充全局hottest_keys，避免并发写冲突和重复填充
         std::vector<uint64_t>* hot_keys_ptr = (thread_id == 0) ? &hottest_keys : nullptr;
-        finite_zipfian_gen = new FiniteZipfGen(get_account_count(), zipfian_theta, zipf_seed & zipf_seed_mask, NumBucket, hot_keys_ptr);
+        finite_zipfian_gen = new FiniteZipfGen(get_account_count(), current_zipfian_theta, zipf_seed & zipf_seed_mask, NumBucket, hot_keys_ptr);
     } else {
         // 仅让线程0负责填充全局hottest_keys，避免并发写冲突和重复填充
         std::vector<uint64_t>* hot_keys_ptr = (thread_id == 0) ? &hottest_keys : nullptr;
-        zipfian_gen = new ZipfGen(get_account_count(), zipfian_theta, zipf_seed & zipf_seed_mask, NumBucket, hot_keys_ptr);
+        zipfian_gen = new ZipfGen(get_account_count(), current_zipfian_theta, zipf_seed & zipf_seed_mask, NumBucket, hot_keys_ptr);
     }
 
     // 全局一共进行 MetisWarmupRound * PARTITION_INTERVAL的冷启动事务生成，每个工作节点具有worker_threads个线程，每个线程生成try_count个事务
@@ -991,8 +993,29 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
     // Experiment Control: Transaction Length
     bool enable_multi_update_experiment = Enable_Long_Txn; // 从配置中读取是否启用长事务实验
     int multi_update_length = Long_Txn_Length; // 从配置中读取长事务的长度
+    std::mt19937 rw_rng(static_cast<uint32_t>(GetCPUCycle() ^ (thread_id * 0x9e3779b9U)));
+    std::bernoulli_distribution long_txn_write_dist(Long_Txn_Write_Pct / 100.0);
     
     while(true) {
+        double latest_zipfian_theta = get_zipfian_theta();
+        if (access_pattern == 1 && std::abs(latest_zipfian_theta - current_zipfian_theta) > 1e-9) {
+            current_zipfian_theta = latest_zipfian_theta;
+            if (thread_id == 0) {
+                std::cout << "[SmallBank] Reinitializing Zipfian generator with theta="
+                          << current_zipfian_theta << std::endl;
+            }
+            zipf_seed = (zipf_seed + GetCPUCycle() + 0x9e3779b97f4a7c15ULL) & zipf_seed_mask;
+            delete finite_zipfian_gen;
+            delete zipfian_gen;
+            finite_zipfian_gen = nullptr;
+            zipfian_gen = nullptr;
+            if (use_finite_zipfian) {
+                finite_zipfian_gen = new FiniteZipfGen(get_account_count(), current_zipfian_theta, zipf_seed, NumBucket, nullptr);
+            } else {
+                zipfian_gen = new ZipfGen(get_account_count(), current_zipfian_theta, zipf_seed, NumBucket, nullptr);
+            }
+        }
+
         if(dynamic_workload || time_based_run){
             if(stop_benchmark.load(std::memory_order_relaxed)) break;
         } else {
@@ -1013,16 +1036,41 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
                 // Generate MultiUpdate Transaction (Type 6)
                 int txn_type = 6; 
                 std::vector<itemkey_t> multi_accounts;
+                std::vector<bool> rw_flags;
                 multi_accounts.reserve(multi_update_length);
+                rw_flags.reserve(multi_update_length);
+                itemkey_t affinity_anchor = 0;
                 for(int k = 0; k < multi_update_length; k++) {
                     itemkey_t acc;
-                    generate_account_id(acc, zipfian_gen, finite_zipfian_gen);
+                    if (k == 0) {
+                        generate_account_id(acc, zipfian_gen, finite_zipfian_gen);
+                        affinity_anchor = acc;
+                    } else {
+                        double affinity_r = (double)rand() / RAND_MAX;
+                        if (affinity_r < AffinityTxnRatio &&
+                            generate_affinity_account_id(affinity_anchor, acc)) {
+                            // Use an anchor-centered affinity key for long transactions.
+                        } else {
+                            generate_account_id(acc, zipfian_gen, finite_zipfian_gen);
+                        }
+                    }
                     multi_accounts.push_back(acc);
+                    rw_flags.push_back(long_txn_write_dist(rw_rng));
                 }
-                // sort accounts to avoid deadlock
-                std::sort(multi_accounts.begin(), multi_accounts.end());
+                std::vector<std::pair<itemkey_t, bool>> accesses;
+                accesses.reserve(multi_update_length);
+                for (size_t k = 0; k < multi_accounts.size(); k++) {
+                    accesses.emplace_back(multi_accounts[k], rw_flags[k]);
+                }
+                // sort accounts to avoid deadlock while preserving each operation's rw flag
+                std::sort(accesses.begin(), accesses.end());
+                for (size_t k = 0; k < accesses.size(); k++) {
+                    multi_accounts[k] = accesses[k].first;
+                    rw_flags[k] = accesses[k].second;
+                }
                 // Create with variable number of accounts
                 txn_entry = new TxnQueueEntry(tx_id, txn_type, multi_accounts);
+                txn_entry->ycsb_rw_flags = rw_flags;
             } else {
                 // Simulate some work
                 // Randomly select a transaction type and accounts
@@ -1594,20 +1642,32 @@ void SmallBank::create_smallbank_stored_procedures(pqxx::connection* conn) {
             // MultiUpdate: extended transaction that updates multiple accounts
             // Used for variable transaction length experiments
             txn.exec(R"SQL(
-            CREATE OR REPLACE FUNCTION sp_multi_update(ids INT[], val INT)
+            CREATE OR REPLACE FUNCTION sp_multi_update(ids INT[], rw_flags BOOLEAN[], val INT)
             RETURNS TABLE(rel TEXT, id INT, ctid TID, balance INT, txid BIGINT)
             LANGUAGE plpgsql AS $$
             DECLARE
+                idx INT;
                 target_id INT;
+                is_write BOOLEAN;
                 c_ctid TID;
                 c_bal INT;
             BEGIN
-                FOREACH target_id IN ARRAY ids
+                FOR idx IN 1..COALESCE(array_length(ids, 1), 0)
                 LOOP
-                    UPDATE checking c
-                    SET balance = c.balance + val
-                    WHERE c.id = target_id
-                    RETURNING c.ctid, c.balance INTO c_ctid, c_bal;
+                    target_id := ids[idx];
+                    is_write := COALESCE(rw_flags[idx], false);
+
+                    IF is_write THEN
+                        UPDATE checking c
+                        SET balance = c.balance + val
+                        WHERE c.id = target_id
+                        RETURNING c.ctid, c.balance INTO c_ctid, c_bal;
+                    ELSE
+                        SELECT c.ctid, c.balance
+                        INTO c_ctid, c_bal
+                        FROM checking c
+                        WHERE c.id = target_id;
+                    END IF;
                     
                     RETURN QUERY SELECT 'checking'::text, target_id, c_ctid, c_bal, txid_current();
                 END LOOP;
