@@ -6,106 +6,55 @@ Plot SmallBank and TPC-C throughput side by side.
 
 import argparse
 import math
-import os
-import re
-import shutil
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from matplotlib.ticker import MultipleLocator
 
-try:
-    import revision_extracted_data as revision_data
-except ImportError:
-    revision_data = None
+from extracted_data import fig4_overall as revision_data
 
-
-DEFAULT_TPCC_RESULT_DIR = (
-    Path(__file__).resolve().parents[3]
-    / "实验结果备份"
-    / "20260617142027(tpcc)"
-)
 
 SYSTEMS = ["RR", "MWR", "PHR", "PAR", "CPR", "MP-Router"]
-TPCC_SYSTEM_MODES = [
-    ("RR", "0"),
-    ("MWR", "25"),
-    ("PHR", "2"),
-    ("PAR", "23"),
-    ("CPR", "28"),
-    ("MP-Router", "11"),
-]
 
-TPCC_GROUPS = [
-    ("Normal", "tpcc_p0_wh200_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0"),
-    ("50\\%", "tpcc_p2_HsFrac0.25_HsProb0.5_wh200_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0"),
-    ("80\\%", "tpcc_p2_HsFrac0.25_HsProb0.8_wh200_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0"),
-    ("90\\%", "tpcc_p2_HsFrac0.25_HsProb0.9_wh200_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0"),
-]
-
-
-if shutil.which("latex"):
-    rcParams.update({
-        "text.usetex": True,
-        "font.family": "serif",
-        "font.serif": ["Times", "Computer Modern Roman"],
-        "axes.unicode_minus": False,
-        "text.latex.preamble": r"\usepackage{amsmath}",
-    })
-else:
-    rcParams["text.usetex"] = False
 
 rcParams["hatch.linewidth"] = 0.3
-rcParams["font.family"] = "serif"
-rcParams["font.serif"] = ["Arial"]
+rcParams["text.usetex"] = False
+rcParams["font.family"] = "sans-serif"
+rcParams["font.sans-serif"] = ["Arial"]
+rcParams["mathtext.fontset"] = "custom"
+rcParams["mathtext.rm"] = "Arial"
+rcParams["mathtext.it"] = "Arial:italic"
+rcParams["mathtext.bf"] = "Arial:bold"
+rcParams["axes.unicode_minus"] = False
 rcParams["font.size"] = 12
-rcParams["axes.labelsize"] = 14
+rcParams["axes.labelsize"] = 12
 rcParams["xtick.labelsize"] = 12
 rcParams["ytick.labelsize"] = 12
 rcParams["legend.fontsize"] = 12
 
 
-def read_after_warmup_tps(result_file: Path):
-    if not result_file.exists():
-        return math.nan
-    text = result_file.read_text(errors="ignore")
-    match = re.search(r"Throughput \(after warmup\):\s*([0-9.]+)", text)
-    if not match:
-        return math.nan
-    return float(match.group(1))
-
-
 def load_smallbank_data():
-    data = [
-        ("0.1", [83629.17, 84793.7, 106955.9, 96134.37, 97803.73, 126348.13]),
-        ("0.6", [82187.26, 82718.88, 100301.26, 92793.34, 93070.26, 122045.9]),
-        ("0.8", [72046.07, 72224.56, 84830.97, 68772.67, 78025.03, 107074.93]),
-        ("0.9", [14892.43, 12971.53, 15253.43, 14371.59, 17182.89, 77165.69]),
-        ("1.1", [2611.65, 2475.33, 2642.91, 2682.67, 2654.77, 34410.69]),
-        ("1.3", [1194.93, 1149.9, 1210.47, 1120.47, 1248.2, 19189.73]),
-    ]
-    if revision_data:
-        return revision_data.MAIN_SYSTEMS, revision_data.throughput_zipfian_data
-    return SYSTEMS, data
+    return revision_data.MAIN_SYSTEMS, revision_data.throughput_zipfian_data
 
 
-def load_tpcc_data(result_dir: Path):
-    data = []
-    missing = []
-    for label, folder in TPCC_GROUPS:
-        values = []
-        for system, mode in TPCC_SYSTEM_MODES:
-            result_file = result_dir / folder / f"m{mode}" / "result.txt"
-            tps = read_after_warmup_tps(result_file)
-            if math.isnan(tps):
-                missing.append(f"{label}/{system}: {result_file}")
-            values.append(tps)
-        data.append((label, values))
-    return data, missing
+def load_tpcc_data():
+    return revision_data.TPCC_SYSTEMS, revision_data.tpcc_data
 
 
-def plot_grouped_bars(ax, data, systems, colors, hatches, *, scale, xlabel, ylabel, ylabel_fontsize=14):
+def plot_grouped_bars(
+    ax,
+    data,
+    systems,
+    colors,
+    hatches,
+    *,
+    scale,
+    xlabel,
+    ylabel,
+    ylabel_fontsize=12,
+    major_locator=None,
+):
     labels = [label for label, _ in data]
     values_by_system = []
     for i in range(len(systems)):
@@ -144,30 +93,34 @@ def plot_grouped_bars(ax, data, systems, colors, hatches, *, scale, xlabel, ylab
     else:
         upper_val = math.ceil(upper_val / 10) * 10
         ax.yaxis.set_major_locator(MultipleLocator(20 if upper_val > 80 else 10))
+    if major_locator is not None:
+        upper_val = math.ceil(upper_val / major_locator) * major_locator
+        ax.yaxis.set_major_locator(MultipleLocator(major_locator))
 
     ax.set_ylim(0, upper_val)
     ax.set_xticks(x_base)
     ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=12)
     ax.set_xlim(-0.55, len(labels) - 1 + 0.55)
-    ax.set_xlabel(xlabel, fontsize=14)
+    ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel(ylabel, fontsize=ylabel_fontsize)
     ax.grid(axis="y", linestyle="--", alpha=0.5, zorder=0)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tpcc-result-dir", type=Path, default=DEFAULT_TPCC_RESULT_DIR)
     parser.add_argument(
         "--outfile",
         type=Path,
-        default=Path("figs") / "workload_throughput_combined.pdf",
+        default=Path("figs") / "fig4_workload_throughput_combined.pdf",
     )
     args = parser.parse_args()
 
     smallbank_systems, smallbank_data = load_smallbank_data()
-    tpcc_data, missing = load_tpcc_data(args.tpcc_result_dir)
+    tpcc_systems, tpcc_data = load_tpcc_data()
     if smallbank_systems != SYSTEMS:
         raise ValueError(f"Unexpected SmallBank systems: {smallbank_systems}")
+    if tpcc_systems != SYSTEMS:
+        raise ValueError(f"Unexpected TPC-C systems: {tpcc_systems}")
 
     colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#e47474"]
     hatches = ["////", "\\\\\\\\", "xxxx", "oo", "OOOO", "...."]
@@ -185,14 +138,14 @@ def main():
         ylabel="Throughput (KTPS)",
     )
     ax1.text(
-        0.5,
-        -0.35,
+        0.46,
+        -0.3,
         "(a) SmallBank",
         transform=ax1.transAxes,
         ha="center",
         va="top",
         fontsize=15,
-        weight="bold",
+        fontweight="bold",
     )
 
     plot_grouped_bars(
@@ -204,17 +157,18 @@ def main():
         scale=60.0 / 10000.0,
         xlabel="Hot-Spot Concentration",
         ylabel=r"Throughput ($\times 10^4$ TPM)",
-        ylabel_fontsize=12,
+        major_locator=40,
     )
+    ax2.set_ylim(0, 200)
     ax2.text(
         0.5,
-        -0.35,
+        -0.3,
         "(b) TPC-C",
         transform=ax2.transAxes,
         ha="center",
         va="top",
         fontsize=15,
-        weight="bold",
+        fontweight="bold",
     )
 
     handles, labels = ax1.get_legend_handles_labels()
@@ -236,10 +190,6 @@ def main():
     plt.savefig(args.outfile, dpi=600, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
 
-    if missing:
-        print("Missing TPC-C values:")
-        for item in missing:
-            print(f"  {item}")
     print(f"Saved figure: {args.outfile}")
 
 

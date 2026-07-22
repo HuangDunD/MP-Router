@@ -50,7 +50,7 @@ ABLATION_SYSTEMS = [
     ("w/o scheduling", "13"),
 ]
 
-TPCC_SYSTEMS = MAIN_SYSTEMS + [("Warehouse-aware", "31")]
+TPCC_SYSTEMS = MAIN_SYSTEMS
 
 CACHE_FUSION_METRICS = [
     "cf_waits_per_txn",
@@ -164,7 +164,7 @@ def smallbank_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], li
         ]
     )
     hotspot_labels = [
-        (label, {"scan_axis": "access", "access_pattern": "2", "hotspot_fraction": frac})
+        (label, {"scan_axis": ("access", "base"), "access_pattern": "2", "hotspot_fraction": frac})
         for label, frac in [("100%", "1"), ("10%", "0.1"), ("1%", "0.01"), ("0.1%", "0.001")]
     ]
 
@@ -264,8 +264,10 @@ def smallbank_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], li
 def tpcc_figures(rows: list[dict[str, str]]) -> tuple[dict[str, object], list[str], list[str]]:
     e = Extractor(rows)
     labels = [
-        ("Unpartitioned", {"scan_axis": "base"}),
-        ("Warehouse-partitioned", {"scan_axis": "tpcc_partition_warehouses"}),
+        ("Normal", {"scan_axis": "base", "access_pattern": "0"}),
+        ("50%", {"scan_axis": "access", "access_pattern": "2", "hotspot_fraction": "0.25", "hotspot_prob": "0.5"}),
+        ("80%", {"scan_axis": "base", "access_pattern": "2", "hotspot_fraction": "0.25", "hotspot_prob": "0.8"}),
+        ("90%", {"scan_axis": "access", "access_pattern": "2", "hotspot_fraction": "0.25", "hotspot_prob": "0.9"}),
     ]
     data = {
         "TPCC_SYSTEMS": [name for name, _ in TPCC_SYSTEMS],
@@ -295,6 +297,7 @@ def main() -> None:
     parser.add_argument("--smallbank-summary", type=Path, default=DEFAULT_SMALLBANK_SUMMARY)
     parser.add_argument("--smallbank-extra-summary", type=Path, action="append", default=[])
     parser.add_argument("--tpcc-summary", type=Path, default=DEFAULT_TPCC_SUMMARY)
+    parser.add_argument("--tpcc-extra-summary", type=Path, action="append", default=[])
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
@@ -302,7 +305,10 @@ def main() -> None:
     for path in args.smallbank_extra_summary:
         smallbank_rows.extend(read_rows(path))
     smallbank_data, smallbank_missing, smallbank_warnings = smallbank_figures(smallbank_rows)
-    tpcc_data, tpcc_missing, tpcc_warnings = tpcc_figures(read_rows(args.tpcc_summary))
+    tpcc_rows = read_rows(args.tpcc_summary)
+    for path in args.tpcc_extra_summary:
+        tpcc_rows.extend(read_rows(path))
+    tpcc_data, tpcc_missing, tpcc_warnings = tpcc_figures(tpcc_rows)
     payload = {**smallbank_data, **tpcc_data}
     missing = smallbank_missing + tpcc_missing
     warnings = smallbank_warnings + tpcc_warnings

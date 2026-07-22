@@ -86,6 +86,14 @@ def main():
     if revision_data:
         thread_counts = [int(label) for label, _ in revision_data.thread_num_data]
         data_points = [values for _, values in revision_data.thread_num_data]
+
+    filtered = [
+        (count, values)
+        for count, values in zip(thread_counts, data_points)
+        if all(value is not None for value in values)
+    ]
+    thread_counts = [count for count, _ in filtered]
+    data_points = [values for _, values in filtered]
     
     # Transpose to get series for each system
     system_series = list(map(list, zip(*data_points)))

@@ -78,6 +78,11 @@ def main():
     ]
     if revision_data:
         raw_data_map = revision_data.tpcc_data
+    raw_data_map = [
+        (label, values)
+        for label, values in raw_data_map
+        if all(value is not None for value in values)
+    ]
 
     # Prepare data for plotting (Transpose: list of [val_sys1_norm, val_sys1_50, ...])
     # Actually matplotlib bar grouped needs: for each system, a list of values across groups
@@ -124,7 +129,7 @@ def main():
 
     ax.set_xticks(x_base)
     ax.set_xticklabels(labels, rotation=0, ha='center', fontsize=14)
-    ax.set_xlabel("Hot-Spot Concentration", fontsize=14)
+    ax.set_xlabel("Hot-Spot Access Probability", fontsize=14)
     
     # Margins and Grid
     ax.set_xlim(-0.55, n_groups - 1 + 0.55)

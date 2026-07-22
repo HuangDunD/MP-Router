@@ -49,7 +49,10 @@ def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
     # Transpose data to get a list of values for each system
     system_values = []
     for i in range(len(systems)):
-        system_values.append([item[1][i] / 1000.0 for item in data])
+        system_values.append([
+            item[1][i] / 1000.0 if item[1][i] is not None else math.nan
+            for item in data
+        ])
         
     n_vars = len(data)
     x_base = range(n_vars)
@@ -80,7 +83,14 @@ def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
 
     ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
     
-    all_values = [val for sublist in system_values for val in sublist]
+    all_values = [
+        val for sublist in system_values for val in sublist
+        if val is not None and math.isfinite(val)
+    ]
+    if not all_values:
+        ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
+                ha="center", va="center", fontsize=14)
+        return
     min_val = min(all_values)
     max_val = max(all_values)
     bottom_val = 0 if min_val / max_val < 0.35 else math.floor(min_val * 0.8 / 10) * 10
@@ -92,6 +102,9 @@ def plot_subgroup(ax, data, systems, colors, hatches, bar_width, xlabel=None):
     
     if xlabel:
         ax.set_xlabel(xlabel, fontsize=16)
+
+def has_plot_data(data):
+    return any(value is not None for _, values in data for value in values)
 
 def main():
     # Output file
@@ -138,35 +151,38 @@ def main():
         zipfian_data = revision_data.throughput_zipfian_data
         hotspot_data = revision_data.throughput_hotspot_data
 
-    # Figure setup: 1 row, 2 columns, separate Y axis to allow individual zooming
-    # Reduced height as requested
-    fig_w, fig_h = 8.5, 2.5 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h), sharey=False)
-    
     # Bar configuration
     total_width = 0.8       
     n_sys = len(systems)    
     bar_width = total_width / n_sys
 
-    # Plot Subgroups
-    # Zipfian
-    plot_subgroup(ax1, zipfian_data, systems, colors, hatches, bar_width, xlabel=r"Skewness ($\theta$)")
-    # Moved title lower and adjusted fontsize
-    ax1.text(0.5, -0.35, "(a) Zipfian distribution", transform=ax1.transAxes, 
-             ha='center', va='top', fontsize=14, weight='bold')
-    
-    # Hotspot
-    plot_subgroup(ax2, hotspot_data, systems, colors, hatches, bar_width, xlabel="Hotspot Fraction")
-    ax2.text(0.5, -0.35, "(b) Uniform-hotspot distribution", transform=ax2.transAxes, 
-             ha='center', va='top', fontsize=14, weight='bold')
-    
-    # Set Y-label for both plots as they have different scales
-    ax1.set_ylabel("Throughput (KTPS)", fontsize=14)
-    ax2.set_ylabel("Throughput (KTPS)", fontsize=14)
+    if has_plot_data(hotspot_data):
+        fig_w, fig_h = 8.5, 2.5
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h), sharey=False)
+
+        plot_subgroup(ax1, zipfian_data, systems, colors, hatches, bar_width, xlabel=r"Skewness ($\theta$)")
+        ax1.text(0.5, -0.35, "(a) Zipfian distribution", transform=ax1.transAxes,
+                 ha='center', va='top', fontsize=14, weight='bold')
+
+        plot_subgroup(ax2, hotspot_data, systems, colors, hatches, bar_width, xlabel="Hotspot Fraction")
+        ax2.text(0.5, -0.35, "(b) Uniform-hotspot distribution", transform=ax2.transAxes,
+                 ha='center', va='top', fontsize=14, weight='bold')
+
+        ax1.set_ylabel("Throughput (KTPS)", fontsize=14)
+        ax2.set_ylabel("Throughput (KTPS)", fontsize=14)
+        legend_ax = ax1
+        plt.subplots_adjust(bottom=0.15, top=0.85, wspace=0.25)
+    else:
+        fig_w, fig_h = 4.8, 2.7
+        fig, ax1 = plt.subplots(1, 1, figsize=(fig_w, fig_h))
+        plot_subgroup(ax1, zipfian_data, systems, colors, hatches, bar_width, xlabel=r"Skewness ($\theta$)")
+        ax1.set_ylabel("Throughput (KTPS)", fontsize=14)
+        legend_ax = ax1
+        plt.subplots_adjust(bottom=0.20, top=0.82)
 
     # Common Legend
     # We take handles and labels from one of the axes
-    handles, labels = ax1.get_legend_handles_labels()
+    handles, labels = legend_ax.get_legend_handles_labels()
     fig.legend(
         handles, 
         labels,
@@ -179,12 +195,6 @@ def main():
         ncol=6,
         columnspacing=1.5
     )
-    
-    # Increase bottom margin to make room for the text added below axes
-    plt.subplots_adjust(bottom=0.15, top=0.85, wspace=0.25)
-    # Use rect parameter to reserve space for legend at the top
-    # plt.tight_layout(rect=[0, 0.1, 1, 0.9]) # tight_layout handles texts badly sometimes
-
     
     # Save
     out_path = os.path.join(outdir, outfile)
