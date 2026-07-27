@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Extract Fig. 5 cache-fusion data from KWR reports.
+
+For each run, the script uses all available KWR reports and computes the
+cache-fusion waits per transaction across reports. When per-report transaction
+counts are available, it uses a transaction-weighted average:
+
+    sum(node_cf_waits_per_txn * node_business_txn_count) / sum(node_business_txn_count)
+
+When only one report exists, this naturally reduces to that report's value. If
+transaction counts are unavailable, it falls back to an arithmetic average of
+the KWR-reported waits-per-transaction values.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+from pathlib import Path
+from pprint import pformat
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+SUMMARY_SCRIPT = PROJECT_ROOT / "MP-Router" / "draw" / "revison_draw" / "summarize_mp_router_results.py"
+
+DEFAULT_SMALLBANK_DIR = PROJECT_ROOT / "vldb_res" / "20260716160331(smallbank-4kwr)"
+DEFAULT_TPCC_DIR = PROJECT_ROOT / "vldb_res" / "20260716232528(tpcc-4kwr)"
+DEFAULT_OUTPUT = Path(__file__).resolve().parent / "fig5_cache_fusion.py"
+
+SYSTEMS = [
+    ("RR", "0"),
+    ("MWR", "25"),
+    ("PHR", "2"),
+    ("PAR", "23"),
+    ("CPR", "28"),
+    ("MP-Router", "11"),
+]
+
+METRIC = "cf_waits_per_kwr_business_txn"
+
+SMALLBANK_GROUPS = [
+    ("0.1", "smallbank_p1_ZipfTheta0.1_ZipfGenfinite_acc10000000_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"),
+    ("0.6", "smallbank_p1_ZipfTheta0.6_ZipfGenfinite_acc10000000_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"),
+    ("0.8", "smallbank_p1_ZipfTheta0.8_ZipfGenfinite_acc10000000_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"),
+    ("0.9", "smallbank_p1_ZipfTheta0.9_ZipfGenfinite_acc10000000_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"),
+    ("1.1", "smallbank_p1_ZipfTheta1.1_ZipfGenfinite_acc10000000_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"),
+]
+
+TPCC_GROUPS = [
+    ("Normal", "tpcc-standard_p0_wh200_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"),
+    ("50%", "tpcc-standard_p2_HsFrac0.25_HsProb0.5_wh200_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"),
+    ("80%", "tpcc-standard_p2_HsFrac0.25_HsProb0.8_wh200_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"),
+    ("90%", "tpcc-standard_p2_HsFrac0.25_HsProb0.9_wh200_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"),
+]
+
+
+def load_summary_parser():
+    spec = importlib.util.spec_from_file_location("summarize_mp_router_results", SUMMARY_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load {SUMMARY_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def to_float(raw: str, desc: str) -> float:
+    if raw is None or raw == "":
+        raise RuntimeError(f"{desc}: missing numeric value")
+    return float(str(raw).replace(",", ""))
+
+
+def optional_float(raw: str) -> float | None:
+    if raw is None or raw == "":
+        return None
+    return float(str(raw).replace(",", ""))
+
+
+def kwr_cache_fusion(case_dir: Path, parser) -> float:
+    kwr_files = sorted(case_dir.glob("*node*_end.html"))
+    if not kwr_files:
+        kwr_files = sorted(case_dir.glob("*_end.html"))
+    if not kwr_files:
+        raise FileNotFoundError(f"No KWR HTML report found in {case_dir}")
+
+    cf_values = []
+    txn_counts = []
+    for kwr_file in kwr_files:
+        parsed = parser.parse_kwr(kwr_file)
+        cf_per_txn = to_float(parsed.get("cf_waits_per_txn", ""), f"{kwr_file} cf_waits_per_txn")
+        txn_count = optional_float(parsed.get("kwr_business_sql_exec_count", ""))
+        cf_values.append(cf_per_txn)
+        txn_counts.append(txn_count)
+
+    if all(count is not None for count in txn_counts):
+        total_txns = sum(txn_counts)
+        if total_txns <= 0:
+            raise RuntimeError(f"{case_dir}: non-positive business transaction count")
+        weighted_waits = sum(cf * count for cf, count in zip(cf_values, txn_counts))
+        return round(weighted_waits / total_txns, 6)
+
+    return round(sum(cf_values) / len(cf_values), 6)
+
+
+def extract_smallbank(smallbank_dir: Path, parser) -> list[tuple[str, list[float]]]:
+    data = []
+    for label, folder in SMALLBANK_GROUPS:
+        values = []
+        for _, mode in SYSTEMS:
+            values.append(kwr_cache_fusion(smallbank_dir / folder / f"m{mode}", parser))
+        data.append((label, values))
+    return data
+
+
+def extract_tpcc(tpcc_dir: Path, parser) -> list[tuple[str, list[float]]]:
+    data = []
+    for label, folder in TPCC_GROUPS:
+        values = []
+        for _, mode in SYSTEMS:
+            values.append(kwr_cache_fusion(tpcc_dir / folder / f"m{mode}", parser))
+        data.append((label, values))
+    return data
+
+
+def write_module(
+    output: Path,
+    smallbank_dir: Path,
+    tpcc_dir: Path,
+    smallbank_data: list[tuple[str, list[float]]],
+    tpcc_data: list[tuple[str, list[float]]],
+) -> None:
+    system_names = [name for name, _ in SYSTEMS]
+    lines = [
+        "# Auto-generated by extract_fig5_cache_fusion_4kwr.py.",
+        "# Do not edit by hand; rerun the extractor with the intended data directory.",
+        "#",
+        f"# Metric: {METRIC}",
+        f"# SmallBank source: {smallbank_dir}",
+        f"# TPC-C source: {tpcc_dir}",
+        "",
+        f"MAIN_SYSTEMS = {pformat(system_names, width=120)}",
+        "",
+        f"CACHE_FUSION_METRIC = {METRIC!r}",
+        "",
+        f"smallbank_cache_fusion_data = {pformat(smallbank_data, width=120)}",
+        "",
+        f"tpcc_cache_fusion_data = {pformat(tpcc_data, width=120)}",
+        "",
+        "MISSING = []",
+        "",
+        "WARNINGS = []",
+        "",
+    ]
+    output.write_text("\n".join(lines), encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--smallbank-dir", type=Path, default=DEFAULT_SMALLBANK_DIR)
+    parser.add_argument("--tpcc-dir", type=Path, default=DEFAULT_TPCC_DIR)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    args = parser.parse_args()
+
+    summary_parser = load_summary_parser()
+    smallbank_data = extract_smallbank(args.smallbank_dir, summary_parser)
+    tpcc_data = extract_tpcc(args.tpcc_dir, summary_parser)
+    write_module(args.output, args.smallbank_dir, args.tpcc_dir, smallbank_data, tpcc_data)
+
+    print(f"Wrote {args.output}")
+    print(f"SmallBank source: {args.smallbank_dir}")
+    print(f"TPC-C source: {args.tpcc_dir}")
+    print(f"Metric: {METRIC}")
+
+
+if __name__ == "__main__":
+    main()
