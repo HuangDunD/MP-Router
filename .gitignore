@@ -33,6 +33,5 @@ smallbank_latency_table.md
 smallbank_latency_table.tex
 draw/revison_draw/extracted_data/*
 fig*.pdf
-draw/revison_draw/README.md
 draw/revison_draw/figs/ablation_bar.pdf
 draw/revison_draw/figs/smallbank_latency_table.md

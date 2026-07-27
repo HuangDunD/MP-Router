@@ -1205,7 +1205,7 @@ def case_progress_label(case, case_index, total_cases, attempt):
     )
 
 def summarize_result_dir(result_dir):
-    summary_script = os.path.join(workspace, "scripts", "summarize_mp_router_results.py")
+    summary_script = os.path.join(workspace, "draw", "revison_draw", "summarize_mp_router_results.py")
     subprocess.run([sys.executable, summary_script, result_dir], check=False)
 
 def run_git_capture(args, output_path):
