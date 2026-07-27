@@ -1,5 +1,0 @@
-{
-    "ycsb": {
-        "key_cnt_per_partition": 1000 
-    }
-}

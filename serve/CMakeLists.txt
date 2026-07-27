@@ -23,9 +23,9 @@ set(MLP_SRC
 # --- MODIFICATION END ---
 
 # add_executable(serve ${SERVER_SRC} ${LOG_SRC})
-add_executable(offline_analyzer offline_analyze.cc)
-add_executable(create_table create_table.cc)
-add_executable(mlp_test ${MLP_SRC})
+# add_executable(offline_analyzer offline_analyze.cc)
+# add_executable(create_table create_table.cc)
+# add_executable(mlp_test ${MLP_SRC})
 
 add_library(metis STATIC ${METIS_SRC})
 add_library(logger STATIC ${LOG_SRC})
@@ -44,22 +44,22 @@ add_library(mlp STATIC ${MLP_SRC})
 # )
 
 # Link libraries to 'offline_analyzer' (if it also needs Logger, Region etc., add sources above too)
-target_link_libraries(offline_analyzer PRIVATE # Use PRIVATE or PUBLIC
-        global
-        ${PQXX_LIBRARY}
-        ${PQ_LIBRARY}
-        pgcommon
-        pgport
-)
+# target_link_libraries(offline_analyzer PRIVATE # Use PRIVATE or PUBLIC
+#         global
+#         ${PQXX_LIBRARY}
+#         ${PQ_LIBRARY}
+#         pgcommon
+#         pgport
+# )
 
-target_link_libraries(create_table PRIVATE # Use PRIVATE or PUBLIC
-        global
-        ${PQXX_LIBRARY}
-        ${PQ_LIBRARY}
-        pgcommon
-        pgport
+# target_link_libraries(create_table PRIVATE # Use PRIVATE or PUBLIC
+#         global
+#         ${PQXX_LIBRARY}
+#         ${PQ_LIBRARY}
+#         pgcommon
+#         pgport
 
-)
+# )
 
 add_subdirectory(test)
 
