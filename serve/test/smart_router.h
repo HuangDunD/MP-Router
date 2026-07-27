@@ -1276,7 +1276,19 @@ public:
                         } else if (Workload_Type == 1) { 
                             table_ids = ycsb_->get_table_ids_by_txn_type();
                             keys = txn_entry->ycsb_keys;
-                            rw = ycsb_->get_rw_flags();
+                            rw = txn_entry->ycsb_rw_flags.empty() ?
+                                ycsb_->get_rw_flags() : txn_entry->ycsb_rw_flags;
+                            static std::atomic<int> ycsb_route_write_count_logs{0};
+                            int log_idx = ycsb_route_write_count_logs.fetch_add(1, std::memory_order_relaxed);
+                            if (log_idx < 10) {
+                                size_t write_count = std::count(rw.begin(), rw.end(), true);
+                                std::cout << "[YCSB Route] tx_id=" << tx_id
+                                          << " write_ops=" << write_count << std::endl;
+                                if (log_idx == 9) {
+                                    std::cout << "[YCSB Route] suppressing further per-transaction write_ops logs"
+                                              << std::endl;
+                                }
+                            }
                         } else if (Workload_Type == 2 || Workload_Type == 3) {
                             keys = txn_entry->tpcc_keys;
                             table_ids = tpcc_->get_router_table_ids_by_txn_type(txn_type, keys);
