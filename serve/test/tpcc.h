@@ -9,6 +9,8 @@
 #include <iostream>
 #include <thread>
 #include <algorithm>
+#include <atomic>
+#include <memory>
 #include <set>
 
 #include "common.h"
@@ -140,6 +142,9 @@ private:
     int warehouse_id_from_key(table_id_t base_table_id, itemkey_t key) const;
     int warehouse_partition_id(int w_id) const;
     static int router_table_group(table_id_t base_table_id);
+    int allocate_order_id(int w_id, int d_id);
+
+    std::unique_ptr<std::atomic<int>[]> next_order_ids_;
     
     // Static data for routing/locking info
     static const std::vector<table_id_t> TABLE_IDS_ARR[5];

@@ -1341,7 +1341,9 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
                             std::string read_arr = build_array_from_flags(keys, rw, false);
                             std::string write_arr = build_array_from_flags(keys, rw, true);
 
-                            std::string sql = "SELECT id, ctid, txid FROM ycsb_multi_rw(" + read_arr + ", " + write_arr + ")";
+                            std::string sql = "SELECT id, ctid, txid FROM ycsb_multi_rw(" +
+                                              read_arr + ", " + write_arr + ", " +
+                                              std::to_string(tx_id) + ")";
                             res = txn.exec(sql);
                             break;
                         }
@@ -1705,20 +1707,24 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                     pqxx::result res;
                     switch(type) {
                         case TPCCTxType::kNewOrder: {
-                            if (tpcc_params.size() < 4) {
+                            const bool standard_new_order = tpcc->is_standard_mode();
+                            const size_t count_index = standard_new_order ? 4U : 3U;
+                            const size_t line_base = count_index + 1U;
+                            if (tpcc_params.size() <= count_index) {
                                 assert(false);
                             }
                             int w_id = tpcc_params[0];
                             int d_id = tpcc_params[1];
                             int c_id = tpcc_params[2];
-                            int o_ol_cnt = tpcc_params[3];
+                            int o_id = standard_new_order ? tpcc_params[3] : 0;
+                            int o_ol_cnt = tpcc_params[count_index];
 
                             std::string i_ids_str = "{";
                             std::string supply_w_ids_str = "{";
                             std::string quantities_str = "{";
 
                             for (int i = 0; i < o_ol_cnt; ++i) {
-                                int base = 4 + i * 3;
+                                int base = static_cast<int>(line_base) + i * 3;
                                 if (base + 2 >= (int)tpcc_params.size()) break;
 
                                 if (i > 0) {
@@ -1739,13 +1745,18 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                                     "tpcc_standard_new_order" : "tpcc_new_order") + "(" +
                                 std::to_string(w_id) + ", " +
                                 std::to_string(d_id) + ", " +
-                                std::to_string(c_id) + ", " +
+                                std::to_string(c_id) + ", ";
+                            if (standard_new_order) {
+                                sql += std::to_string(o_id) + ", ";
+                            }
+                            sql +=
                                 std::to_string(o_ol_cnt) + ", '" +
                                 i_ids_str + "', '" +
                                 supply_w_ids_str + "', '" +
                                 quantities_str + "'";
-                            if (tpcc->is_standard_mode()) {
-                                const size_t txn_time_index = 4 + static_cast<size_t>(o_ol_cnt) * 3;
+                            if (standard_new_order) {
+                                const size_t txn_time_index = line_base +
+                                    static_cast<size_t>(o_ol_cnt) * 3;
                                 if (txn_time_index >= tpcc_params.size()) {
                                     throw std::runtime_error("TPC-C NewOrder is missing client transaction time");
                                 }

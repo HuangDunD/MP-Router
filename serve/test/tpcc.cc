@@ -88,9 +88,13 @@ void print_tpcc_table_sizes(const std::string& label) {
 TPCC::TPCC(int num_warehouses, int access_pattern_type, bool standard_mode)
     : num_warehouses_(num_warehouses),
       access_pattern(access_pattern_type),
-      standard_mode_(standard_mode) {
+      standard_mode_(standard_mode),
+      next_order_ids_(new std::atomic<int>[num_warehouses * DIST_PER_WARE]) {
     assert(num_warehouses > 0);
     assert(access_pattern_type == 0 || access_pattern_type == 2); // For now we only support uniform and hotspot access patterns
+    for (int i = 0; i < num_warehouses_ * DIST_PER_WARE; ++i) {
+        next_order_ids_[i].store(customers_per_dist() + 1, std::memory_order_relaxed);
+    }
 }
 
 int TPCC::customers_per_dist() const {
@@ -99,6 +103,13 @@ int TPCC::customers_per_dist() const {
 
 int TPCC::item_count() const {
     return standard_mode_ ? STANDARD_ITEM_COUNT : ITEM_COUNT;
+}
+
+int TPCC::allocate_order_id(int w_id, int d_id) {
+    assert(w_id >= 1 && w_id <= num_warehouses_);
+    assert(d_id >= 1 && d_id <= DIST_PER_WARE);
+    const int slot = (w_id - 1) * DIST_PER_WARE + (d_id - 1);
+    return next_order_ids_[slot].fetch_add(1, std::memory_order_relaxed);
 }
 
 std::vector<table_id_t> TPCC::get_table_ids_by_txn_type(int txn_type, int key_size) const {
@@ -993,14 +1004,13 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
 
         txn.exec(R"SQL(
             CREATE OR REPLACE FUNCTION tpcc_standard_new_order(
-                p_w_id INT, p_d_id INT, p_c_id INT, p_o_ol_cnt INT,
+                p_w_id INT, p_d_id INT, p_c_id INT, p_o_id INT, p_o_ol_cnt INT,
                 p_i_ids INT[], p_i_w_ids INT[], p_quantities INT[],
                 p_txn_time_ms BIGINT
             )
             RETURNS TABLE(rel TEXT, ret_w_id INT, ret_d_id INT, ret_i_id INT, ctid TID)
             LANGUAGE plpgsql AS $$
             DECLARE
-                o_id INT;
                 i INT;
                 d_ctid TID;
                 s_ctid TID;
@@ -1012,7 +1022,7 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                 UPDATE district AS d
                 SET d_next_o_id = d.d_next_o_id + 1
                 WHERE d.d_w_id = p_w_id AND d.d_id = p_d_id
-                RETURNING (d.d_next_o_id - 1), d.ctid INTO o_id, d_ctid;
+                RETURNING d.ctid INTO d_ctid;
 
                 RETURN QUERY SELECT 'district'::text, p_w_id, p_d_id, NULL::INT, d_ctid;
 
@@ -1024,13 +1034,13 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
 
                 INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_carrier_id, o_ol_cnt, o_all_local)
                 VALUES (
-                    o_id, p_d_id, p_w_id, p_c_id,
+                    p_o_id, p_d_id, p_w_id, p_c_id,
                     TIMESTAMP 'epoch' + p_txn_time_ms * INTERVAL '1 millisecond',
                     NULL, p_o_ol_cnt, all_local
                 );
 
                 INSERT INTO new_order (no_o_id, no_d_id, no_w_id)
-                VALUES (o_id, p_d_id, p_w_id);
+                VALUES (p_o_id, p_d_id, p_w_id);
 
                 FOR i IN 1..p_o_ol_cnt LOOP
                     SELECT it.i_price INTO item_price
@@ -1057,7 +1067,7 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                         ol_delivery_d, ol_quantity, ol_amount, ol_dist_info
                     )
                     VALUES (
-                        o_id, p_d_id, p_w_id, i, p_i_ids[i], p_i_w_ids[i],
+                        p_o_id, p_d_id, p_w_id, i, p_i_ids[i], p_i_w_ids[i],
                         NULL, p_quantities[i], line_amount, 'standard-dist-info'
                     );
                 END LOOP;
@@ -1287,6 +1297,9 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
                     tpcc_params.push_back(w_id);
                     tpcc_params.push_back(d_id);
                     tpcc_params.push_back(c_id);
+                    if (standard_mode_) {
+                        tpcc_params.push_back(allocate_order_id(w_id, d_id));
+                    }
 
                     int o_ol_cnt = random_int(5, 15);
                     tpcc_params.push_back(o_ol_cnt);

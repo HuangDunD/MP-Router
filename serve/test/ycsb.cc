@@ -135,40 +135,41 @@ void YCSB::create_ycsb_stored_procedures(pqxx::connection* conn) {
         txn.exec(R"(
             CREATE OR REPLACE FUNCTION ycsb_multi_rw(
                 IN  read_keys  INT[],   -- 待读 key 列表
-                IN  write_keys INT[]    -- 待写 key 列表
+                IN  write_keys INT[],   -- 待写 key 列表
+                IN  p_seed BIGINT       -- 确定性生成写入值
             )
             RETURNS TABLE(id INT, ctid TID, txid BIGINT)
             LANGUAGE plpgsql
             AS $$
+            DECLARE
+                read_key INT;
+                write_key INT;
             BEGIN
                 --------------------------------------------------------------------
                 -- Read phase
                 --------------------------------------------------------------------
-                FOR i IN 1..COALESCE(array_length(read_keys, 1), 0) LOOP
+                FOREACH read_key IN ARRAY read_keys LOOP
                     RETURN QUERY
                     SELECT
                         t.id,
                         t.ctid,
                         txid_current() AS txid
                     FROM usertable AS t
-                    WHERE t.id = read_keys[i];
+                    WHERE t.id = read_key;
                 END LOOP;
 
                 --------------------------------------------------------------------
                 -- Write phase
                 --------------------------------------------------------------------
-                FOR i IN 1..COALESCE(array_length(write_keys, 1), 0) LOOP
-                    UPDATE usertable AS t
-                    SET field1 = md5(random()::text)
-                    WHERE t.id = write_keys[i];
-
+                FOREACH write_key IN ARRAY write_keys LOOP
                     RETURN QUERY
-                    SELECT
+                    UPDATE usertable AS t
+                    SET field1 = md5(p_seed::text || ':' || write_key::text)
+                    WHERE t.id = write_key
+                    RETURNING
                         t.id,
                         t.ctid,
-                        txid_current() AS txid
-                    FROM usertable AS t
-                    WHERE t.id = write_keys[i];
+                        txid_current() AS txid;
                 END LOOP;
 
             END;
