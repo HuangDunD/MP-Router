@@ -1,7 +1,12 @@
 build/
 *.zip
 target/
+.DS_Store
 .idea/
+.vscode/
+.mplconfig/
+**/.DS_Store
+**/.mplconfig/
 AI4DBCode-master/
 offline_workload.txt
 loadtable/
@@ -21,3 +26,13 @@ build*
 *.txt
 *.data
 fsync_bench*
+*.tex
+*.dvi
+*.aux
+smallbank_latency_table.md
+smallbank_latency_table.tex
+draw/revison_draw/extracted_data/*
+fig*.pdf
+draw/revison_draw/README.md
+draw/revison_draw/figs/ablation_bar.pdf
+draw/revison_draw/figs/smallbank_latency_table.md
