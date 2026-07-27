@@ -38,7 +38,7 @@ MIX_STYLE = {
 BREAKDOWN_STYLE = {
     "Wait DB": ("#d3d3d3", ""),
     "Wait Preprocess": ("#b07cc6", ""),
-    "Wait Queue": ("#a9c5d8", ""),
+    "Wait Barrier": ("#a9c5d8", ""),
     "Conflict-Free": ("#ffb347", "...."),
     "Conflicting": ("#e47474", "////"),
     "Execute": ("#77dd77", "xxxx"),
@@ -159,7 +159,7 @@ def plot_time_breakdown(ax, data):
         fontweight="bold",
     )
 
-    legend_order = ["Wait DB", "Conflict-Free", "Wait Preprocess", "Conflicting", "Wait Queue", "Execute"]
+    legend_order = ["Wait DB", "Conflict-Free", "Wait Preprocess", "Conflicting", "Wait Barrier", "Execute"]
     handles = [seen[name] for name in legend_order if name in seen]
     legend_labels = [name for name in legend_order if name in seen]
     return handles, legend_labels
