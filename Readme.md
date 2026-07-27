@@ -32,9 +32,8 @@ Core ideas implemented in this repository include:
 - `serve/region/`: region generation and related utilities.
 - `serve/mlp/`: optional MLP components.
 - `serve/log/`: logging implementation.
-- `core/`: partitioning and core helper code.
-- `core/util/`: utility functions, including distributions and JSON helpers.
-- `config/`: workload and cluster configuration examples.
+- `serve/metis_partitioner.*`: METIS-based partitioning helper.
+- `thirdparty/util/`: utility headers, including distributions and JSON helpers.
 - `scripts/`: result summarization helpers.
 - `draw/`: figure-generation scripts.
 - `thirdparty/rapidjson/`: bundled RapidJSON headers.

@@ -167,7 +167,6 @@ else()
 endif()
 
 include_directories(./
-        core
         thirdparty
         workload
         serve  # 添加serve目录以包含serve.cpp的头文件（如果有）
