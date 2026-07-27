@@ -1227,15 +1227,21 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
     YCSB* ycsb = params->ycsb;
     assert(txn_queue != nullptr && smart_router != nullptr && smart_router != nullptr && ycsb != nullptr);
 
-    // 构造数组字符串：array['k1','k2',...]
-    auto build_array = [](const std::vector<itemkey_t>& v, size_t start, size_t count) {
+    auto build_array_from_flags = [](const std::vector<itemkey_t>& keys,
+                                     const std::vector<bool>& rw,
+                                     bool want_write) {
+        std::string s = "array[";
+        size_t count = 0;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            if (rw[i] != want_write) {
+                continue;
+            }
+            if (count > 0) s += ",";
+            s += std::to_string(keys[i]);
+            count++;
+        }
         if (count == 0) {
             return std::string("ARRAY[]::INT[]");
-        }
-        std::string s = "array[";
-        for(size_t i = 0; i < count; ++i) {
-            if(i > 0) s += ",";
-            s += std::to_string(v[start + i]);
         }
         s += "]";
         return s;
@@ -1332,14 +1338,8 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
                     pqxx::result res;
                     switch(txn_type) {
                         case 0: {
-                            size_t read_count = 0;
-                            while (read_count < rw.size() && !rw[read_count]) {
-                                read_count++;
-                            }
-                            size_t write_count = rw.size() - read_count;
-
-                            std::string read_arr = build_array(keys, 0, read_count);
-                            std::string write_arr = build_array(keys, read_count, write_count);
+                            std::string read_arr = build_array_from_flags(keys, rw, false);
+                            std::string write_arr = build_array_from_flags(keys, rw, true);
 
                             std::string sql = "SELECT id, ctid, txid FROM ycsb_multi_rw(" + read_arr + ", " + write_arr + ")";
                             res = txn.exec(sql);
@@ -1459,16 +1459,16 @@ void run_mysql_ycsb_txns_sp(thread_params* params, Logger* logger_) {
                 ycsb->get_rw_flags() : txn_entry->ycsb_rw_flags;
             assert(keys.size() == 10 && rw.size() == 10);
 
-            size_t read_count = 0;
-            while (read_count < rw.size() && !rw[read_count]) read_count++;
-
             std::ostringstream sql;
             sql << "CALL ell_ycsb(";
             for (size_t i = 0; i < keys.size(); i++) {
                 if (i > 0) sql << ",";
                 sql << keys[i];
             }
-            sql << "," << read_count << ")";
+            for (size_t i = 0; i < rw.size(); i++) {
+                sql << "," << (rw[i] ? 1 : 0);
+            }
+            sql << ")";
 
             try {
                 client.exec(sql.str());

@@ -12,6 +12,7 @@
 #include <cmath>
 #include <algorithm>
 #include <functional>
+#include <numeric>
 #include <pqxx/pqxx>
 
 #include "common.h"
@@ -39,9 +40,11 @@ public:
           field_len_(field_len), zipfian_theta_(0.99), use_finite_zipfian_(false), hotspot_fraction_(0.2),
           hotspot_access_prob_(0.8), rw_mode_(RwMode::FIXED) {
             int total_keys = 10; // 固定每次10个键
-            read_ops_per_txn_ = std::max(0, std::min(total_keys, (int)std::round(total_keys * (read_pct / 100.0))));
+            read_ops_per_txn_ = read_pct > 90 ?
+                total_keys :
+                std::max(0, std::min(total_keys, (int)std::round(total_keys * (read_pct / 100.0))));
             write_ops_per_txn_ = total_keys - read_ops_per_txn_;
-            // 预构造静态 rw_flags_：0 表示读，1 表示写
+            // 预构造兜底 rw_flags_：0 表示读，1 表示写
             rw_flags_.assign(total_keys, false);
             for (int i = read_ops_per_txn_; i < total_keys; ++i) rw_flags_[i] = true;
         }
@@ -167,41 +170,23 @@ public:
             keys_vec[i] = key;
         }
 
+        std::sort(keys_vec.begin(), keys_vec.end(), std::greater<itemkey_t>());
+
         if (rw_mode_ == RwMode::FIXED) {
-            rw_flags = rw_flags_;
+            rw_flags.assign(keys_vec.size(), false);
+            std::vector<size_t> positions(keys_vec.size());
+            std::iota(positions.begin(), positions.end(), 0);
+            std::shuffle(positions.begin(), positions.end(), rng);
+            const size_t write_count = std::min<size_t>(write_ops_per_txn_, rw_flags.size());
+            for (size_t i = 0; i < write_count; ++i) {
+                rw_flags[positions[i]] = true;
+            }
         } else {
             std::bernoulli_distribution write_dist(update_pct_ / 100.0);
             rw_flags.assign(keys_vec.size(), false);
             for (size_t i = 0; i < rw_flags.size(); i++) {
                 rw_flags[i] = write_dist(rng);
             }
-        }
-
-        std::vector<itemkey_t> read_keys;
-        std::vector<itemkey_t> write_keys;
-        read_keys.reserve(keys_vec.size());
-        write_keys.reserve(keys_vec.size());
-        for (size_t i = 0; i < keys_vec.size(); i++) {
-            if (rw_flags[i]) {
-                write_keys.push_back(keys_vec[i]);
-            } else {
-                read_keys.push_back(keys_vec[i]);
-            }
-        }
-
-        std::sort(read_keys.begin(), read_keys.end(), std::greater<itemkey_t>());
-        std::sort(write_keys.begin(), write_keys.end(), std::greater<itemkey_t>());
-
-        size_t pos = 0;
-        for (itemkey_t key : read_keys) {
-            keys_vec[pos] = key;
-            rw_flags[pos] = false;
-            pos++;
-        }
-        for (itemkey_t key : write_keys) {
-            keys_vec[pos] = key;
-            rw_flags[pos] = true;
-            pos++;
         }
     }
 
@@ -212,7 +197,14 @@ public:
     // 获取读写标志（零拷贝），1表示写，0表示读
     const std::vector<bool>& get_rw_flags() const { return rw_flags_; }
 
-    void set_rw_mode(RwMode mode) { rw_mode_ = mode; }
+    void set_rw_mode(RwMode mode) {
+        rw_mode_ = mode;
+        if (rw_mode_ == RwMode::FIXED && read_pct_ > 90) {
+            std::cerr << "Warning: YCSB fixed rw mode with read_pct=" << read_pct_
+                      << " uses 10 read operations and 0 write operations per transaction."
+                      << std::endl;
+        }
+    }
 
     bool random_rw_mode_enabled() const { return rw_mode_ == RwMode::RANDOM; }
 
@@ -290,7 +282,7 @@ private:
 
     int read_ops_per_txn_;
     int write_ops_per_txn_;
-    std::vector<bool> rw_flags_; // 大小固定为10：前 read_ops_per_txn_ 为0(读)，其余为1(写)
+    std::vector<bool> rw_flags_; // 大小固定为10：0=读，1=写；fixed 模式每个事务随机写位置
 
     static std::string random_string(int len) {
         return random_field_string(len);
