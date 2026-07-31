@@ -17,6 +17,7 @@ import argparse
 import csv
 import shlex
 import re
+import signal
 
 # Set LD_LIBRARY_PATH for YashanDB client
 lib_path = os.path.expanduser("~/yashandb-client/lib")
@@ -33,7 +34,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_bufferin
 def kill_server():
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8") as outfile:
-        subprocess.run("ps -ef | grep run | grep -v grep | awk '{print $2}' | xargs kill -9",stdout=outfile, stderr=outfile,shell=True)
+        subprocess.run(["pkill", "-9", "-x", "run"], stdout=outfile, stderr=outfile, check=False)
         subprocess.run("rm ./output.txt", stdout=outfile, stderr=outfile, shell=True)
     time.sleep(1)
 
@@ -107,6 +108,32 @@ def run_cmd(cmd, check=True):
         logging.error(f"Command failed: {cmd}\nError: {result.stderr}")
         raise Exception(f"Command failed: {cmd}")
     return result
+
+def wait_for_process_stopped(process, timeout):
+    logging.info(f"Waiting for process {process.pid} to reach the post-load stop point...")
+    deadline = time.time() + timeout
+    status_path = f"/proc/{process.pid}/status"
+    while time.time() < deadline:
+        return_code = process.poll()
+        if return_code is not None:
+            raise RuntimeError(
+                f"Process exited with code {return_code} before reaching the post-load stop point."
+            )
+        try:
+            with open(status_path, "r", encoding="utf-8") as status_file:
+                for line in status_file:
+                    if line.startswith("State:"):
+                        state = line.split()[1]
+                        if state in ("T", "t"):
+                            logging.info(f"Process {process.pid} is stopped after loading data.")
+                            return
+                        break
+        except FileNotFoundError:
+            pass
+        time.sleep(0.1)
+    raise TimeoutError(
+        f"Process {process.pid} did not reach the post-load stop point within {timeout}s."
+    )
 
 def run_remote_cmd(cmd, check=True, max_retries=3, allowed_exit_codes=[0], display_cmd=None, host=None):
     remote_host = host or kwr_report_ip
@@ -682,7 +709,10 @@ def scale_values_for_workload(workload_name):
         for warehouse_count in list_for_workload(WarehouseCount, workload_name, WarehouseCount):
             yield None, warehouse_count
     else:
-        for account_count in list_for_workload(AccountCount, workload_name, AccountCount):
+        account_counts = list_for_workload(AccountCount, workload_name, AccountCount)
+        if SweepMode == "axis":
+            account_counts = account_counts[:1]
+        for account_count in account_counts:
             yield account_count, None
 
 def default_access_config(workload_name):
@@ -839,6 +869,15 @@ def build_axis_case_configs(workload_name, account_count=None, warehouse_count=N
         return dedupe_case_configs(configs)
 
     if include_baseline_cases:
+        for account_count_value in values_except_default(
+            list_for_workload(AccountCount, workload_name, AccountCount),
+            account_count,
+        ):
+            case = dict(base)
+            case["account_count"] = account_count_value
+            case["scan_axis"] = "account_count"
+            configs.append(case)
+
         for worker_threads in values_except_default(WorkerThreadCount, DefaultWorkerThreads):
             case = dict(base)
             case["worker_threads"] = worker_threads
@@ -1003,7 +1042,11 @@ def build_case_plan():
                     case = dict(case_config)
                     case["run_mode"] = run_mode
                     case["case_group_id"] = case_group_ids[group_key]
-                    case["data_cache_path"] = data_cache_path(workload_name, account_count, warehouse_count)
+                    case["data_cache_path"] = data_cache_path(
+                        workload_name,
+                        case_config.get("account_count"),
+                        case_config.get("warehouse_count"),
+                    )
                     if case.get("tpcc_partition_warehouses"):
                         case["data_cache_path"] += "_whpart"
                     if is_mlp_delta:
@@ -1085,6 +1128,7 @@ def write_case_metadata(case, dest_dir, kwr_report_name, command):
     metadata["kwr_report_name"] = kwr_report_name
     metadata["kwr_scope"] = KWRScope
     metadata["router_only"] = RouterOnly
+    metadata["load_restart_run"] = LoadRestartRun
     metadata["build_type"] = "Release" if RouterOnly else "Debug"
     metadata["preprocess_batch_concurrency"] = runtime_preprocess_batch_concurrency()
     metadata["command"] = command
@@ -1277,15 +1321,7 @@ def extend_sizes_for_case(case):
         return 800000, 80000
     return sys_extend_size, sys_index_extend_size
 
-def prepare_backup_data(case, backup_path):
-    logging.info(f">>> Preparing Backup Data (Load & Backup) to {backup_path} <<<")
-    
-    # 1. 确保数据库是启动状态
-    run_remote_cmd(f"crm resource start {db_resource_name}", check=False)
-    wait_for_db_start()
-
-    # 2. 运行导入数据 (使用 --load-data-only)
-    # 使用 build 目录下的 run
+def build_load_only_command(case):
     sys_extend, sys_index_extend = extend_sizes_for_case(case)
     cmd = (
         f"./run --workload {case['workload']} --load-data-only --system-mode {case['run_mode']} "
@@ -1300,6 +1336,18 @@ def prepare_backup_data(case, backup_path):
         cmd += " --tpcc-partition-warehouses"
     if Unlog:
         cmd += " --unlog"
+    return cmd
+
+def prepare_backup_data(case, backup_path):
+    logging.info(f">>> Preparing Backup Data (Load & Backup) to {backup_path} <<<")
+
+    # 1. 确保数据库是启动状态
+    run_remote_cmd(f"crm resource start {db_resource_name}", check=False)
+    wait_for_db_start()
+
+    # 2. 运行导入数据 (使用 --load-data-only)
+    # 使用 build 目录下的 run
+    cmd = build_load_only_command(case)
     logging.info(f"Loading data with command: {cmd}")
     # 切换到运行目录执行
     cwd_backup = os.getcwd()
@@ -1344,7 +1392,7 @@ output = workspace + "/build/output.txt"
 result = workspace + "/build/serve/test/result.txt"
 log = workspace + "/build/serve/test/partitioning_log.log"
 Run_Path = workspace + "/build/serve/test/"
-kwr_report_ip = "172.16.0.24"
+kwr_report_ip = "172.16.0.25"
 kwr_ip_password = "Wljwlj123."
 kwr_report_path = "/home/kingbase/MP-Router/kwr/"
 KWRScope = "single" # single: node0 only; all: one snapshot/report per active database node
@@ -1360,13 +1408,14 @@ db_drop_tables_timeout_seconds = 300
 use_local_db_readiness_probe = True
 enable_sql_readiness_probe = True
 data_path_wait_timeout_seconds = 30
+load_pause_timeout_seconds = 12 * 60 * 60
 test_interval_seconds = 5
 config_group_interval_seconds = 30
 db_ready_probe_conninfos = [
+    "host=172.16.0.25 port=44321 user=system password=123456 dbname=smallbank",
+    "host=172.16.0.27 port=44321 user=system password=123456 dbname=smallbank",
     "host=172.16.0.24 port=44321 user=system password=123456 dbname=smallbank",
     "host=172.16.0.26 port=44321 user=system password=123456 dbname=smallbank",
-    "host=172.16.0.27 port=44321 user=system password=123456 dbname=smallbank",
-    "host=172.16.0.25 port=44321 user=system password=123456 dbname=smallbank",
     # "host=172.16.0.30 port=44321 user=system password=123456 dbname=smallbank",
     # "host=172.16.0.29 port=44321 user=system password=123456 dbname=smallbank",
     # "host=172.16.0.31 port=44321 user=system password=123456 dbname=smallbank",
@@ -1382,6 +1431,7 @@ yashan_db_conninfos = [
 DBType = 0 # 0: PostgreSQL/KES, 1: YashanDB, 2: MySQL
 UseStoredProcedures = 1
 RouterOnly = False
+LoadRestartRun = False
 
 
 # !      !       !            注意：根据实际环境修改以上路径和参数                  !        !        !
@@ -1389,7 +1439,7 @@ RouterOnly = False
 # dynamic
 # RunModeType = [0, 3, 8, 11, 4, 13]
 # RunModeType = [11]
-RunModeType = [11]
+RunModeType = [11, 23, 28, 0 , 2, 25]
 # RunModeType = [23]
 # RunModeType = [11]
 # RunModeType = [28]
@@ -1411,8 +1461,8 @@ SweepMode = "axis" # axis: vary one dimension from defaults; full: Cartesian pro
 AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
 # AccessPattern = [1]
 # ZipfianTheta = [0.4]
-# ZipfianTheta = [0.8]
-ZipfianTheta = [0.9, 0.8, 0.6]
+ZipfianTheta = [0.8]
+# ZipfianTheta = [0.9, 0.8, 0.6]
 # ZipfianTheta = [0.8]
 ZipfianGenerator = "finite" # options: finite, legacy
 # HotspotFraction = [0.25]
@@ -1420,15 +1470,15 @@ HotspotFraction = [0.001, 0.01, 0.1, 1]
 HotspotProb = [0.8]
 # HotspotProb = [0.5, 0.8, 0.9]
 # account = 100W, 单个表大概14W个页面, 每个页面8KB, 大小约1.1GB
-AccountCount = [10000000]
+AccountCount = [100000000]
 WarehouseCount = [500]
 WorkerThreadCount = [16]
 # WorkerThreadCount = [16, 2, 4, 8, 32, 64]
 try_count = 35000
 TimeRun = 1 # 0:disable, 1:enable
 EnableDynamicWorkload = 0 # 0:disable, 1:enable dynamic workload phases in ./run
-WarmupSeconds = 15
-RunSeconds = 30
+WarmupSeconds = 120
+RunSeconds = 150
 FillPipelineBubble = 0
 PreprocessBatchConcurrency = 1
 RouterOnlyWorkerThreads = 4
@@ -1517,6 +1567,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Measure SmallBank router capacity with empty consumers; automatically builds Release/O3.",
     )
+    parser.add_argument(
+        "--load-restart-run",
+        action="store_true",
+        help="For every case, pause the same process after loading, restart PostgreSQL/KES, then resume the benchmark.",
+    )
     parser.add_argument("--disable-dynamic", action="store_true", help="Disable --enable-dynamic for this run")
     parser.add_argument(
         "--resume-result-dir",
@@ -1555,6 +1610,7 @@ if __name__ == "__main__":
             raise ValueError("--preprocess-batch-concurrency must be greater than 0")
         PreprocessBatchConcurrency = args.preprocess_batch_concurrency
     RouterOnly = args.router_only
+    LoadRestartRun = args.load_restart_run
     if args.disable_dynamic:
         EnableDynamicWorkload = 0
     if RouterOnly and any(workload_name != "smallbank" for workload_name in Workloads):
@@ -1573,6 +1629,10 @@ if __name__ == "__main__":
     UseDataCache = UseDataCache and not args.no_data_cache
     if UseDataCache and not is_postgres_like_db():
         raise RuntimeError("UseDataCache is only wired for the PostgreSQL/KES data directory workflow.")
+    if LoadRestartRun and UseDataCache:
+        raise ValueError("--load-restart-run cannot be combined with UseDataCache; use --no-data-cache.")
+    if LoadRestartRun and not is_postgres_like_db():
+        raise ValueError("--load-restart-run currently supports PostgreSQL/KES only.")
     resume_result_dir = os.path.abspath(args.resume_result_dir) if args.resume_result_dir else None
     logging.info(f"UseDataCache = {UseDataCache}")
     logging.info(f"DBType = {DBType}")
@@ -1581,6 +1641,7 @@ if __name__ == "__main__":
     logging.info(f"ComputeNodeCounts = {ComputeNodeCounts}")
     logging.info(f"KWRScope = {KWRScope}")
     logging.info(f"RouterOnly = {RouterOnly}")
+    logging.info(f"LoadRestartRun = {LoadRestartRun}")
     logging.info(f"BuildType = {'Release' if RouterOnly else 'Debug'}")
     if RouterOnly:
         logging.info(
@@ -1665,13 +1726,16 @@ if __name__ == "__main__":
         success = False
 
         router_only_data_key = (case["workload"], case.get("account_count"), case.get("warehouse_count"))
-        reuse_router_only_data = RouterOnly and router_only_loaded_data_key == router_only_data_key
+        reuse_router_only_data = (
+            RouterOnly and not LoadRestartRun and
+            router_only_loaded_data_key == router_only_data_key
+        )
 
         if UseDataCache and not reuse_router_only_data:
             reset_db_data(backup_path)
         # 确保 server 进程被清理
         kill_server()
-        if not RouterOnly:
+        if not RouterOnly and not LoadRestartRun:
             restart_database_before_tpcc_mode(case)
 
         # 删除之前的结果文件，防止误判
@@ -1691,6 +1755,7 @@ if __name__ == "__main__":
 
             scale_label = workload_scale_label(case["workload"], case.get("account_count"), case.get("warehouse_count"))
             logging.info(case_progress_label(case, case_index, len(planned_cases), attempt))
+
             kwr_report_name = (
                 f"kwr_{time_str}_case{case['case_id']:03d}"
                 f"_mode{case['run_mode']}_access{case['access_pattern']}"
@@ -1717,6 +1782,8 @@ if __name__ == "__main__":
                 cmd += " --tpcc-partition-warehouses"
             if UseDataCache or reuse_router_only_data:
                 cmd += " --skip-load-data"
+            if LoadRestartRun:
+                cmd += " --pause-after-load"
 
             if TimeRun:
                 cmd += f" --time-run --warmup-seconds {WarmupSeconds} --run-seconds {RunSeconds} --fill-pipeline-bubble {FillPipelineBubble}"
@@ -1743,11 +1810,36 @@ if __name__ == "__main__":
                     " --router-only --important-router-batch-log 0"
                 )
 
+            if LoadRestartRun:
+                run_remote_cmd(f"crm resource start {db_resource_name}", check=False)
             wait_for_db_start()
 
             with open(output, "w", encoding="utf-8") as outfile:
-                process = subprocess.Popen(cmd, shell=True, stdout=outfile, stderr=subprocess.STDOUT)
-                return_code = process.wait()
+                process = subprocess.Popen(
+                    shlex.split(cmd) if LoadRestartRun else cmd,
+                    shell=not LoadRestartRun,
+                    stdout=outfile,
+                    stderr=subprocess.STDOUT,
+                )
+                if LoadRestartRun:
+                    try:
+                        wait_for_process_stopped(process, load_pause_timeout_seconds)
+                        restart_database_resource(
+                            f"after in-process load for case {case['case_id']} attempt {attempt}"
+                        )
+                        logging.info(f"Resuming process {process.pid} after database restart.")
+                        process.send_signal(signal.SIGCONT)
+                        return_code = process.wait()
+                    except Exception as exc:
+                        logging.warning(
+                            f"Case {case['case_id']} in-process load/restart handshake failed: {exc}"
+                        )
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait()
+                        return_code = -1
+                else:
+                    return_code = process.wait()
             if return_code == 0 and os.path.exists(result):
                 success = True
                 if RouterOnly:
@@ -1800,7 +1892,9 @@ if __name__ == "__main__":
                     drop_public_tables()
                     truncate_kwr_tables()
                     sync_remote_servers_after_case()
-                    if RestartDBBeforeEachTPCCMode and is_tpcc_workload(next_case["workload"]):
+                    if LoadRestartRun:
+                        logging.info("Next case will restart the database after its in-process load phase.")
+                    elif RestartDBBeforeEachTPCCMode and is_tpcc_workload(next_case["workload"]):
                         logging.info("Next config group is TPC-C; database restart will run before its mode.")
                     else:
                         restart_database_resource()

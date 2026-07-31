@@ -7,6 +7,7 @@
 #include <mutex>
 #include <cassert>
 #include <atomic>
+#include <limits>
 #include "common.h"
 #include "txn_queue.h"
 #include <thread>
@@ -28,28 +29,35 @@ struct OwnershipSnapshot {
 
 class OwnershipTable {
 public:
-    OwnershipTable(Logger* logger) : logger(logger), ownership_changes_per_txn_type(SYS_8_DECISION_TYPE_COUNT) {
+    OwnershipTable(Logger* logger,
+                   size_t table_count = MAX_DB_TABLE_NUM,
+                   size_t page_count = MAX_DB_PAGE_NUM)
+        : logger(logger), ownership_changes_per_txn_type(SYS_8_DECISION_TYPE_COUNT) {
+        assert(table_count > 0 && table_count <= MAX_DB_TABLE_NUM);
+        assert(page_count > 0 &&
+               page_count <= static_cast<size_t>(std::numeric_limits<page_id_t>::max()));
+        const page_id_t allocated_page_count = static_cast<page_id_t>(page_count);
         // 初始化
         table_.clear();
-        table_.resize(MAX_DB_TABLE_NUM);
+        table_.resize(table_count);
         
         // Multi-threaded initialization
         unsigned int num_threads = std::thread::hardware_concurrency();
         if (num_threads == 0) num_threads = 4;
         std::vector<std::thread> threads;
 
-        for(table_id_t i = 0; i < MAX_DB_TABLE_NUM; i++) {
-            table_[i].resize(MAX_DB_PAGE_NUM);
+        for(table_id_t i = 0; i < static_cast<table_id_t>(table_.size()); i++) {
+            table_[i].resize(page_count);
             
             // Bulk allocate entries for better performance (one allocation vs MAX_DB_PAGE_NUM allocations)
-            OwnershipEntry* entries_block = new OwnershipEntry[MAX_DB_PAGE_NUM];
+            OwnershipEntry* entries_block = new OwnershipEntry[page_count];
 
             // Split work among threads
-            page_id_t chunk_size = MAX_DB_PAGE_NUM / num_threads;
+            page_id_t chunk_size = allocated_page_count / num_threads;
             
             for(unsigned int t = 0; t < num_threads; t++) {
                 page_id_t start = t * chunk_size;
-                page_id_t end = (t == num_threads - 1) ? MAX_DB_PAGE_NUM : (t + 1) * chunk_size;
+                page_id_t end = (t == num_threads - 1) ? allocated_page_count : (t + 1) * chunk_size;
                 
                 threads.emplace_back([this, i, entries_block, start, end, t]() {
                     // Use thread-local random engine
@@ -83,8 +91,8 @@ public:
 
     // 同时返回所有者和加锁模式（false=exclusive, true=shared）
     std::pair<std::vector<node_id_t>, bool> get_owner(table_id_t table_id, page_id_t page_id) const {
-        if (table_id < 0 || table_id >= MAX_DB_TABLE_NUM) assert(false);
-        if (page_id < 0 || page_id >= MAX_DB_PAGE_NUM) assert(false);
+        if (table_id < 0 || table_id >= static_cast<table_id_t>(table_.size())) assert(false);
+        if (page_id < 0 || static_cast<size_t>(page_id) >= table_[table_id].size()) assert(false);
         const auto& entry = table_[table_id][page_id];
         std::unique_lock lock(entry->mutex);
         return {entry->owners, entry->mode};
@@ -97,8 +105,8 @@ public:
     }
 
     OwnershipSnapshot get_owner_fast(table_id_t table_id, page_id_t page_id) const {
-        if (table_id < 0 || table_id >= MAX_DB_TABLE_NUM) assert(false);
-        if (page_id < 0 || page_id >= MAX_DB_PAGE_NUM) assert(false);
+        if (table_id < 0 || table_id >= static_cast<table_id_t>(table_.size())) assert(false);
+        if (page_id < 0 || static_cast<size_t>(page_id) >= table_[table_id].size()) assert(false);
         const auto& entry = table_[table_id][page_id];
         std::unique_lock lock(entry->mutex);
         OwnershipSnapshot snapshot;
@@ -119,8 +127,8 @@ public:
 
     // 设置页面所有权, 如果所有权发生变化返回true，否则返回false
     bool set_owner(TxnQueueEntry* txn, table_id_t table_id, itemkey_t access_key, bool rw, page_id_t page_id, node_id_t owner) {
-        if (table_id < 0 || table_id >= MAX_DB_TABLE_NUM) assert(false);
-        if (page_id < 0 || page_id >= MAX_DB_PAGE_NUM) assert(false);
+        if (table_id < 0 || table_id >= static_cast<table_id_t>(table_.size())) assert(false);
+        if (page_id < 0 || static_cast<size_t>(page_id) >= table_[table_id].size()) assert(false);
         auto& entry = table_[table_id][page_id];
         int txn_decision_type = txn ? txn->txn_decision_type : -1;
         int txn_id = txn ? txn->tx_id : -1;

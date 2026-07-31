@@ -2018,6 +2018,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --enable-autovacuum         Keep table autovacuum enabled after table creation [default: off]" << std::endl;
     std::cout << "  --without-kpmap             Skip key-page map initialization for client-only experiments" << std::endl;
     std::cout << "  --router-only               Use empty SmallBank consumers to measure Router capacity" << std::endl;
+    std::cout << "  --pause-after-load          Stop after loading data until the parent sends SIGCONT" << std::endl;
     std::cout << "  --fill-pipeline-bubble <0|1> Enable pipeline-bubble filling during conflict scheduling [default: 1]" << std::endl;
     std::cout << "  --important-router-batch-log <0|1> Enable important per-batch SmartRouter logs [default: 1]" << std::endl;
     std::cout << "  --preprocess-batch-concurrency <n> Concurrent FIFO batch preprocessors [default: 1]" << std::endl;
@@ -2623,6 +2624,7 @@ int main(int argc, char *argv[]) {
     int access_pattern = 0; // 0: uniform, 1: zipfian, 2: hotspot
     bool without_kpmap = false;
     bool router_only = false;
+    bool pause_after_load = false;
     int generator_threads = -1;
     // default parameters
     double zipfian_theta = 0.99; // Zipfian distribution parameter
@@ -3092,6 +3094,10 @@ int main(int argc, char *argv[]) {
             LOAD_DATA_ONLY = true;
             std::cout << "Load data only mode enabled." << std::endl;
         }
+        else if (arg == "--pause-after-load") {
+            pause_after_load = true;
+            std::cout << "Pause-after-load mode enabled." << std::endl;
+        }
         else if (arg == "--skip-load-data") {
             SKIP_LOAD_DATA = true;
             std::cout << "Skip load data mode enabled." << std::endl;
@@ -3257,6 +3263,15 @@ int main(int argc, char *argv[]) {
     if (access_pattern == 2 && hotspot_fraction >= 1.0) {
         std::cout << "Hotspot fraction is 1.0; using effective access pattern 0 (uniform)." << std::endl;
         access_pattern = 0;
+    }
+
+    if (pause_after_load && (LOAD_DATA_ONLY || SKIP_LOAD_DATA)) {
+        std::cerr << "Error: --pause-after-load cannot be combined with --load-data-only or --skip-load-data." << std::endl;
+        return -1;
+    }
+    if (pause_after_load && DB_TYPE != 0) {
+        std::cerr << "Error: --pause-after-load currently supports PostgreSQL/KES only." << std::endl;
+        return -1;
     }
 
     // Display current configuration
@@ -3659,6 +3674,13 @@ int main(int argc, char *argv[]) {
             double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
             std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
         }
+        if (pause_after_load) {
+            for (auto conn : conns) {
+                delete conn;
+            }
+            conns.clear();
+            conn0 = nullptr;
+        }
         if(LOAD_DATA_ONLY) {
             std::cout << "Load data only mode enabled. Exiting after data load." << std::endl;
             // Clean up connections
@@ -3826,8 +3848,28 @@ int main(int argc, char *argv[]) {
     SmartRouter::Config cfg{};
     if(Workload_Type == 0) {
         cfg.hot_hash_entry_limit = account_num * Key_Page_Map_Cache_Ratio * 2; // 两张表
+        cfg.ownership_table_count = 2;
+        page_id_t max_loaded_page = -1;
+        for (page_id_t page : g_smallbank_key_page_map.checking_page) {
+            max_loaded_page = std::max(max_loaded_page, page);
+        }
+        for (page_id_t page : g_smallbank_key_page_map.savings_page) {
+            max_loaded_page = std::max(max_loaded_page, page);
+        }
+        if (max_loaded_page >= 0) {
+            const size_t observed_page_count = static_cast<size_t>(max_loaded_page) + 1;
+            const size_t page_count_with_headroom = 1.5 * observed_page_count;
+            cfg.ownership_page_count =
+                std::max<size_t>(MAX_DB_PAGE_NUM, page_count_with_headroom);
+        }
+        std::cout << "SmallBank ownership page capacity per table: "
+                  << cfg.ownership_page_count << std::endl;
+    } else if (Workload_Type == 1) {
+        cfg.hot_hash_entry_limit = 640ULL * 1024ULL * 1024ULL; // 开的尽可能大，对于其他负载我们不做key 不足的实验
+        cfg.ownership_table_count = 1;
     } else {
         cfg.hot_hash_entry_limit = 640ULL * 1024ULL * 1024ULL; // 开的尽可能大，对于其他负载我们不做key 不足的实验
+        cfg.ownership_table_count = MAX_DB_TABLE_NUM;
     }
     SmartRouter* smart_router = new SmartRouter(
         cfg,
@@ -3924,6 +3966,21 @@ int main(int argc, char *argv[]) {
         }
     }
     else assert(false);
+
+    if (Workload_Type == 0 &&
+        (!g_smallbank_key_page_map.checking_page.empty() ||
+         !g_smallbank_key_page_map.savings_page.empty())) {
+        g_smallbank_key_page_map = SmallBank::TableKeyPageMap{};
+        std::cout << "Released temporary SmallBank key-page load mapping." << std::endl;
+    }
+
+    if (pause_after_load) {
+        std::cout << "PAUSE_AFTER_LOAD_READY: load, friend graph, and SmartRouter key-page map initialization completed; waiting for SIGCONT."
+                  << std::endl;
+        std::raise(SIGSTOP);
+        std::cout << "PAUSE_AFTER_LOAD_RESUMED: database restart completed; continuing with benchmark startup."
+                  << std::endl;
+    }
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
