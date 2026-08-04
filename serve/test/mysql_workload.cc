@@ -93,38 +93,26 @@ void YCSB::create_ycsb_stored_procedures_mysql(const MySQLConnInfo& info) {
     std::cout << "Creating YCSB stored procedure in MySQL..." << std::endl;
     MySQLClient client(info);
     mysql_exec_ignore(client, "DROP PROCEDURE IF EXISTS ell_ycsb");
-    client.exec(R"SQL(
-        CREATE PROCEDURE ell_ycsb(
-            IN k0 INT, IN k1 INT, IN k2 INT, IN k3 INT, IN k4 INT,
-            IN k5 INT, IN k6 INT, IN k7 INT, IN k8 INT, IN k9 INT,
-            IN rw0 BOOLEAN, IN rw1 BOOLEAN, IN rw2 BOOLEAN, IN rw3 BOOLEAN, IN rw4 BOOLEAN,
-            IN rw5 BOOLEAN, IN rw6 BOOLEAN, IN rw7 BOOLEAN, IN rw8 BOOLEAN, IN rw9 BOOLEAN
-        )
-        BEGIN
-            DECLARE v_dummy VARCHAR(100);
-            IF NOT rw0 THEN SELECT field0 INTO v_dummy FROM usertable WHERE id = k0; END IF;
-            IF NOT rw1 THEN SELECT field0 INTO v_dummy FROM usertable WHERE id = k1; END IF;
-            IF NOT rw2 THEN SELECT field0 INTO v_dummy FROM usertable WHERE id = k2; END IF;
-            IF NOT rw3 THEN SELECT field0 INTO v_dummy FROM usertable WHERE id = k3; END IF;
-            IF NOT rw4 THEN SELECT field0 INTO v_dummy FROM usertable WHERE id = k4; END IF;
-            IF NOT rw5 THEN SELECT field0 INTO v_dummy FROM usertable WHERE id = k5; END IF;
-            IF NOT rw6 THEN SELECT field0 INTO v_dummy FROM usertable WHERE id = k6; END IF;
-            IF NOT rw7 THEN SELECT field0 INTO v_dummy FROM usertable WHERE id = k7; END IF;
-            IF NOT rw8 THEN SELECT field0 INTO v_dummy FROM usertable WHERE id = k8; END IF;
-            IF NOT rw9 THEN SELECT field0 INTO v_dummy FROM usertable WHERE id = k9; END IF;
-
-            IF rw0 THEN UPDATE usertable SET field1 = MD5(RAND()) WHERE id = k0; END IF;
-            IF rw1 THEN UPDATE usertable SET field1 = MD5(RAND()) WHERE id = k1; END IF;
-            IF rw2 THEN UPDATE usertable SET field1 = MD5(RAND()) WHERE id = k2; END IF;
-            IF rw3 THEN UPDATE usertable SET field1 = MD5(RAND()) WHERE id = k3; END IF;
-            IF rw4 THEN UPDATE usertable SET field1 = MD5(RAND()) WHERE id = k4; END IF;
-            IF rw5 THEN UPDATE usertable SET field1 = MD5(RAND()) WHERE id = k5; END IF;
-            IF rw6 THEN UPDATE usertable SET field1 = MD5(RAND()) WHERE id = k6; END IF;
-            IF rw7 THEN UPDATE usertable SET field1 = MD5(RAND()) WHERE id = k7; END IF;
-            IF rw8 THEN UPDATE usertable SET field1 = MD5(RAND()) WHERE id = k8; END IF;
-            IF rw9 THEN UPDATE usertable SET field1 = MD5(RAND()) WHERE id = k9; END IF;
-        END
-    )SQL");
+    std::ostringstream sql;
+    sql << "CREATE PROCEDURE ell_ycsb(";
+    for (int i = 0; i < txn_length_; ++i) {
+        if (i > 0) sql << ", ";
+        sql << "IN k" << i << " INT";
+    }
+    for (int i = 0; i < txn_length_; ++i) {
+        sql << ", IN rw" << i << " BOOLEAN";
+    }
+    sql << ") BEGIN DECLARE v_dummy VARCHAR(100);";
+    for (int i = 0; i < txn_length_; ++i) {
+        sql << " IF NOT rw" << i
+            << " THEN SELECT field0 INTO v_dummy FROM usertable WHERE id = k" << i << "; END IF;";
+    }
+    for (int i = 0; i < txn_length_; ++i) {
+        sql << " IF rw" << i
+            << " THEN UPDATE usertable SET field1 = MD5(RAND()) WHERE id = k" << i << "; END IF;";
+    }
+    sql << " END";
+    client.exec(sql.str());
     std::cout << "YCSB stored procedure created in MySQL." << std::endl;
 }
 

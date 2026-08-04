@@ -35,11 +35,13 @@ public:
     };
 
     // access_pattern: 0=uniform, 1=zipfian
-    YCSB(int record_count, int access_pattern, int read_pct = 90, int update_pct = 10, int field_len = 100)
+    YCSB(int record_count, int access_pattern, int read_pct = 90, int update_pct = 10,
+         int field_len = 100, int txn_length = 10)
         : record_count_(record_count), access_pattern_(access_pattern), read_pct_(read_pct), update_pct_(update_pct),
           field_len_(field_len), zipfian_theta_(0.99), use_finite_zipfian_(false), hotspot_fraction_(0.2),
-          hotspot_access_prob_(0.8), rw_mode_(RwMode::FIXED) {
-            int total_keys = 10; // 固定每次10个键
+          hotspot_access_prob_(0.8), rw_mode_(RwMode::FIXED), txn_length_(txn_length),
+          table_ids_(txn_length, static_cast<table_id_t>(YCSBTableType::kYCSBTable)) {
+            int total_keys = txn_length_;
             read_ops_per_txn_ = read_pct > 90 ?
                 total_keys :
                 std::max(0, std::min(total_keys, (int)std::round(total_keys * (read_pct / 100.0))));
@@ -54,6 +56,7 @@ public:
     int get_read_cnt() const { return read_ops_per_txn_; }
     int get_write_cnt() const { return write_ops_per_txn_; }
     int get_field_len() const { return field_len_; }
+    int get_txn_length() const { return txn_length_; }
 
     static std::string random_field_string(int len) {
         static thread_local std::mt19937 rng{std::random_device{}()};
@@ -64,11 +67,6 @@ public:
         for (int i = 0; i < len; ++i) s.push_back(alphanum[dist(rng)]);
         return s;
     }
-
-    inline static const std::vector<table_id_t> TABLE_IDS_ARR[] = {
-        // txn_type == 0 -> 10 zeros
-        std::vector<table_id_t>(10, static_cast<table_id_t>(0))
-    };
 
     // 表：usertable(id INT PRIMARY KEY, field0 TEXT)
     void create_table(pqxx::connection* conn) {
@@ -152,13 +150,13 @@ public:
     // 装载数据
     void load_data(pqxx::connection* conn0);
 
-    void generate_ten_keys(std::vector<itemkey_t>& keys_vec,
-                           std::vector<bool>& rw_flags,
-                           ZipfGen* zipfian_gen,
-                           FiniteZipfGen* finite_zipfian_gen,
-                           std::mt19937& rng) {
+    void generate_keys(std::vector<itemkey_t>& keys_vec,
+                       std::vector<bool>& rw_flags,
+                       ZipfGen* zipfian_gen,
+                       FiniteZipfGen* finite_zipfian_gen,
+                       std::mt19937& rng) {
         const bool enforce_unique_keys = record_count_ >= static_cast<int>(keys_vec.size());
-        for (int i = 0; i < 10; i++) {
+        for (size_t i = 0; i < keys_vec.size(); i++) {
             itemkey_t key;
             do {
                 if (access_pattern_ == 0) { // uniform
@@ -218,7 +216,7 @@ public:
     void generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool);
 
     std::vector<table_id_t>& get_table_ids_by_txn_type() {
-        return const_cast<std::vector<table_id_t>&>(TABLE_IDS_ARR[0]);
+        return table_ids_;
     }
 
     void set_zipfian_theta(double theta) {
@@ -282,7 +280,9 @@ private:
 
     int read_ops_per_txn_;
     int write_ops_per_txn_;
-    std::vector<bool> rw_flags_; // 大小固定为10：0=读，1=写；fixed 模式每个事务随机写位置
+    int txn_length_;
+    std::vector<table_id_t> table_ids_;
+    std::vector<bool> rw_flags_; // 0=读，1=写；fixed 模式每个事务随机写位置
 
     static std::string random_string(int len) {
         return random_field_string(len);
