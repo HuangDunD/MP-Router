@@ -1412,11 +1412,14 @@ int TPCC::generate_txn_type() {
 
 int TPCC::generate_standard_txn_type() {
     int x = random_int(1, 100);
-    if (x <= 45) return (int)TPCCTxType::kNewOrder;
-    if (x <= 88) return (int)TPCCTxType::kPayment;
-    if (x <= 92) return (int)TPCCTxType::kOrderStatus;
-    if (x <= 96) return (int)TPCCTxType::kDelivery;
-    return (int)TPCCTxType::kStockLevel;
+    if (x <= 50) return (int)TPCCTxType::kNewOrder;
+    else if (x <= 100) return (int)TPCCTxType::kPayment;
+    else {};
+    // if (x <= 45) return (int)TPCCTxType::kNewOrder;
+    // if (x <= 88) return (int)TPCCTxType::kPayment;
+    // if (x <= 92) return (int)TPCCTxType::kOrderStatus;
+    // if (x <= 96) return (int)TPCCTxType::kDelivery;
+    // return (int)TPCCTxType::kStockLevel;
 }
 
 // Random helpers implementation
