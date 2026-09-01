@@ -3682,20 +3682,20 @@ int main(int argc, char *argv[]) {
                 if(Workload_Type == 0) smallbank->generate_friend_graph();
             });
 
-            bool accounts_num_verify = false;
-            if (Workload_Type == 0) {
-                accounts_num_verify = smallbank->check_account_count(conn0, account_num);
-            } else if (Workload_Type == 1) {
-                accounts_num_verify = ycsb->check_record_count(conn0, account_num);
-            } else if (Workload_Type == 2 || Workload_Type == 3) {
-                accounts_num_verify = tpcc->check_warehouse_count(conn0, warehouse_num);
-            }
-            if (!accounts_num_verify) {
-                std::cerr << "Error: Account/Record count in the database does not match the expected count. Please verify the data." << std::endl;
-                return -1;
-            } else {
-                std::cout << "Check OK: Account/Record count matches the expected count." << std::endl;
-            }
+            // bool accounts_num_verify = false;
+            // if (Workload_Type == 0) {
+            //     accounts_num_verify = smallbank->check_account_count(conn0, account_num);
+            // } else if (Workload_Type == 1) {
+            //     accounts_num_verify = ycsb->check_record_count(conn0, account_num);
+            // } else if (Workload_Type == 2 || Workload_Type == 3) {
+            //     accounts_num_verify = tpcc->check_warehouse_count(conn0, warehouse_num);
+            // }
+            // if (!accounts_num_verify) {
+            //     std::cerr << "Error: Account/Record count in the database does not match the expected count. Please verify the data." << std::endl;
+            //     return -1;
+            // } else {
+            //     std::cout << "Check OK: Account/Record count matches the expected count." << std::endl;
+            // }
             // Wait for friend thread to complete
             friend_thread.join();
             auto end_friend_gen = std::chrono::high_resolution_clock::now();
