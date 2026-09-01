@@ -7,6 +7,7 @@
 #include <thread>
 #include <csignal>
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <unordered_map>
 #include <atomic>
@@ -2044,7 +2045,9 @@ void print_usage(const char* program_name) {
     std::cout << "  " << program_name << " --system-mode 2 --account-count 100000" << std::endl;
 }
 
-void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger_, SmallBank* smallbank, ThreadPool* thread_pool) {
+void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger_, SmallBank* smallbank,
+                    ThreadPool* thread_pool, std::atomic<bool>* stop_requested,
+                    std::condition_variable* stop_cv, std::mutex* stop_mutex) {
     using namespace std::chrono;
     uint64_t exec_last_count = 0;
     uint64_t route_last_count = 0;
@@ -2095,7 +2098,14 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
 
     // for dynamic workload end
     while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        {
+            std::unique_lock<std::mutex> lock(*stop_mutex);
+            if (stop_cv->wait_for(lock, std::chrono::seconds(2), [stop_requested] {
+                    return stop_requested->load(std::memory_order_acquire);
+                })) {
+                break;
+            }
+        }
         auto now = steady_clock::now();
 
         if (dynamic_workload) {
@@ -4117,9 +4127,14 @@ int main(int argc, char *argv[]) {
     // !begin RUN Router
     smart_router->start_router();
 
-    // Start a separate thread to print TPS periodically
-    std::thread tps_thread(print_tps_loop, smart_router, txn_pool, logger_, smallbank, &smart_router->get_threadpool());
-    tps_thread.detach(); // Detach the thread to run independently
+    // Keep the reporter joinable: it dereferences benchmark-owned objects and
+    // therefore must stop before those objects and the output streams go away.
+    std::atomic<bool> stop_tps_reporter{false};
+    std::condition_variable tps_reporter_cv;
+    std::mutex tps_reporter_mutex;
+    std::thread tps_thread(print_tps_loop, smart_router, txn_pool, logger_, smallbank,
+                           &smart_router->get_threadpool(), &stop_tps_reporter,
+                           &tps_reporter_cv, &tps_reporter_mutex);
 
     if (time_based_run) {
         std::cout << "Time-based run: warmup_seconds=" << warmup_seconds
@@ -4207,6 +4222,12 @@ int main(int argc, char *argv[]) {
     // Stop the client transaction generation threads
     for(auto& thread : client_gen_txn_threads) {
         thread.join();
+    }
+
+    stop_tps_reporter.store(true, std::memory_order_release);
+    tps_reporter_cv.notify_all();
+    if (tps_thread.joinable()) {
+        tps_thread.join();
     }
 
     auto end = std::chrono::high_resolution_clock::now();
