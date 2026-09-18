@@ -2643,6 +2643,7 @@ int main(int argc, char *argv[]) {
     std::string zipfian_generator = "legacy";
     bool use_finite_zipfian = false;
     double hotspot_fraction = 0.2; // Fraction of accounts that are hot
+    bool hotspot_fraction_specified = false;
     double hotspot_access_prob = 0.8; // Probability of accessing hot accounts
     int ycsb_read_pct = 90; // YCSB read percentage; write percentage is 100 - read percentage
     int ycsb_txn_length = 10;
@@ -2747,6 +2748,7 @@ int main(int argc, char *argv[]) {
         else if (arg == "--hotspot-fraction") {
             if (i + 1 < argc) {
                 hotspot_fraction = std::stod(argv[++i]);
+                hotspot_fraction_specified = true;
                 if (hotspot_fraction <= 0.0 || hotspot_fraction > 1.0) {
                     std::cerr << "Error: Hotspot fraction must be in (0.0, 1.0]" << std::endl;
                     return -1;
@@ -3286,7 +3288,12 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (access_pattern == 2 && hotspot_fraction >= 1.0) {
+    if ((Workload_Type == 2 || Workload_Type == 3) && !hotspot_fraction_specified) {
+        hotspot_fraction = 1.0; // Preserve the original TPC-C hot range by default.
+    }
+
+    if (access_pattern == 2 && hotspot_fraction >= 1.0 &&
+        Workload_Type != 2 && Workload_Type != 3) {
         std::cout << "Hotspot fraction is 1.0; using effective access pattern 0 (uniform)." << std::endl;
         access_pattern = 0;
     }
@@ -3472,7 +3479,7 @@ int main(int argc, char *argv[]) {
         std::cout << std::endl;
     } else if (Workload_Type == 2 || Workload_Type == 3) {
         tpcc = new TPCC(warehouse_num, access_pattern, Workload_Type == 3); // Use the specified number of warehouses
-        if(access_pattern == 2) tpcc->set_hotspot_ratio(hotspot_access_prob); // For TPC-C, we can only set hotspot ratio for warehouses
+        if(access_pattern == 2) tpcc->set_hotspot_params(hotspot_fraction, hotspot_access_prob);
         std::cout << (Workload_Type == 3 ? "Standard TPC-C" : "TPC-C")
                   << " benchmark initialized with " << warehouse_num
                   << " warehouses, customers_per_district=" << tpcc->customers_per_dist()

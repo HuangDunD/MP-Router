@@ -88,6 +88,8 @@ void print_tpcc_table_sizes(const std::string& label) {
 TPCC::TPCC(int num_warehouses, int access_pattern_type, bool standard_mode)
     : num_warehouses_(num_warehouses),
       access_pattern(access_pattern_type),
+      hotspot_fraction(1.0),
+      hotspot_ratio(0.8),
       standard_mode_(standard_mode),
       next_order_ids_(new std::atomic<int>[num_warehouses * DIST_PER_WARE]) {
     assert(num_warehouses > 0);
@@ -1275,8 +1277,8 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
             }
             else if (access_pattern == 2) {
                // Hotspot
-               int hotspot_end = num_warehouses_ / ComputeNodeCount;
-               if (hotspot_end < 1) hotspot_end = 1;
+               const int node_warehouses = std::max(1, num_warehouses_ / std::max(1, ComputeNodeCount));
+               const int hotspot_end = std::max(1, static_cast<int>(node_warehouses * hotspot_fraction));
                
                if (random_int(1, 100) <= hotspot_ratio * 100) {
                    w_id = random_int(1, hotspot_end);
