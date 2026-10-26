@@ -4,7 +4,6 @@
 
 #include <unordered_map>
 #include <vector>
-#include <list>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -69,6 +68,8 @@ public:
         std::size_t partition_nums = ComputeNodeCount; // 分区数量，通常等于计算节点数量
 
         std::size_t hot_hash_entry_limit = 1000000; // 默认 100W 条目
+        std::size_t ownership_table_count = MAX_DB_TABLE_NUM;
+        std::size_t ownership_page_count = MAX_DB_PAGE_NUM;
         int thread_pool_size = 16;
         std::string log_file = "smart_router_metis.log"; // 日志文件
     };
@@ -270,34 +271,30 @@ public:
     // hot hash 层的热键条目
     class HotEntry {
     public:
-        page_id_t page = -1; // 初始化page字段
         mutable std::atomic<uint64_t> freq{0};
-        node_id_t key_access_last_node = -1; // 最近访问的节点ID，-1表示未设置
         uint64_t last_access_time = 0; // 最近访问时间（毫秒级）
-        // LRU 列表迭代器
-        std::list<DataItemKey>::iterator lru_it;
+        page_id_t page = -1; // 初始化page字段
+        node_id_t key_access_last_node = -1; // 最近访问的节点ID，-1表示未设置
         mutable std::atomic<bool> referenced{false};
 
         HotEntry(){};
-        HotEntry(page_id_t p, std::uint64_t f, std::list<DataItemKey>::iterator it)
-        : page(p), freq(f), lru_it(it) {}
+        HotEntry(page_id_t p, std::uint64_t f)
+        : freq(f), page(p) {}
 
         HotEntry(const HotEntry& other) {
-            page = other.page;
             freq.store(other.freq.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            key_access_last_node = other.key_access_last_node;
             last_access_time = other.last_access_time;
-            lru_it = other.lru_it;
+            page = other.page;
+            key_access_last_node = other.key_access_last_node;
             referenced.store(other.referenced.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
 
         HotEntry& operator=(const HotEntry& other) {
             if (this != &other) {
-                page = other.page;
                 freq.store(other.freq.load(std::memory_order_relaxed), std::memory_order_relaxed);
-                key_access_last_node = other.key_access_last_node;
                 last_access_time = other.last_access_time;
-                lru_it = other.lru_it;
+                page = other.page;
+                key_access_last_node = other.key_access_last_node;
                 referenced.store(other.referenced.load(std::memory_order_relaxed), std::memory_order_relaxed);
             }
             return *this;
@@ -338,7 +335,8 @@ public:
         if (SYSTEM_MODE == 4) {
             ownership_table_ = nullptr;
         } else {
-            ownership_table_ = new OwnershipTable(logger);
+            ownership_table_ = new OwnershipTable(
+                logger, cfg_.ownership_table_count, cfg_.ownership_page_count);
         }
         for(auto q: txn_queues_) q->set_batch_cv(&batch_cv);
         time_stats_.fetch_txn_from_pool_ms_per_thread.resize(worker_threads_, 0.0);
@@ -672,7 +670,6 @@ public:
             HotEntry entry;
             entry.page = page;
             entry.freq = 1;
-            entry.lru_it = shard.lru.begin();
             shard.map.emplace(data_key, std::move(entry));
             stats_.hot_hash_entries.fetch_add(1, std::memory_order_relaxed);
             // std::cout << "Initialized hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page << std::endl;
@@ -2025,7 +2022,7 @@ private:
     // 插入映射。如果存储满了, 会在预算内驱逐。
     inline HotEntry insert_or_victim_hot(table_id_t table_id, itemkey_t key, page_id_t page) {
         if (!key_page_map_enabled_) {
-            return HotEntry{page, 1, {}};
+            return HotEntry{page, 1};
         }
         // 策略1: Try Lock. 如果锁竞争激烈，直接放弃缓存本次插入，避免阻塞主线程，反正只是Cache
         const DataItemKey data_key{table_id, key};
@@ -2033,7 +2030,7 @@ private:
         std::unique_lock<std::shared_mutex> lock(shard.mutex, std::try_to_lock);
         if(!lock.owns_lock()) {
              // 没抢到锁，直接返回临时对象，不进Cache
-             return HotEntry{page, 1, {}};
+             return HotEntry{page, 1};
         }
 
         // Double-check: 再次检查 key 是否已存在 (处理并发 race condition)
@@ -2047,7 +2044,7 @@ private:
         shard.lru.push_front(data_key);
         auto [it, ok] = shard.map.emplace(
             data_key,
-            HotEntry{page, 1, shard.lru.begin()}
+            HotEntry{page, 1}
         );
         if (!ok) assert(false); // 不应该发生
 
@@ -2071,9 +2068,9 @@ private:
                 if (victim_it->second.referenced.load(std::memory_order_relaxed)) {
                     // Give second chance
                     victim_it->second.referenced.store(false, std::memory_order_relaxed);
-                    // Move to front (splice is efficient, iterator invalidated? No, list iterator stable)
-                    shard.lru.splice(shard.lru.begin(), shard.lru, std::prev(shard.lru.end()));
-                    // it->second.lru_it 仍然有效，指向同一个节点，只是位置变了
+                    DataItemKey referenced_key = candidate_key;
+                    shard.lru.pop_back();
+                    shard.lru.push_front(referenced_key);
                 } else {
                     // Evict
                     stats_.hot_hash_entries.fetch_sub(1, std::memory_order_relaxed);
@@ -2106,7 +2103,6 @@ private:
                 HotEntry entry;
                 entry.page = page;
                 entry.freq = 1;
-                entry.lru_it = shard.lru.begin();
                 shard.map.emplace(data_key, entry);
                 stats_.hot_hash_entries.fetch_add(1, std::memory_order_relaxed);
                 // std::cout << "Inserted hot key: (table_id=" << table_id << ", key=" << key << ") -> page " << page <<
@@ -2378,7 +2374,7 @@ private:
 
     struct HotKeyShard {
         std::unordered_map<DataItemKey, HotEntry, DataItemKeyHash> map;
-        std::list<DataItemKey> lru; // 前端为最新，后端为最旧
+        std::deque<DataItemKey> lru; // 前端为最新，后端为最旧
         mutable std::shared_mutex mutex;
     };
 

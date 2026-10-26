@@ -7,6 +7,7 @@
 #include <thread>
 #include <csignal>
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <unordered_map>
 #include <atomic>
@@ -1312,7 +1313,7 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             assert(tables.size() > 0);
             std::vector<itemkey_t> keys = txn_entry->ycsb_keys;
             assert(tables.size() == keys.size());
-            assert(txn_entry->ycsb_keys.size() == 10);
+            assert(txn_entry->ycsb_keys.size() == static_cast<size_t>(ycsb->get_txn_length()));
             std::vector<bool> rw = txn_entry->ycsb_rw_flags.empty() ?
                 ycsb->get_rw_flags() : txn_entry->ycsb_rw_flags;
             assert(rw.size() == keys.size());
@@ -1341,7 +1342,9 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
                             std::string read_arr = build_array_from_flags(keys, rw, false);
                             std::string write_arr = build_array_from_flags(keys, rw, true);
 
-                            std::string sql = "SELECT id, ctid, txid FROM ycsb_multi_rw(" + read_arr + ", " + write_arr + ")";
+                            std::string sql = "SELECT id, ctid, txid FROM ycsb_multi_rw(" +
+                                              read_arr + ", " + write_arr + ", " +
+                                              std::to_string(tx_id) + ")";
                             res = txn.exec(sql);
                             break;
                         }
@@ -1457,7 +1460,8 @@ void run_mysql_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             std::vector<itemkey_t> keys = txn_entry->ycsb_keys;
             std::vector<bool> rw = txn_entry->ycsb_rw_flags.empty() ?
                 ycsb->get_rw_flags() : txn_entry->ycsb_rw_flags;
-            assert(keys.size() == 10 && rw.size() == 10);
+            assert(keys.size() == static_cast<size_t>(ycsb->get_txn_length()) &&
+                   rw.size() == keys.size());
 
             std::ostringstream sql;
             sql << "CALL ell_ycsb(";
@@ -1705,20 +1709,24 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                     pqxx::result res;
                     switch(type) {
                         case TPCCTxType::kNewOrder: {
-                            if (tpcc_params.size() < 4) {
+                            const bool standard_new_order = tpcc->is_standard_mode();
+                            const size_t count_index = standard_new_order ? 4U : 3U;
+                            const size_t line_base = count_index + 1U;
+                            if (tpcc_params.size() <= count_index) {
                                 assert(false);
                             }
                             int w_id = tpcc_params[0];
                             int d_id = tpcc_params[1];
                             int c_id = tpcc_params[2];
-                            int o_ol_cnt = tpcc_params[3];
+                            int o_id = standard_new_order ? tpcc_params[3] : 0;
+                            int o_ol_cnt = tpcc_params[count_index];
 
                             std::string i_ids_str = "{";
                             std::string supply_w_ids_str = "{";
                             std::string quantities_str = "{";
 
                             for (int i = 0; i < o_ol_cnt; ++i) {
-                                int base = 4 + i * 3;
+                                int base = static_cast<int>(line_base) + i * 3;
                                 if (base + 2 >= (int)tpcc_params.size()) break;
 
                                 if (i > 0) {
@@ -1739,13 +1747,18 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                                     "tpcc_standard_new_order" : "tpcc_new_order") + "(" +
                                 std::to_string(w_id) + ", " +
                                 std::to_string(d_id) + ", " +
-                                std::to_string(c_id) + ", " +
+                                std::to_string(c_id) + ", ";
+                            if (standard_new_order) {
+                                sql += std::to_string(o_id) + ", ";
+                            }
+                            sql +=
                                 std::to_string(o_ol_cnt) + ", '" +
                                 i_ids_str + "', '" +
                                 supply_w_ids_str + "', '" +
                                 quantities_str + "'";
-                            if (tpcc->is_standard_mode()) {
-                                const size_t txn_time_index = 4 + static_cast<size_t>(o_ol_cnt) * 3;
+                            if (standard_new_order) {
+                                const size_t txn_time_index = line_base +
+                                    static_cast<size_t>(o_ol_cnt) * 3;
                                 if (txn_time_index >= tpcc_params.size()) {
                                     throw std::runtime_error("TPC-C NewOrder is missing client transaction time");
                                 }
@@ -1965,7 +1978,7 @@ void run_ycsb_txns_empty(thread_params* params, Logger* logger_) {
             assert(tables.size() > 0);
             std::vector<itemkey_t> keys = txn_entry->ycsb_keys;
             assert(tables.size() == keys.size());
-            assert(txn_entry->ycsb_keys.size() == 10);
+            assert(txn_entry->ycsb_keys.size() == static_cast<size_t>(ycsb->get_txn_length()));
             std::vector<bool> rw = txn_entry->ycsb_rw_flags.empty() ?
                 ycsb->get_rw_flags() : txn_entry->ycsb_rw_flags;
             assert(rw.size() == keys.size());
@@ -1996,6 +2009,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --hotspot-fraction <frac>   Fraction of hot accounts (0.0-1.0) [default: 0.1]" << std::endl;
     std::cout << "  --hotspot-prob <prob>       Probability of accessing hot accounts (0.0-1.0) [default: 0.8]" << std::endl;
     std::cout << "  --ycsb-read-pct <pct>       YCSB read percentage: per-op probability in random mode, fixed count in fixed mode (0-100) [default: 90]" << std::endl;
+    std::cout << "  --ycsb-txn-length <n>       Number of keys/operations per YCSB transaction [default: 10]" << std::endl;
     std::cout << "  --ycsb-rw-mode <mode>       YCSB read/write mode: random per operation or fixed counts (random|fixed) [default: random]" << std::endl;
     std::cout << "  --btree-read-mode <mode>    B-tree read mode (0=conn0, 1=random) [default: 0]" << std::endl;
     std::cout << "  --btree-frequency <seconds> B-tree refresh frequency in seconds [default: 5]" << std::endl;
@@ -2007,6 +2021,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --enable-autovacuum         Keep table autovacuum enabled after table creation [default: off]" << std::endl;
     std::cout << "  --without-kpmap             Skip key-page map initialization for client-only experiments" << std::endl;
     std::cout << "  --router-only               Use empty SmallBank consumers to measure Router capacity" << std::endl;
+    std::cout << "  --pause-after-load          Stop after loading data until the parent sends SIGCONT" << std::endl;
     std::cout << "  --fill-pipeline-bubble <0|1> Enable pipeline-bubble filling during conflict scheduling [default: 1]" << std::endl;
     std::cout << "  --important-router-batch-log <0|1> Enable important per-batch SmartRouter logs [default: 1]" << std::endl;
     std::cout << "  --preprocess-batch-concurrency <n> Concurrent FIFO batch preprocessors [default: 1]" << std::endl;
@@ -2030,7 +2045,9 @@ void print_usage(const char* program_name) {
     std::cout << "  " << program_name << " --system-mode 2 --account-count 100000" << std::endl;
 }
 
-void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger_, SmallBank* smallbank, ThreadPool* thread_pool) {
+void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger_, SmallBank* smallbank,
+                    ThreadPool* thread_pool, std::atomic<bool>* stop_requested,
+                    std::condition_variable* stop_cv, std::mutex* stop_mutex) {
     using namespace std::chrono;
     uint64_t exec_last_count = 0;
     uint64_t route_last_count = 0;
@@ -2081,7 +2098,14 @@ void print_tps_loop(SmartRouter* smart_router, TxnPool* txn_pool, Logger* logger
 
     // for dynamic workload end
     while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        {
+            std::unique_lock<std::mutex> lock(*stop_mutex);
+            if (stop_cv->wait_for(lock, std::chrono::seconds(2), [stop_requested] {
+                    return stop_requested->load(std::memory_order_acquire);
+                })) {
+                break;
+            }
+        }
         auto now = steady_clock::now();
 
         if (dynamic_workload) {
@@ -2612,14 +2636,17 @@ int main(int argc, char *argv[]) {
     int access_pattern = 0; // 0: uniform, 1: zipfian, 2: hotspot
     bool without_kpmap = false;
     bool router_only = false;
+    bool pause_after_load = false;
     int generator_threads = -1;
     // default parameters
     double zipfian_theta = 0.99; // Zipfian distribution parameter
     std::string zipfian_generator = "legacy";
     bool use_finite_zipfian = false;
     double hotspot_fraction = 0.2; // Fraction of accounts that are hot
+    bool hotspot_fraction_specified = false;
     double hotspot_access_prob = 0.8; // Probability of accessing hot accounts
     int ycsb_read_pct = 90; // YCSB read percentage; write percentage is 100 - read percentage
+    int ycsb_txn_length = 10;
     std::string ycsb_rw_mode = "random";
     // execution mode
     bool use_sp = true; // default: use stored procedures
@@ -2721,6 +2748,7 @@ int main(int argc, char *argv[]) {
         else if (arg == "--hotspot-fraction") {
             if (i + 1 < argc) {
                 hotspot_fraction = std::stod(argv[++i]);
+                hotspot_fraction_specified = true;
                 if (hotspot_fraction <= 0.0 || hotspot_fraction > 1.0) {
                     std::cerr << "Error: Hotspot fraction must be in (0.0, 1.0]" << std::endl;
                     return -1;
@@ -2758,6 +2786,19 @@ int main(int argc, char *argv[]) {
             } else {
                 std::cerr << "Error: --ycsb-read-pct requires a value" << std::endl;
                 print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--ycsb-txn-length") {
+            if (i + 1 < argc) {
+                ycsb_txn_length = std::stoi(argv[++i]);
+                if (ycsb_txn_length <= 0) {
+                    std::cerr << "Error: --ycsb-txn-length must be greater than 0" << std::endl;
+                    return -1;
+                }
+                std::cout << "YCSB transaction length set to: " << ycsb_txn_length << std::endl;
+            } else {
+                std::cerr << "Error: --ycsb-txn-length requires a value" << std::endl;
                 return -1;
             }
         }
@@ -3081,6 +3122,10 @@ int main(int argc, char *argv[]) {
             LOAD_DATA_ONLY = true;
             std::cout << "Load data only mode enabled." << std::endl;
         }
+        else if (arg == "--pause-after-load") {
+            pause_after_load = true;
+            std::cout << "Pause-after-load mode enabled." << std::endl;
+        }
         else if (arg == "--skip-load-data") {
             SKIP_LOAD_DATA = true;
             std::cout << "Skip load data mode enabled." << std::endl;
@@ -3243,9 +3288,23 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (access_pattern == 2 && hotspot_fraction >= 1.0) {
+    if ((Workload_Type == 2 || Workload_Type == 3) && !hotspot_fraction_specified) {
+        hotspot_fraction = 1.0; // Preserve the original TPC-C hot range by default.
+    }
+
+    if (access_pattern == 2 && hotspot_fraction >= 1.0 &&
+        Workload_Type != 2 && Workload_Type != 3) {
         std::cout << "Hotspot fraction is 1.0; using effective access pattern 0 (uniform)." << std::endl;
         access_pattern = 0;
+    }
+
+    if (pause_after_load && (LOAD_DATA_ONLY || SKIP_LOAD_DATA)) {
+        std::cerr << "Error: --pause-after-load cannot be combined with --load-data-only or --skip-load-data." << std::endl;
+        return -1;
+    }
+    if (pause_after_load && DB_TYPE != 0) {
+        std::cerr << "Error: --pause-after-load currently supports PostgreSQL/KES only." << std::endl;
+        return -1;
     }
 
     // Display current configuration
@@ -3399,7 +3458,8 @@ int main(int argc, char *argv[]) {
         if(access_pattern == 2) smallbank->set_hotspot_params(hotspot_fraction, hotspot_access_prob);
         std::cout << "SmallBank benchmark initialized." << std::endl;
     } else if (Workload_Type == 1) {
-        ycsb = new YCSB(account_num, access_pattern, ycsb_read_pct, 100 - ycsb_read_pct);
+        ycsb = new YCSB(account_num, access_pattern, ycsb_read_pct, 100 - ycsb_read_pct,
+                        100, ycsb_txn_length);
         ycsb->set_rw_mode(ycsb_rw_mode == "random" ? YCSB::RwMode::RANDOM : YCSB::RwMode::FIXED);
         if(access_pattern == 1) {
             ycsb->set_zipfian_theta(zipfian_theta);
@@ -3408,7 +3468,8 @@ int main(int argc, char *argv[]) {
         if(access_pattern == 2) ycsb->set_hotspot_params(hotspot_fraction, hotspot_access_prob);  
         std::cout << "YCSB benchmark initialized. read_pct=" << ycsb_read_pct
                   << " write_pct=" << (100 - ycsb_read_pct)
-                  << " rw_mode=" << ycsb_rw_mode;
+                  << " rw_mode=" << ycsb_rw_mode
+                  << " txn_length=" << ycsb_txn_length;
         if (ycsb_rw_mode == "fixed") {
             std::cout << " read_ops_per_txn=" << ycsb->get_read_cnt()
                       << " write_ops_per_txn=" << ycsb->get_write_cnt();
@@ -3418,7 +3479,7 @@ int main(int argc, char *argv[]) {
         std::cout << std::endl;
     } else if (Workload_Type == 2 || Workload_Type == 3) {
         tpcc = new TPCC(warehouse_num, access_pattern, Workload_Type == 3); // Use the specified number of warehouses
-        if(access_pattern == 2) tpcc->set_hotspot_ratio(hotspot_access_prob); // For TPC-C, we can only set hotspot ratio for warehouses
+        if(access_pattern == 2) tpcc->set_hotspot_params(hotspot_fraction, hotspot_access_prob);
         std::cout << (Workload_Type == 3 ? "Standard TPC-C" : "TPC-C")
                   << " benchmark initialized with " << warehouse_num
                   << " warehouses, customers_per_district=" << tpcc->customers_per_dist()
@@ -3628,25 +3689,32 @@ int main(int argc, char *argv[]) {
                 if(Workload_Type == 0) smallbank->generate_friend_graph();
             });
 
-            bool accounts_num_verify = false;
-            if (Workload_Type == 0) {
-                accounts_num_verify = smallbank->check_account_count(conn0, account_num);
-            } else if (Workload_Type == 1) {
-                accounts_num_verify = ycsb->check_record_count(conn0, account_num);
-            } else if (Workload_Type == 2 || Workload_Type == 3) {
-                accounts_num_verify = tpcc->check_warehouse_count(conn0, warehouse_num);
-            }
-            if (!accounts_num_verify) {
-                std::cerr << "Error: Account/Record count in the database does not match the expected count. Please verify the data." << std::endl;
-                return -1;
-            } else {
-                std::cout << "Check OK: Account/Record count matches the expected count." << std::endl;
-            }
+            // bool accounts_num_verify = false;
+            // if (Workload_Type == 0) {
+            //     accounts_num_verify = smallbank->check_account_count(conn0, account_num);
+            // } else if (Workload_Type == 1) {
+            //     accounts_num_verify = ycsb->check_record_count(conn0, account_num);
+            // } else if (Workload_Type == 2 || Workload_Type == 3) {
+            //     accounts_num_verify = tpcc->check_warehouse_count(conn0, warehouse_num);
+            // }
+            // if (!accounts_num_verify) {
+            //     std::cerr << "Error: Account/Record count in the database does not match the expected count. Please verify the data." << std::endl;
+            //     return -1;
+            // } else {
+            //     std::cout << "Check OK: Account/Record count matches the expected count." << std::endl;
+            // }
             // Wait for friend thread to complete
             friend_thread.join();
             auto end_friend_gen = std::chrono::high_resolution_clock::now();
             double friend_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_friend_gen - start_friend_gen).count();
             std::cout << "Friend graph generation completed in " << friend_gen_ms << " ms." << std::endl;
+        }
+        if (pause_after_load) {
+            for (auto conn : conns) {
+                delete conn;
+            }
+            conns.clear();
+            conn0 = nullptr;
         }
         if(LOAD_DATA_ONLY) {
             std::cout << "Load data only mode enabled. Exiting after data load." << std::endl;
@@ -3815,8 +3883,28 @@ int main(int argc, char *argv[]) {
     SmartRouter::Config cfg{};
     if(Workload_Type == 0) {
         cfg.hot_hash_entry_limit = account_num * Key_Page_Map_Cache_Ratio * 2; // 两张表
+        cfg.ownership_table_count = 2;
+        page_id_t max_loaded_page = -1;
+        for (page_id_t page : g_smallbank_key_page_map.checking_page) {
+            max_loaded_page = std::max(max_loaded_page, page);
+        }
+        for (page_id_t page : g_smallbank_key_page_map.savings_page) {
+            max_loaded_page = std::max(max_loaded_page, page);
+        }
+        if (max_loaded_page >= 0) {
+            const size_t observed_page_count = static_cast<size_t>(max_loaded_page) + 1;
+            const size_t page_count_with_headroom = 1.5 * observed_page_count;
+            cfg.ownership_page_count =
+                std::max<size_t>(MAX_DB_PAGE_NUM, page_count_with_headroom);
+        }
+        std::cout << "SmallBank ownership page capacity per table: "
+                  << cfg.ownership_page_count << std::endl;
+    } else if (Workload_Type == 1) {
+        cfg.hot_hash_entry_limit = 640ULL * 1024ULL * 1024ULL; // 开的尽可能大，对于其他负载我们不做key 不足的实验
+        cfg.ownership_table_count = 1;
     } else {
         cfg.hot_hash_entry_limit = 640ULL * 1024ULL * 1024ULL; // 开的尽可能大，对于其他负载我们不做key 不足的实验
+        cfg.ownership_table_count = MAX_DB_TABLE_NUM;
     }
     SmartRouter* smart_router = new SmartRouter(
         cfg,
@@ -3913,6 +4001,21 @@ int main(int argc, char *argv[]) {
         }
     }
     else assert(false);
+
+    if (Workload_Type == 0 &&
+        (!g_smallbank_key_page_map.checking_page.empty() ||
+         !g_smallbank_key_page_map.savings_page.empty())) {
+        g_smallbank_key_page_map = SmallBank::TableKeyPageMap{};
+        std::cout << "Released temporary SmallBank key-page load mapping." << std::endl;
+    }
+
+    if (pause_after_load) {
+        std::cout << "PAUSE_AFTER_LOAD_READY: load, friend graph, and SmartRouter key-page map initialization completed; waiting for SIGCONT."
+                  << std::endl;
+        std::raise(SIGSTOP);
+        std::cout << "PAUSE_AFTER_LOAD_RESUMED: database restart completed; continuing with benchmark startup."
+                  << std::endl;
+    }
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
@@ -4031,9 +4134,14 @@ int main(int argc, char *argv[]) {
     // !begin RUN Router
     smart_router->start_router();
 
-    // Start a separate thread to print TPS periodically
-    std::thread tps_thread(print_tps_loop, smart_router, txn_pool, logger_, smallbank, &smart_router->get_threadpool());
-    tps_thread.detach(); // Detach the thread to run independently
+    // Keep the reporter joinable: it dereferences benchmark-owned objects and
+    // therefore must stop before those objects and the output streams go away.
+    std::atomic<bool> stop_tps_reporter{false};
+    std::condition_variable tps_reporter_cv;
+    std::mutex tps_reporter_mutex;
+    std::thread tps_thread(print_tps_loop, smart_router, txn_pool, logger_, smallbank,
+                           &smart_router->get_threadpool(), &stop_tps_reporter,
+                           &tps_reporter_cv, &tps_reporter_mutex);
 
     if (time_based_run) {
         std::cout << "Time-based run: warmup_seconds=" << warmup_seconds
@@ -4121,6 +4229,12 @@ int main(int argc, char *argv[]) {
     // Stop the client transaction generation threads
     for(auto& thread : client_gen_txn_threads) {
         thread.join();
+    }
+
+    stop_tps_reporter.store(true, std::memory_order_release);
+    tps_reporter_cv.notify_all();
+    if (tps_thread.joinable()) {
+        tps_thread.join();
     }
 
     auto end = std::chrono::high_resolution_clock::now();

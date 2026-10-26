@@ -4,8 +4,8 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
     // 设置线程名
     pthread_setname_np(pthread_self(), ("txn_gen_t_" + std::to_string(thread_id)).c_str());
 
-    std::vector<itemkey_t> keys_vec(10);
-    std::vector<bool> rw_flags(10);
+    std::vector<itemkey_t> keys_vec(txn_length_);
+    std::vector<bool> rw_flags(txn_length_);
     std::mt19937 rw_rng(static_cast<uint32_t>(GetCPUCycle() ^ (thread_id * 0x9e3779b9U)));
     ZipfGen* zipfian_gen = nullptr;
     FiniteZipfGen* finite_zipfian_gen = nullptr;
@@ -33,7 +33,7 @@ void YCSB::generate_ycsb_txns_worker(int thread_id, TxnPool* txn_pool) {
             // Simulate some work
             // Randomly select a transaction type and accounts
             int txn_type = generate_txn_type();
-            generate_ten_keys(keys_vec, rw_flags, zipfian_gen, finite_zipfian_gen, rw_rng);
+            generate_keys(keys_vec, rw_flags, zipfian_gen, finite_zipfian_gen, rw_rng);
             // Create a new transaction object
             TxnQueueEntry* txn_entry = new TxnQueueEntry(tx_id, txn_type, {}, keys_vec);
             txn_entry->ycsb_rw_flags = rw_flags;
@@ -135,40 +135,41 @@ void YCSB::create_ycsb_stored_procedures(pqxx::connection* conn) {
         txn.exec(R"(
             CREATE OR REPLACE FUNCTION ycsb_multi_rw(
                 IN  read_keys  INT[],   -- 待读 key 列表
-                IN  write_keys INT[]    -- 待写 key 列表
+                IN  write_keys INT[],   -- 待写 key 列表
+                IN  p_seed BIGINT       -- 确定性生成写入值
             )
             RETURNS TABLE(id INT, ctid TID, txid BIGINT)
             LANGUAGE plpgsql
             AS $$
+            DECLARE
+                read_key INT;
+                write_key INT;
             BEGIN
                 --------------------------------------------------------------------
                 -- Read phase
                 --------------------------------------------------------------------
-                FOR i IN 1..COALESCE(array_length(read_keys, 1), 0) LOOP
+                FOREACH read_key IN ARRAY read_keys LOOP
                     RETURN QUERY
                     SELECT
                         t.id,
                         t.ctid,
                         txid_current() AS txid
                     FROM usertable AS t
-                    WHERE t.id = read_keys[i];
+                    WHERE t.id = read_key;
                 END LOOP;
 
                 --------------------------------------------------------------------
                 -- Write phase
                 --------------------------------------------------------------------
-                FOR i IN 1..COALESCE(array_length(write_keys, 1), 0) LOOP
-                    UPDATE usertable AS t
-                    SET field1 = md5(random()::text)
-                    WHERE t.id = write_keys[i];
-
+                FOREACH write_key IN ARRAY write_keys LOOP
                     RETURN QUERY
-                    SELECT
+                    UPDATE usertable AS t
+                    SET field1 = md5(p_seed::text || ':' || write_key::text)
+                    WHERE t.id = write_key
+                    RETURNING
                         t.id,
                         t.ctid,
-                        txid_current() AS txid
-                    FROM usertable AS t
-                    WHERE t.id = write_keys[i];
+                        txid_current() AS txid;
                 END LOOP;
 
             END;

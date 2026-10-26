@@ -9,6 +9,8 @@
 #include <iostream>
 #include <thread>
 #include <algorithm>
+#include <atomic>
+#include <memory>
 #include <set>
 
 #include "common.h"
@@ -49,7 +51,10 @@ public:
     void create_tpcc_stored_procedures(pqxx::connection *conn);
     void create_standard_tpcc_stored_procedures(pqxx::connection *conn);
     void generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool);
-    void set_hotspot_ratio(double ratio) { hotspot_ratio = ratio; }
+    void set_hotspot_params(double fraction, double ratio) {
+        hotspot_fraction = fraction;
+        hotspot_ratio = ratio;
+    }
     
     // Helper to get table IDs involved in a transaction type
     std::vector<table_id_t> get_table_ids_by_txn_type(int txn_type, int key_size) const;
@@ -116,7 +121,8 @@ private:
 
     int num_warehouses_;
     int access_pattern; // 0: uniform, 1: zipfian, 2: hotspot
-    double hotspot_ratio; // For hotspot access pattern, the ratio of accesses to hotspot warehouses
+    double hotspot_fraction; // Fraction of this node's warehouse range that is hot
+    double hotspot_ratio; // Probability of choosing from the hot range
     bool standard_mode_;
 
     // Helper functions for data loading
@@ -140,6 +146,9 @@ private:
     int warehouse_id_from_key(table_id_t base_table_id, itemkey_t key) const;
     int warehouse_partition_id(int w_id) const;
     static int router_table_group(table_id_t base_table_id);
+    int allocate_order_id(int w_id, int d_id);
+
+    std::unique_ptr<std::atomic<int>[]> next_order_ids_;
     
     // Static data for routing/locking info
     static const std::vector<table_id_t> TABLE_IDS_ARR[5];
