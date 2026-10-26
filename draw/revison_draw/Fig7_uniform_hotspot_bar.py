@@ -67,6 +67,7 @@ def plot_grouped_bars(ax, data, systems, colors, hatches):
     ax.set_xlabel("Hot-Spot Fraction", fontsize=16)
     ax.set_ylabel("Throughput (KTPS)", fontsize=16)
     ax.grid(axis="y", linestyle="--", alpha=0.5, zorder=0)
+    ax.xaxis.set_label_coords(0.5, -0.13)
 
 
 def main() -> None:
@@ -92,12 +93,13 @@ def main() -> None:
         labels,
         loc="upper center",
         bbox_to_anchor=(0.5, 0.99),
-        prop={"weight": "bold", "size": 12},
-        handlelength=1.5,
-        handleheight=1.2,
+        prop={"weight": "bold", "size": 16},
+        handlelength=1,
+        handleheight=0.6,
         frameon=False,
+        handletextpad=0.4,
         ncol=6,
-        columnspacing=1.0,
+        columnspacing=0.4,
     )
 
     fig.subplots_adjust(left=0.12, right=0.98, bottom=0.16, top=0.84)

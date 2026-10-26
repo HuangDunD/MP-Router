@@ -259,6 +259,49 @@ Notes:
 - The extractors read `Throughput (after warmup)` directly from `result.txt`
   and do not use `summary.md`, `summary.csv`, `case_id`, or `case_plan`.
 
+## Fig. C: Scalability With Data Size
+
+Data modules:
+
+```text
+extracted_data/fig8_thread_scalability.py
+extracted_data/fig9_node_scalability.py
+extracted_data/figC_account_scalability.py
+```
+
+Extraction script:
+
+```text
+extracted_data/extract_figC_account_scalability.py
+```
+
+Data source:
+
+```text
+vldb_res/20260731203627（data-size)/smallbank_p1_ZipfTheta0.8_*_acc*_t16_r0.8_b10000_n4_*/m*/result.txt
+```
+
+Output:
+
+```text
+figs/figC_scalability_combined.pdf
+```
+
+Command:
+
+```bash
+MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 extracted_data/extract_figC_account_scalability.py \
+  --data-size-dir "../../../vldb_res/20260731203627（data-size)"
+
+MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 FigC_scalability_combined.py
+```
+
+Notes:
+
+- This script is a copy-style variant of `Fig8_9_scalability_combined.py`; the
+  original Fig. 8-9 plotting script is unchanged.
+- The third panel sweeps account count from `1M` to `100M`.
+
 ## Fig. 10: Transaction Window Size
 
 Data module:
@@ -487,6 +530,7 @@ Data sources:
 
 ```text
 Router-only:    vldb_res/20260717234540(route-only)/smallbank_p1_ZipfTheta*_rt16_gt8/m11/result.txt
+System thput.:  vldb_res/20260709000616(main)/smallbank_p1_ZipfTheta*_*/m11/result.txt
 Time breakdown: vldb_res/20260718190512(abaltion-new)/*/m11/result.txt
 ```
 
@@ -500,7 +544,8 @@ Commands:
 
 ```bash
 MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 extracted_data/extract_fig11_route_only.py \
-  --route-only-dir "../../../vldb_res/20260717234540(route-only)"
+  --route-only-dir "../../../vldb_res/20260717234540(route-only)" \
+  --main-dir "../../../vldb_res/20260709000616(main)"
 
 MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 extracted_data/extract_fig14_ablation_breakdown.py \
   --main-dir "../../../vldb_res/20260709000616(main)" \
@@ -512,7 +557,9 @@ MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 Fig14_router_efficiency_br
 
 Notes:
 
-- The left panel shows router-only throughput and transaction mix.
+- The left panel shows router-only throughput, MP-Router system throughput, and
+  transaction mix. The system throughput uses the same main SmallBank results
+  as Fig. 4, but is exported into the Fig. 14 data module to keep data isolated.
 - The time-breakdown panel uses `theta=0.6,0.9` and the latest timing block
   from each `result.txt`.
 - The extractors read raw `result.txt` files directly and do not use

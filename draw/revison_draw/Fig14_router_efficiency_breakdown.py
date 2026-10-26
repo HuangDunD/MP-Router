@@ -44,11 +44,24 @@ BREAKDOWN_STYLE = {
     "Execute": ("#77dd77", "xxxx"),
 }
 
+BREAKDOWN_LABEL = {
+    "Conflict-Free": "Conflict-Free Route",
+    "Conflicting": "Conflicting Route",
+}
 
-def plot_route_only(ax, route_data):
+ROUTER_THREAD_ORDER = ["Wait Preprocess", "Conflict-Free", "Conflicting", "Wait DB"]
+
+
+def system_throughput_by_theta(system_data):
+    return {theta: throughput / 1_000.0 for theta, throughput in system_data}
+
+
+def plot_route_only(ax, route_data, system_data):
     labels = [theta for theta, *_ in route_data]
     x = list(range(len(labels)))
-    throughput_ktps = [throughput / 1_000.0 for _, throughput, *_ in route_data]
+    router_throughput_ktps = [throughput / 1_000.0 for _, throughput, *_ in route_data]
+    system_tps = system_throughput_by_theta(system_data)
+    system_throughput_ktps = [system_tps[theta] for theta in labels]
     mix_by_name = {name: [] for name in MIX_STYLE}
     for _, _, mix, _, _ in route_data:
         values = dict(mix)
@@ -80,9 +93,9 @@ def plot_route_only(ax, route_data):
         bar_handles.append(bars[0])
         bottoms = [base + value for base, value in zip(bottoms, mix_by_name[name])]
 
-    ax.plot(
+    router_line, = ax.plot(
         x,
-        throughput_ktps,
+        router_throughput_ktps,
         color="#215aecc1",
         marker="s",
         markersize=8,
@@ -90,6 +103,17 @@ def plot_route_only(ax, route_data):
         markeredgecolor="white",
         markeredgewidth=0.5,
         zorder=4,
+    )
+    system_line, = ax.plot(
+        x,
+        system_throughput_ktps,
+        color="#6f7378",
+        marker="o",
+        markersize=8,
+        linewidth=2.8,
+        markeredgecolor="white",
+        markeredgewidth=0.5,
+        zorder=5,
     )
 
     ax.set_xticks(x)
@@ -106,14 +130,17 @@ def plot_route_only(ax, route_data):
     ax.text(
         0.5,
         -0.28,
-        "(a) Router-only throughput and txn mix",
+        "(a) Throughput and txn mix",
         transform=ax.transAxes,
         ha="center",
         va="top",
         fontsize=14,
         fontweight="bold",
     )
-    return bar_handles, ["Conflict-Free", "Critical", "Non-Critical"]
+    line_handles = [router_line, system_line]
+    line_labels = ["Router-only Thput.", "Database Thput."]
+    bar_labels = ["Conflict-Free", "Critical", "Non-Critical"]
+    return line_handles, line_labels, bar_handles, bar_labels
 
 
 def plot_time_breakdown(ax, data):
@@ -121,8 +148,11 @@ def plot_time_breakdown(ax, data):
     y_positions = [0, 1, 2.4, 3.4]
     seen = {}
 
-    for y, (_, _, parts) in zip(y_positions, data):
+    for y, (_, kind, parts) in zip(y_positions, data):
         left = 0.0
+        if kind == "Router Thread":
+            order = {name: index for index, name in enumerate(ROUTER_THREAD_ORDER)}
+            parts = sorted(parts, key=lambda item: order.get(item[0], len(order)))
         for name, value in parts:
             color, hatch = BREAKDOWN_STYLE[name]
             label = name if name not in seen else "_" + name
@@ -161,7 +191,7 @@ def plot_time_breakdown(ax, data):
 
     legend_order = ["Wait DB", "Conflict-Free", "Wait Preprocess", "Conflicting", "Wait Barrier", "Execute"]
     handles = [seen[name] for name in legend_order if name in seen]
-    legend_labels = [name for name in legend_order if name in seen]
+    legend_labels = [BREAKDOWN_LABEL.get(name, name) for name in legend_order if name in seen]
     return handles, legend_labels
 
 
@@ -176,14 +206,31 @@ def main() -> None:
     breakdown_data = importlib.import_module(args.breakdown_data_module)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.5, 3.2), gridspec_kw={"width_ratios": [1.0, 1.45]})
-    route_handles, route_labels = plot_route_only(ax1, route_data.route_only_data)
+    line_handles, line_labels, mix_handles, mix_labels = plot_route_only(
+        ax1,
+        route_data.route_only_data,
+        route_data.system_throughput_data,
+    )
     bd_handles, bd_labels = plot_time_breakdown(ax2, breakdown_data.time_breakdown_data)
 
-    ax1.legend(
-        route_handles,
-        route_labels,
+    line_legend = ax1.legend(
+        line_handles,
+        line_labels,
         loc="lower center",
-        bbox_to_anchor=(0.5, 1),
+        bbox_to_anchor=(0.49, 1.13),
+        prop={"weight": "bold", "size": 11},
+        handlelength=1.8,
+        handleheight=1,
+        frameon=False,
+        ncol=2,
+        columnspacing=0.6,
+    )
+    ax1.add_artist(line_legend)
+    ax1.legend(
+        mix_handles,
+        mix_labels,
+        loc="lower center",
+        bbox_to_anchor=(0.49, 1),
         prop={"weight": "bold", "size": 11},
         handlelength=1.2,
         handleheight=1,
@@ -195,7 +242,7 @@ def main() -> None:
         bd_handles,
         bd_labels,
         loc="lower center",
-        bbox_to_anchor=(0.44, 1),
+        bbox_to_anchor=(0.38, 1),
         prop={"weight": "bold", "size": 11},
         handlelength=1.2,
         handleheight=1,
@@ -204,7 +251,7 @@ def main() -> None:
         columnspacing=0.35,
     )
 
-    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.25, top=0.82, wspace=0.55)
+    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.25, top=0.82, wspace=0.57)
     args.outfile.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(args.outfile, dpi=600)
     plt.close(fig)
