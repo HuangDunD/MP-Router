@@ -199,8 +199,11 @@ void SmartRouter::initialize_seron_range_rules() {
             if (rows.size() < 2) rows = db.exec(select + " LIMIT 16384");
             for (const auto& row : rows) {
                 const uint64_t page = (row[0].as<uint64_t>() << 32) | row[1].as<uint64_t>();
-                for (size_t j = 0; j < ids.size(); ++j) if (!row[j+2].is_null())
-                    samples[ids[j]].push_back({page, row[j+2].as<uint64_t>()});
+                for (size_t j = 0; j < ids.size(); ++j) {
+                    const auto field = row[static_cast<pqxx::row::size_type>(j + 2)];
+                    if (!field.is_null())
+                        samples[ids[j]].push_back({page, field.as<uint64_t>()});
+                }
             }
         }
         for (auto id : ids) seron_range_rules_->add_column(id, specs[id], std::move(samples[id]));
