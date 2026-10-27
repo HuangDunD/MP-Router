@@ -221,7 +221,8 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
     }
 
     if (SYSTEM_MODE == 33) {
-        result.smart_router_id = seron_range_rules_->assign(seron_range_predicates(txn));
+        result.smart_router_id = seron_range_rules_->assign(
+            seron_range_predicates(txn), load_total_balance_penalty_weights());
         // Preserve the page observations and completion feedback used by mode 32,
         // but do not consult/update PAR's graph or ownership when choosing a node.
         for (size_t i = 0; i < keys.size(); ++i) lookup(txn, table_ids[i], keys[i]);

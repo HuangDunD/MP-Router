@@ -33,6 +33,7 @@ add_executable(seron_page_conflict_test seron_page_conflict_test.cc)
 add_executable(seron_range_rules_test seron_range_rules_test.cc)
 target_link_libraries(seron_range_rules_test Threads::Threads)
 add_executable(seron_column_rules_test seron_column_rules_test.cc)
+add_executable(account_key_permutation_test account_key_permutation_test.cc)
 target_link_libraries(seron_column_rules_test Threads::Threads)
 target_link_libraries(seron_page_conflict_test Threads::Threads)
 

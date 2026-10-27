@@ -26,6 +26,17 @@ int main() {
     // A warehouse predicate cannot override a better-ranked item predicate.
     assert(tpcc_rules.assign({{DistrictWarehouse,1},{StockItem,10000}}) == 1);
 
+    SeronColumnRules balanced(4,10);
+    balanced.add_column(CheckingId,s[CheckingId],{});
+    balanced.prepare();
+    const std::vector<Predicate> tie{{CheckingId,1},{CheckingId,100}};
+    assert(balanced.assign(tie,{0.2,1.6,1.6,1.2}) == 3); // only matched nodes eligible
+    assert(balanced.assign(tie,{1.2,1.6,1.6,0.2}) == 0);
+    assert(balanced.assign({{CheckingId,1}},{0.2,1.6,1.6,1.2}) == 0); // unique match unchanged
+    int counts[4] = {};
+    for (int i=0;i<100;++i) ++counts[balanced.assign(tie,{1,1,1,1})];
+    assert(counts[0] == 50 && counts[3] == 50 && counts[1] == 0 && counts[2] == 0);
+
     auto has = [](const auto& p, size_t c, uint64_t v) {
         return std::any_of(p.begin(), p.end(), [&](const auto& x) { return x.column == c && x.value == v; });
     };

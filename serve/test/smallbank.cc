@@ -1,4 +1,5 @@
 #include "smallbank.h"
+#include "account_key_permutation.h"
 #include <cmath>
 #include <regex>
 #include <sstream>
@@ -972,6 +973,7 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
     pthread_setname_np(pthread_self(), ("txn_gen_t_" + std::to_string(thread_id)).c_str());
 
     std::vector<itemkey_t> accounts_vec(2);
+    const AccountKeyPermutation key_permutation(get_account_count(), SmallBankKeyPermutationSeed);
     ZipfGen* zipfian_gen = nullptr;
     FiniteZipfGen* finite_zipfian_gen = nullptr;
     uint64_t zipf_seed = 2 * thread_id * GetCPUCycle();
@@ -985,6 +987,10 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
         // 仅让线程0负责填充全局hottest_keys，避免并发写冲突和重复填充
         std::vector<uint64_t>* hot_keys_ptr = (thread_id == 0) ? &hottest_keys : nullptr;
         zipfian_gen = new ZipfGen(get_account_count(), current_zipfian_theta, zipf_seed & zipf_seed_mask, NumBucket, hot_keys_ptr);
+    }
+
+    if (SmallBankPermuteKeys && thread_id == 0) {
+        for (auto& key : hottest_keys) key = key_permutation(key);
     }
 
     // 全局一共进行 MetisWarmupRound * PARTITION_INTERVAL的冷启动事务生成，每个工作节点具有worker_threads个线程，每个线程生成try_count个事务
@@ -1054,7 +1060,9 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
                             generate_account_id(acc, zipfian_gen, finite_zipfian_gen);
                         }
                     }
-                    multi_accounts.push_back(acc);
+                    // Select friends in the original ID space, then relabel all
+                    // accessed accounts consistently before lock-order sorting.
+                    multi_accounts.push_back(SmallBankPermuteKeys ? key_permutation(acc) : acc);
                     rw_flags.push_back(long_txn_write_dist(rw_rng));
                 }
                 std::vector<std::pair<itemkey_t, bool>> accesses;
@@ -1081,7 +1089,18 @@ void SmallBank::generate_smallbank_txns_worker(int thread_id, TxnPool* txn_pool)
                     generate_account_id(accounts_vec[0], zipfian_gen, finite_zipfian_gen);
                 }
                 // Create a new transaction object
-                txn_entry = new TxnQueueEntry(tx_id, txn_type, accounts_vec);
+                if (SmallBankPermuteKeys) {
+                    auto mapped = accounts_vec;
+                    mapped[0] = key_permutation(mapped[0]);
+                    if (txn_type == 0 || txn_type == 1) {
+                        mapped[1] = key_permutation(mapped[1]);
+                        // Preserve the benchmark's ascending account lock order.
+                        if (mapped[0] > mapped[1]) std::swap(mapped[0], mapped[1]);
+                    }
+                    txn_entry = new TxnQueueEntry(tx_id, txn_type, mapped);
+                } else {
+                    txn_entry = new TxnQueueEntry(tx_id, txn_type, accounts_vec);
+                }
             }
             txn_batch.push_back(txn_entry);
         }

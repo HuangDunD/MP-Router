@@ -3,6 +3,7 @@
 #include "seron_range_rules.h"
 #include "seron_range_workload.h"
 #include <map>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -13,7 +14,8 @@
 // table/row partitioning, correlation alignment or online rule adaptation.
 // Rank estimation uses observed same-page pairs, not the paper's TV/random walk.
 // If a selected column has multiple equality values, use the interval matching
-// most values (lowest node on ties); never vote across different columns.
+// most values, then the highest existing load-balance weight, then round-robin;
+// never vote across different columns or override a unique interval match.
 class SeronColumnRules {
 public:
     using Predicate = seron_range::Predicate;
@@ -49,7 +51,10 @@ public:
         frozen_.store(true, std::memory_order_release);
     }
     bool frozen() const { return frozen_.load(std::memory_order_acquire); }
-    int assign(const std::vector<Predicate>& predicates) const {
+    int assign(const std::vector<Predicate>& predicates,
+               const std::vector<double>& load_weights = {}) const {
+        if (!load_weights.empty() && load_weights.size() != static_cast<size_t>(nodes_))
+            throw std::invalid_argument("Seron load-weight dimensions do not match nodes");
         const auto rules = std::atomic_load(&published_);
         if (!rules) throw std::logic_error("Seron column rules not initialized");
         // Lowest estimated conflict rate first; stable column-ID tie-break.
@@ -59,13 +64,25 @@ public:
             for (const auto& p : predicates) if (p.column == rule.column) {
                 ++matches[destination(rule.boundaries, p.value)]; ++count;
             }
-            if (count) return std::max_element(matches.begin(), matches.end()) - matches.begin();
+            if (count) {
+                const size_t most = *std::max_element(matches.begin(), matches.end());
+                std::vector<int> candidates;
+                double best = -std::numeric_limits<double>::infinity();
+                for (int n = 0; n < nodes_; ++n) if (matches[n] == most) {
+                    const double weight = load_weights.empty() ? 0.0 : load_weights[n];
+                    if (weight > best) { best = weight; candidates.clear(); }
+                    if (weight == best) candidates.push_back(n);
+                }
+                if (candidates.size() == 1) return candidates.front();
+                return candidates[tie_cursor_.fetch_add(1, std::memory_order_relaxed) % candidates.size()];
+            }
         }
         return fallback_.fetch_add(1, std::memory_order_relaxed) % nodes_;
     }
     void print(std::ostream& out) const {
         out << "=== Seron independent column rules (mode 33) ===\n"
             << "  Ranking: sampled same-page cross-interval pair fraction\n"
+            << "  Interval ties: existing workload+queue balance weight, then round-robin\n"
             << "  Cross-table alignment: disabled; no business-semantic pivot\n";
         for (const auto& r : *std::atomic_load(&published_)) {
             const auto& c = columns_[r.column];
@@ -121,4 +138,5 @@ private:
     std::shared_ptr<const std::vector<RankedRule>> published_;
     std::atomic<bool> frozen_{false};
     mutable std::atomic<uint64_t> fallback_{0};
+    mutable std::atomic<uint64_t> tie_cursor_{0};
 };
