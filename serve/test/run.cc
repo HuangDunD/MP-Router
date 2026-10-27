@@ -1710,7 +1710,8 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                     switch(type) {
                         case TPCCTxType::kNewOrder: {
                             const bool standard_new_order = tpcc->is_standard_mode();
-                            const size_t count_index = standard_new_order ? 4U : 3U;
+                            const bool client_order_id = standard_new_order && !MP_ROUTER_TPCC_LEGACY;
+                            const size_t count_index = client_order_id ? 4U : 3U;
                             const size_t line_base = count_index + 1U;
                             if (tpcc_params.size() <= count_index) {
                                 assert(false);
@@ -1718,7 +1719,7 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                             int w_id = tpcc_params[0];
                             int d_id = tpcc_params[1];
                             int c_id = tpcc_params[2];
-                            int o_id = standard_new_order ? tpcc_params[3] : 0;
+                            int o_id = client_order_id ? tpcc_params[3] : 0;
                             int o_ol_cnt = tpcc_params[count_index];
 
                             std::string i_ids_str = "{";
@@ -1748,7 +1749,7 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                                 std::to_string(w_id) + ", " +
                                 std::to_string(d_id) + ", " +
                                 std::to_string(c_id) + ", ";
-                            if (standard_new_order) {
+                            if (client_order_id) {
                                 sql += std::to_string(o_id) + ", ";
                             }
                             sql +=
@@ -3502,6 +3503,25 @@ int main(int argc, char *argv[]) {
     } else if (Workload_Type == 2 || Workload_Type == 3) {
         tpcc = new TPCC(warehouse_num, access_pattern, Workload_Type == 3); // Use the specified number of warehouses
         if(access_pattern == 2) tpcc->set_hotspot_params(hotspot_fraction, hotspot_access_prob);
+        std::cout << "TPC-C workload profile: "
+                  << (MP_ROUTER_TPCC_LEGACY ? "legacy-vldb-20260716" : "current")
+                  << std::endl;
+        if (Workload_Type == 3) {
+            std::cout << "TPC-C mix (NewOrder/Payment/OrderStatus/Delivery/StockLevel): "
+                      << (MP_ROUTER_TPCC_LEGACY ? "45/43/4/4/4" : "50/50/0/0/0")
+                      << "; order IDs: "
+                      << (MP_ROUTER_TPCC_LEGACY ? "database" : "router") << std::endl;
+        }
+        if (access_pattern == 2) {
+            const int node_warehouses = std::max(1, warehouse_num / std::max(1, ComputeNodeCount));
+            const int hotspot_end = MP_ROUTER_TPCC_LEGACY ? node_warehouses :
+                std::max(1, static_cast<int>(node_warehouses * hotspot_fraction));
+            std::cout << "TPC-C hotspot warehouse IDs: 1--" << hotspot_end;
+            if (MP_ROUTER_TPCC_LEGACY) {
+                std::cout << " (legacy profile ignores --hotspot-fraction)";
+            }
+            std::cout << std::endl;
+        }
         std::cout << (Workload_Type == 3 ? "Standard TPC-C" : "TPC-C")
                   << " benchmark initialized with " << warehouse_num
                   << " warehouses, customers_per_district=" << tpcc->customers_per_dist()

@@ -1006,13 +1006,28 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
 
         txn.exec(R"SQL(
             CREATE OR REPLACE FUNCTION tpcc_standard_new_order(
+)SQL"
+#if MP_ROUTER_TPCC_LEGACY
+R"SQL(          p_w_id INT, p_d_id INT, p_c_id INT, p_o_ol_cnt INT,
+)SQL"
+#else
+R"SQL(
                 p_w_id INT, p_d_id INT, p_c_id INT, p_o_id INT, p_o_ol_cnt INT,
+)SQL"
+#endif
+R"SQL(
                 p_i_ids INT[], p_i_w_ids INT[], p_quantities INT[],
                 p_txn_time_ms BIGINT
             )
             RETURNS TABLE(rel TEXT, ret_w_id INT, ret_d_id INT, ret_i_id INT, ctid TID)
             LANGUAGE plpgsql AS $$
             DECLARE
+)SQL"
+#if MP_ROUTER_TPCC_LEGACY
+R"SQL(          o_id INT;
+)SQL"
+#endif
+R"SQL(
                 i INT;
                 d_ctid TID;
                 s_ctid TID;
@@ -1024,7 +1039,16 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                 UPDATE district AS d
                 SET d_next_o_id = d.d_next_o_id + 1
                 WHERE d.d_w_id = p_w_id AND d.d_id = p_d_id
+)SQL"
+#if MP_ROUTER_TPCC_LEGACY
+R"SQL(          RETURNING (d.d_next_o_id - 1), d.ctid INTO o_id, d_ctid;
+)SQL"
+#else
+R"SQL(
                 RETURNING d.ctid INTO d_ctid;
+)SQL"
+#endif
+R"SQL(
 
                 RETURN QUERY SELECT 'district'::text, p_w_id, p_d_id, NULL::INT, d_ctid;
 
@@ -1036,13 +1060,31 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
 
                 INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_carrier_id, o_ol_cnt, o_all_local)
                 VALUES (
+)SQL"
+#if MP_ROUTER_TPCC_LEGACY
+R"SQL(              o_id, p_d_id, p_w_id, p_c_id,
+)SQL"
+#else
+R"SQL(
                     p_o_id, p_d_id, p_w_id, p_c_id,
+)SQL"
+#endif
+R"SQL(
                     TIMESTAMP 'epoch' + p_txn_time_ms * INTERVAL '1 millisecond',
                     NULL, p_o_ol_cnt, all_local
                 );
 
                 INSERT INTO new_order (no_o_id, no_d_id, no_w_id)
+)SQL"
+#if MP_ROUTER_TPCC_LEGACY
+R"SQL(          VALUES (o_id, p_d_id, p_w_id);
+)SQL"
+#else
+R"SQL(
                 VALUES (p_o_id, p_d_id, p_w_id);
+)SQL"
+#endif
+R"SQL(
 
                 FOR i IN 1..p_o_ol_cnt LOOP
                     SELECT it.i_price INTO item_price
@@ -1069,7 +1111,16 @@ void TPCC::create_standard_tpcc_stored_procedures(pqxx::connection *conn) {
                         ol_delivery_d, ol_quantity, ol_amount, ol_dist_info
                     )
                     VALUES (
+)SQL"
+#if MP_ROUTER_TPCC_LEGACY
+R"SQL(                  o_id, p_d_id, p_w_id, i, p_i_ids[i], p_i_w_ids[i],
+)SQL"
+#else
+R"SQL(
                         p_o_id, p_d_id, p_w_id, i, p_i_ids[i], p_i_w_ids[i],
+)SQL"
+#endif
+R"SQL(
                         NULL, p_quantities[i], line_amount, 'standard-dist-info'
                     );
                 END LOOP;
@@ -1278,7 +1329,11 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
             else if (access_pattern == 2) {
                // Hotspot
                const int node_warehouses = std::max(1, num_warehouses_ / std::max(1, ComputeNodeCount));
+#if MP_ROUTER_TPCC_LEGACY
+               const int hotspot_end = node_warehouses;
+#else
                const int hotspot_end = std::max(1, static_cast<int>(node_warehouses * hotspot_fraction));
+#endif
                
                if (random_int(1, 100) <= hotspot_ratio * 100) {
                    w_id = random_int(1, hotspot_end);
@@ -1299,9 +1354,11 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
                     tpcc_params.push_back(w_id);
                     tpcc_params.push_back(d_id);
                     tpcc_params.push_back(c_id);
+#if !MP_ROUTER_TPCC_LEGACY
                     if (standard_mode_) {
                         tpcc_params.push_back(allocate_order_id(w_id, d_id));
                     }
+#endif
 
                     int o_ol_cnt = random_int(5, 15);
                     tpcc_params.push_back(o_ol_cnt);
@@ -1414,14 +1471,17 @@ int TPCC::generate_txn_type() {
 
 int TPCC::generate_standard_txn_type() {
     int x = random_int(1, 100);
+#if MP_ROUTER_TPCC_LEGACY
+    if (x <= 45) return (int)TPCCTxType::kNewOrder;
+    if (x <= 88) return (int)TPCCTxType::kPayment;
+    if (x <= 92) return (int)TPCCTxType::kOrderStatus;
+    if (x <= 96) return (int)TPCCTxType::kDelivery;
+    return (int)TPCCTxType::kStockLevel;
+#else
     if (x <= 50) return (int)TPCCTxType::kNewOrder;
     else if (x <= 100) return (int)TPCCTxType::kPayment;
     else {};
-    // if (x <= 45) return (int)TPCCTxType::kNewOrder;
-    // if (x <= 88) return (int)TPCCTxType::kPayment;
-    // if (x <= 92) return (int)TPCCTxType::kOrderStatus;
-    // if (x <= 96) return (int)TPCCTxType::kDelivery;
-    // return (int)TPCCTxType::kStockLevel;
+#endif
 }
 
 // Random helpers implementation
