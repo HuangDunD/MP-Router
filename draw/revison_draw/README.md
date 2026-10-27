@@ -40,6 +40,7 @@ Data sources:
 ```text
 SmallBank: vldb_res/20260709000616(main)/summary.csv
 TPC-C:     vldb_res/20260716015113(tpcc-200)/*/m*/result.txt
+Seron:     vldb_res/20261027202414(seron)/*/m32/result.txt (both workloads)
 ```
 
 Output:
@@ -55,7 +56,8 @@ python3 summarize_mp_router_results.py "../../../vldb_res/20260709000616(main)"
 
 MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 extracted_data/extract_fig4_overall.py \
   --smallbank-dir "../../../vldb_res/20260709000616(main)" \
-  --tpcc-dir "../../../vldb_res/20260716015113(tpcc-200)"
+  --tpcc-dir "../../../vldb_res/20260716015113(tpcc-200)" \
+  --seron-dir "../../../vldb_res/20261027202414(seron)"
 
 MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 Fig4_workload_throughput_combined.py
 ```
@@ -63,6 +65,8 @@ MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 Fig4_workload_throughput_c
 Notes:
 
 - `Fig4_workload_throughput_combined.py` is the active Fig. 4 plotting script.
+- Seron is read from its separate result directory; the six existing methods
+  retain their original sources. No throughput values are embedded in the plot script.
 - The first command is needed only if the SmallBank `summary.csv` needs to be
   regenerated from raw result folders.
 - `smallbank_zipfian_bar.py` and `tpcc_bar.py` are older standalone plotting

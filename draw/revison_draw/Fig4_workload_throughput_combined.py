@@ -15,7 +15,7 @@ from matplotlib.ticker import MultipleLocator
 from extracted_data import fig4_overall as revision_data
 
 
-SYSTEMS = ["RR", "MWR", "PHR", "PAR", "CPR", "MP-Router"]
+SYSTEMS = ["RR", "MWR", "PHR", "PAR", "CPR", "Seron", "MP-Router"]
 
 
 rcParams["hatch.linewidth"] = 0.3
@@ -124,8 +124,13 @@ def main():
 
     colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#e47474"]
     hatches = ["////", "\\\\\\\\", "xxxx", "oo", "OOOO", "...."]
+    # Preserve existing method styles; add Seron immediately before MP-Router.
+    colors.insert(-1, "#69b9b6")
+    hatches.insert(-1, "--")
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.5, 2.5), sharey=False)
+    # Keep the canvas and axes identical to Fig. 5; automatic cropping would
+    # otherwise change the scale when LaTeX fits both PDFs to the same width.
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.3, 2.65), sharey=False)
 
     plot_grouped_bars(
         ax1,
@@ -138,8 +143,8 @@ def main():
         ylabel="Throughput (KTPS)",
     )
     ax1.text(
-        0.46,
-        -0.3,
+        0.47,
+        -0.35,
         "(a) SmallBank",
         transform=ax1.transAxes,
         ha="center",
@@ -161,8 +166,8 @@ def main():
     )
     ax2.set_ylim(0, 200)
     ax2.text(
-        0.5,
-        -0.3,
+        0.47 ,
+        -0.35,
         "(b) TPC-C",
         transform=ax2.transAxes,
         ha="center",
@@ -176,18 +181,18 @@ def main():
         handles,
         labels,
         loc="lower center",
-        bbox_to_anchor=(0.5, 0.86),
+        bbox_to_anchor=(0.52, 0.85),
         prop={"weight": "bold", "size": 12},
         handlelength=1.5,
         handleheight=1.2,
         frameon=False,
-        ncol=6,
-        columnspacing=1.5,
+        ncol=7,
+        columnspacing=0.8,
     )
 
-    plt.subplots_adjust(bottom=0.15, top=0.85, wspace=0.25)
+    plt.subplots_adjust(left=0.09, right=0.99, bottom=0.28, top=0.82, wspace=0.32)
     args.outfile.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(args.outfile, dpi=600, bbox_inches="tight", pad_inches=0.05)
+    plt.savefig(args.outfile, dpi=600)
     plt.close(fig)
 
     print(f"Saved figure: {args.outfile}")

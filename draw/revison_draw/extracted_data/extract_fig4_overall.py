@@ -21,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 DEFAULT_SMALLBANK_DIR = PROJECT_ROOT / "vldb_res" / "20260709000616(main)"
 DEFAULT_TPCC_DIR = PROJECT_ROOT / "vldb_res" / "20260716015113(tpcc-200)"
+DEFAULT_SERON_DIR = PROJECT_ROOT / "vldb_res" / "20261027202414(seron)"
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "fig4_overall.py"
 
 SYSTEMS = [
@@ -29,6 +30,7 @@ SYSTEMS = [
     ("PHR", "2"),
     ("PAR", "23"),
     ("CPR", "28"),
+    ("Seron", "32"),
     ("MP-Router", "11"),
 ]
 
@@ -94,12 +96,19 @@ def throughput_from_row(row: dict[str, str]) -> float:
     return round(float(row["throughput_after_warmup_tps"]), 2)
 
 
-def extract_smallbank(smallbank_dir: Path) -> list[tuple[str, list[float]]]:
+def extract_smallbank(smallbank_dir: Path, seron_dir: Path) -> list[tuple[str, list[float]]]:
     rows = read_summary(smallbank_dir / "summary.csv")
     data = []
     for theta, scan_axis in SMALLBANK_THETAS:
         values = []
         for _, mode in SYSTEMS:
+            if mode == "32":
+                folder = (
+                    f"smallbank_p1_ZipfTheta{theta}_ZipfGenfinite_acc10000000"
+                    "_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"
+                )
+                values.append(read_after_warmup_tps(seron_dir / folder / "m32" / "result.txt"))
+                continue
             row = find_one(
                 rows,
                 f"SmallBank theta={theta} mode={mode}",
@@ -128,12 +137,13 @@ def read_after_warmup_tps(result_file: Path) -> float:
     return round(float(match.group(1)), 2)
 
 
-def extract_tpcc(tpcc_dir: Path) -> list[tuple[str, list[float]]]:
+def extract_tpcc(tpcc_dir: Path, seron_dir: Path) -> list[tuple[str, list[float]]]:
     data = []
     for label, folder in TPCC_GROUPS:
         values = []
         for _, mode in SYSTEMS:
-            result_file = tpcc_dir / folder / f"m{mode}" / "result.txt"
+            source_dir = seron_dir if mode == "32" else tpcc_dir
+            result_file = source_dir / folder / f"m{mode}" / "result.txt"
             if not result_file.exists():
                 raise FileNotFoundError(result_file)
             values.append(read_after_warmup_tps(result_file))
@@ -145,6 +155,7 @@ def write_module(
     output: Path,
     smallbank_dir: Path,
     tpcc_dir: Path,
+    seron_dir: Path,
     smallbank_data: list[tuple[str, list[float]]],
     tpcc_data: list[tuple[str, list[float]]],
 ) -> None:
@@ -155,6 +166,7 @@ def write_module(
         "#",
         f"# SmallBank source: {smallbank_dir}",
         f"# TPC-C source: {tpcc_dir}",
+        f"# Seron source (both workloads, mode 32): {seron_dir}",
         "",
         f"MAIN_SYSTEMS = {pformat(system_names, width=120)}",
         "",
@@ -176,16 +188,18 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--smallbank-dir", type=Path, default=DEFAULT_SMALLBANK_DIR)
     parser.add_argument("--tpcc-dir", type=Path, default=DEFAULT_TPCC_DIR)
+    parser.add_argument("--seron-dir", type=Path, default=DEFAULT_SERON_DIR)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
-    smallbank_data = extract_smallbank(args.smallbank_dir)
-    tpcc_data = extract_tpcc(args.tpcc_dir)
-    write_module(args.output, args.smallbank_dir, args.tpcc_dir, smallbank_data, tpcc_data)
+    smallbank_data = extract_smallbank(args.smallbank_dir, args.seron_dir)
+    tpcc_data = extract_tpcc(args.tpcc_dir, args.seron_dir)
+    write_module(args.output, args.smallbank_dir, args.tpcc_dir, args.seron_dir, smallbank_data, tpcc_data)
 
     print(f"Wrote {args.output}")
     print(f"SmallBank source: {args.smallbank_dir}")
     print(f"TPC-C source: {args.tpcc_dir}")
+    print(f"Seron source: {args.seron_dir}")
 
 
 if __name__ == "__main__":

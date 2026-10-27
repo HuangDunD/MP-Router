@@ -83,7 +83,7 @@ def plot_grouped_bars(
     ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=12)
     ax.set_xlim(-0.55, len(labels) - 1 + 0.55)
     ax.set_xlabel(xlabel, fontsize=12)
-    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_ylabel(ylabel, fontsize=11)
     ax.grid(axis="y", linestyle="--", alpha=0.5, zorder=0)
 
 
@@ -109,7 +109,8 @@ def main():
     colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#e47474"]
     hatches = ["////", "\\\\\\\\", "xxxx", "oo", "OOOO", "...."]
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.5, 2.5), sharey=False)
+    # Match Fig. 4 exactly, including the uncropped PDF canvas.
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.3, 2.65), sharey=False)
     ylabel = "Ownership Transfers / Txn"
 
     plot_grouped_bars(
@@ -123,8 +124,8 @@ def main():
         major_locator=2,
     )
     ax1.text(
-        0.46,
-        -0.3,
+        0.47,
+        -0.35,
         "(a) SmallBank",
         transform=ax1.transAxes,
         ha="center",
@@ -145,8 +146,8 @@ def main():
         ylim_top=40,
     )
     ax2.text(
-        0.5,
-        -0.3,
+        0.47,
+        -0.35,
         "(b) TPC-C",
         transform=ax2.transAxes,
         ha="center",
@@ -161,7 +162,7 @@ def main():
         handles,
         labels,
         loc="lower center",
-        bbox_to_anchor=(0.5, 0.86),
+        bbox_to_anchor=(0.5, 0.85),
         prop={"weight": "bold", "size": 12},
         handlelength=1.5,
         handleheight=1.2,
@@ -170,9 +171,9 @@ def main():
         columnspacing=1.5,
     )
 
-    plt.subplots_adjust(bottom=0.15, top=0.85, wspace=0.25)
+    plt.subplots_adjust(left=0.09, right=0.99, bottom=0.28, top=0.82, wspace=0.32)
     args.outfile.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(args.outfile, dpi=600, bbox_inches="tight", pad_inches=0.05)
+    plt.savefig(args.outfile, dpi=600)
     plt.close(fig)
 
     print(f"Saved figure: {args.outfile}")
