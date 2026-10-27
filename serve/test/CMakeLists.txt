@@ -30,6 +30,10 @@ add_executable(indexed_priority_queue_test indexed_priority_queue_test.cc)
 target_link_libraries(indexed_priority_queue_test)
 
 add_executable(seron_page_conflict_test seron_page_conflict_test.cc)
+add_executable(seron_range_rules_test seron_range_rules_test.cc)
+target_link_libraries(seron_range_rules_test Threads::Threads)
+add_executable(seron_column_rules_test seron_column_rules_test.cc)
+target_link_libraries(seron_column_rules_test Threads::Threads)
 target_link_libraries(seron_page_conflict_test Threads::Threads)
 
 add_executable(seron_connector_queue_test seron_connector_queue_test.cc ${PROJECT_SOURCE_DIR}/config.cc)

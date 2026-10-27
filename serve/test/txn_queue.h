@@ -593,7 +593,7 @@ public:
 
     std::vector<TxnQueueEntry*> pop_txn(int* ret_call_id = nullptr, int* ret_type = nullptr, double* ret_wait_ms = nullptr) {
         if (ret_wait_ms != nullptr) *ret_wait_ms = 0.0;
-        if (SYSTEM_MODE == 32) return pop_seron_txns(ret_call_id, ret_type, ret_wait_ms);
+        if (uses_seron_page_delay()) return pop_seron_txns(ret_call_id, ret_type, ret_wait_ms);
         if (SYSTEM_MODE == 28) return pop_txn_chimera(ret_call_id, ret_type, ret_wait_ms);
         
         int call_id = rand();
@@ -883,7 +883,7 @@ public:
 
     using SeronEntry = SeronPendingQueue<TxnQueueEntry*>::Entry;
 
-    // Installed before starting threads; used only by mode 32.
+    // Installed before starting threads; used only by modes 32/33.
     void set_seron_conflicts(std::shared_ptr<SeronPageConflictTable> conflicts) {
         seron_conflicts_ = std::move(conflicts);
     }

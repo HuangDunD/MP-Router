@@ -272,7 +272,7 @@ void generate_perf_kwr_report(size_t node_id, int start_snapshot_id, int end_sna
 static bool warmup_end_supported_mode() {
     return SYSTEM_MODE == 0 || SYSTEM_MODE == 2 || SYSTEM_MODE == 4 || SYSTEM_MODE == 11 || SYSTEM_MODE == 13 ||
            SYSTEM_MODE == 26 || SYSTEM_MODE == 27 || SYSTEM_MODE == 28 || SYSTEM_MODE == 29 ||
-           SYSTEM_MODE == 30 || SYSTEM_MODE == 31;
+           SYSTEM_MODE == 30 || SYSTEM_MODE == 31 || SYSTEM_MODE == 33;
 }
 
 static void reset_pg_runtime_stats_before_benchmark(Logger* logger_, size_t node_count) {
@@ -1126,6 +1126,8 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
+            if (SYSTEM_MODE == 33 && database_committed)
+                smart_router->record_seron_range_sample(txn_entry, exec_time);
             if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
@@ -1887,6 +1889,8 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
+            if (SYSTEM_MODE == 33 && database_committed)
+                smart_router->record_seron_range_sample(txn_entry, exec_time);
             if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
@@ -2023,7 +2027,8 @@ void print_usage(const char* program_name) {
     std::cout << "  --workload <name>           Workload (smallbank, ycsb, tpcc, tpcc-standard) [default: smallbank]" << std::endl;
     std::cout << "  --system-mode <mode>        System mode (0=random node, 1=account-based, 2=page-based) [default: 0]" << std::endl;
     std::cout << "                              32=Seron page-conflict delay with PAR assignment" << std::endl;
-    std::cout << "  --seron-max-delay-us <us>   Mode 32 conflict-delay limit; 0 disables waiting [default: 1000]" << std::endl;
+    std::cout << "                              33=independent column-range rules + page-conflict delay" << std::endl;
+    std::cout << "  --seron-max-delay-us <us>   Modes 32/33 conflict-delay limit; 0 disables waiting [default: " << SeronMaxDelayUs << "]" << std::endl;
     std::cout << "  --access-pattern <pattern>  Data access pattern (0=uniform, 1=zipfian, 2=hotspot) [default: 0]" << std::endl;
     std::cout << "  --tpcc-partition-warehouses Partition TPC-C warehouse table by w_id ranges [default: off]" << std::endl;
     std::cout << "  --zipfian-theta <theta>     Zipfian parameter: legacy theta [0,1), finite exponent >= 0 [default: 0.99]" << std::endl;
@@ -3432,6 +3437,20 @@ int main(int argc, char *argv[]) {
         std::cout << "Seron maximum conflict delay: " << SeronMaxDelayUs << " us" << std::endl;
         std::cout << "Seron connector claim batch limit: " << BatchExecutorPOPTxnSize << std::endl;
         break;
+    case 33:
+        if (Workload_Type != 0 && Workload_Type != 2 && Workload_Type != 3) {
+            std::cerr << "Mode 33 supports SmallBank and TPC-C only." << std::endl;
+            return -1;
+        }
+        if (DB_TYPE != 0 || !use_sp || router_only || without_kpmap || SeronRangeHistogramBins <= 0) {
+            std::cerr << "Mode 33 requires PostgreSQL/KES stored procedures, DB execution, a key-page map, and positive histogram bins." << std::endl;
+            return -1;
+        }
+        std::cout << "Seron range-rule assignment + page-conflict delay" << std::endl;
+        std::cout << "Seron maximum conflict delay: " << SeronMaxDelayUs << " us" << std::endl;
+        std::cout << "Seron connector claim batch limit: " << BatchExecutorPOPTxnSize << std::endl;
+        std::cout << "Seron range histogram bins: " << SeronRangeHistogramBins << std::endl;
+        break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
         return -1;
@@ -3987,13 +4006,14 @@ int main(int argc, char *argv[]) {
     if (without_kpmap) {
         smart_router->disable_key_page_map();
     }
+    if (SYSTEM_MODE == 33) smart_router->initialize_seron_range_rules();
     std::cout << "Smart Router initialized." << std::endl;
 
     // TIT: 当后续事务的入度变为0时，立即调度到目标节点
     tit->set_ready_callback([smart_router](std::vector<TxnQueueEntry*> entry, int finish_call_id){
         smart_router->schedule_ready_txn(std::move(entry), finish_call_id);
     });
-    if (SYSTEM_MODE == 32) {
+    if (uses_seron_page_delay()) {
         auto conflicts = smart_router->seron_conflicts();
         tit->set_seron_completion_callback([conflicts](tx_id_t id) {
             conflicts->complete(id);
@@ -4243,6 +4263,7 @@ int main(int argc, char *argv[]) {
         }
         maybe_finish_warmup(logger_);
     }
+    if (SYSTEM_MODE == 33) smart_router->finalize_seron_range_rules();
     std::cout << "\033[31m Warmup rounds completed. Create the smart router snapshot. \033[0m" << std::endl;
     auto warmup_end_time = std::chrono::high_resolution_clock::now();
     long long warmup_exe_count = exe_count;
@@ -4260,7 +4281,7 @@ int main(int argc, char *argv[]) {
 
     auto measurement_end_time = std::chrono::high_resolution_clock::time_point{};
     SeronPageConflictTable::Stats seron_begin, seron_end;
-    if (SYSTEM_MODE == 32) seron_begin = smart_router->seron_conflicts()->stats();
+    if (uses_seron_page_delay()) seron_begin = smart_router->seron_conflicts()->stats();
     uint64_t measurement_attempt_count = 0;
     uint64_t measurement_committed_count = 0;
     uint64_t measurement_aborted_count = 0;
@@ -4270,7 +4291,7 @@ int main(int argc, char *argv[]) {
         std::this_thread::sleep_for(std::chrono::seconds(run_seconds));
         measurement_end_time = std::chrono::high_resolution_clock::now();
         stop_benchmark.store(true, std::memory_order_relaxed);
-        if (SYSTEM_MODE == 32) seron_end = smart_router->seron_conflicts()->stats();
+        if (uses_seron_page_delay()) seron_end = smart_router->seron_conflicts()->stats();
         measurement_attempt_count = static_cast<uint64_t>(exe_count.load(std::memory_order_relaxed));
         measurement_committed_count = committed_xact_count.load(std::memory_order_relaxed);
         measurement_aborted_count = aborted_xact_count.load(std::memory_order_relaxed);
@@ -4291,7 +4312,7 @@ int main(int argc, char *argv[]) {
         while(!stop_benchmark.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
-        if (SYSTEM_MODE == 32) seron_end = smart_router->seron_conflicts()->stats();
+        if (uses_seron_page_delay()) seron_end = smart_router->seron_conflicts()->stats();
         txn_pool->stop_pool();
         force_stop_txn_queues();
         std::cout << "Dynamic workload duration ended. Stopping transaction generation and worker queues." << std::endl;
@@ -4304,7 +4325,7 @@ int main(int argc, char *argv[]) {
     for(auto& thread : db_conn_threads) {
         thread.join();
     }
-    if (SYSTEM_MODE == 32) {
+    if (uses_seron_page_delay()) {
         smart_router->join_seron_router();
         if (!time_based_run && !dynamic_workload) {
             seron_end = smart_router->seron_conflicts()->stats();
@@ -4343,7 +4364,7 @@ int main(int argc, char *argv[]) {
     std::cout << "\n=== Performance Report ===" << std::endl;
     std::cout << "System mode: " << SYSTEM_MODE << " !!!" << std::endl;
     std::cout << "Router-only benchmark: " << (router_only ? "yes" : "no") << std::endl;
-    if (SYSTEM_MODE == 32) {
+    if (uses_seron_page_delay()) {
         std::cout << "=== Seron page-conflict delay (measurement interval) ===" << std::endl;
         std::cout << "  Active interval: connector batch claim to completion" << std::endl;
         std::cout << "  Maximum delay (us): " << SeronMaxDelayUs << std::endl;

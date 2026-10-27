@@ -123,7 +123,7 @@ public:
 
     void mark_done(TxnQueueEntry* entry, int finish_call_id = -1) {
         if (!entry) return;
-        if (SYSTEM_MODE == 32 && on_seron_complete_) {
+        if (uses_seron_page_delay() && on_seron_complete_) {
             on_seron_complete_(entry->tx_id);
         }
         mark_done_calls_.fetch_add(1, std::memory_order_relaxed);

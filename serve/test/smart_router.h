@@ -35,6 +35,7 @@
 #include "ycsb.h"
 #include "tpcc.h"
 #include "seron_page_conflict.h"
+#include "seron_column_rules.h"
 
 // SmartRouter: 一个针对 hot-key hash cache 设有严格内存预算的事务路由器。
 // 它维护：
@@ -333,7 +334,11 @@ public:
         }
         metis_->set_thread_pool(&threadpool);
         metis_->init_node_nums(cfg.partition_nums);
-        if (SYSTEM_MODE == 32) {
+        if (SYSTEM_MODE == 33) {
+            seron_range_rules_ = std::make_unique<SeronColumnRules>(
+                ComputeNodeCount, SeronRangeHistogramBins);
+        }
+        if (uses_seron_page_delay()) {
             seron_conflicts_ = std::make_shared<SeronPageConflictTable>(
                 std::chrono::microseconds(SeronMaxDelayUs));
             for (auto* queue : txn_queues_) queue->set_seron_conflicts(seron_conflicts_);
@@ -420,7 +425,7 @@ public:
             });
             router_thread.detach();
         }
-        else if (SYSTEM_MODE == 32) {
+        else if (uses_seron_page_delay()) {
             router_worker_threads_ = std::min(worker_threads_, 32);
             seron_router_thread_ = std::thread([this]() { this->run_router_worker_new(); });
         }
@@ -1157,7 +1162,7 @@ public:
     
     // ! 这个函数是run_router_worker 的对应, 相比之下, 我们把他和run_router_batch_worker_pipeline 的模式对应, 都是一次拿一个batch的事务, 然后在这里交给多线程来处理
     void run_router_worker_new() {
-        assert((SYSTEM_MODE >=0 && SYSTEM_MODE <=8) || SYSTEM_MODE == 13 || (SYSTEM_MODE >=23 && SYSTEM_MODE <=25) || SYSTEM_MODE == 31 || SYSTEM_MODE == 32);
+        assert((SYSTEM_MODE >=0 && SYSTEM_MODE <=8) || SYSTEM_MODE == 13 || (SYSTEM_MODE >=23 && SYSTEM_MODE <=25) || SYSTEM_MODE == 31 || uses_seron_page_delay());
 
         // wait for router start work
         std::unique_lock<std::mutex> start_router_lock(start_router_mutex);
@@ -1168,7 +1173,7 @@ public:
 
         batch_id = -1; // 对于流水线模式，初始batch_id为-1，因为同步点get_route_primary_batch_schedule_v2中会先+1
         while (true) {
-            if (SYSTEM_MODE == 32 && stop_benchmark.load(std::memory_order_relaxed)) break;
+            if (uses_seron_page_delay() && stop_benchmark.load(std::memory_order_relaxed)) break;
             // 计时
             struct timespec wait_start_time, wait_end_time;
             clock_gettime(CLOCK_MONOTONIC, &wait_start_time);
@@ -1176,7 +1181,7 @@ public:
             {
                 std::unique_lock<std::mutex> lock(batch_mutex); 
                 auto batch_ready = [this]() {
-                    if ((time_based_run || SYSTEM_MODE == 32) && stop_benchmark.load(std::memory_order_relaxed)) {
+                    if ((time_based_run || uses_seron_page_delay()) && stop_benchmark.load(std::memory_order_relaxed)) {
                         return true;
                     }
                     for(int i=0; i<ComputeNodeCount; i++) {
@@ -1187,7 +1192,7 @@ public:
                     }
                     return false;
                 };
-                if (SYSTEM_MODE == 32) {
+                if (uses_seron_page_delay()) {
                     // Queue stop notifications do not hold batch_mutex. Periodic
                     // checks ensure the new joinable worker cannot miss shutdown.
                     while (!batch_ready()) batch_cv.wait_for(lock, std::chrono::milliseconds(100));
@@ -1196,7 +1201,7 @@ public:
                 }
             }
 
-            if (SYSTEM_MODE == 32 && stop_benchmark.load(std::memory_order_relaxed)) break;
+            if (uses_seron_page_delay() && stop_benchmark.load(std::memory_order_relaxed)) break;
 
             {
                 std::unique_lock<std::mutex> lock(batch_mutex); 
@@ -1261,7 +1266,7 @@ public:
                 futures.emplace_back(threadpool.enqueue([this, &txn_batch, t, batch_size]() {
                     std::vector<std::vector<TxnQueueEntry*>> local_node_txns(ComputeNodeCount);
                     std::vector<std::vector<TxnQueue::SeronEntry>> local_seron_txns(
-                        SYSTEM_MODE == 32 ? ComputeNodeCount : 0);
+                        uses_seron_page_delay() ? ComputeNodeCount : 0);
                     auto flush_seron = [&](int node) {
                         auto& entries = local_seron_txns[node];
                         const size_t count = entries.size();
@@ -1392,7 +1397,7 @@ public:
                         //         routed_node_id = candidates[rand() % candidates.size()];
                         //     }
                         // }
-                        else if(SYSTEM_MODE == 2 ||  SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25) || SYSTEM_MODE == 31 || SYSTEM_MODE == 32) {
+                        else if(SYSTEM_MODE == 2 ||  SYSTEM_MODE == 3 || SYSTEM_MODE == 5 || SYSTEM_MODE == 6 || SYSTEM_MODE == 7 || SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25) || SYSTEM_MODE == 31 || uses_seron_page_delay()) {
                             SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, rw);
                             if(result.success) {
                                 routed_node_id = result.smart_router_id;
@@ -1415,12 +1420,12 @@ public:
                             (decision_end_time.tv_sec - decision_begin_time.tv_sec) * 1000.0 + 
                             (decision_end_time.tv_nsec - decision_begin_time.tv_nsec) / 1000000.0;
 
-                        if (SYSTEM_MODE == 32) {
+                        if (uses_seron_page_delay()) {
                             TxnQueue::SeronEntry pending;
                             pending.txn = txn_entry;
                             pending.request.txn_id = txn_entry->tx_id;
                             pending.request.node = routed_node_id;
-                            // Reuse the very same page observations used for PAR assignment.
+                            // Mode 32 uses these pages for PAR; mode 33 only uses them for delay.
                             for (size_t k = 0; k < keys.size(); ++k) {
                                 if (k >= table_ids.size() || k >= txn_entry->accessed_page_ids.size() ||
                                     txn_entry->accessed_page_ids[k] == kInvalidPageId) {
@@ -1463,7 +1468,7 @@ public:
                     struct timespec push_begin_time, push_end_time;
                     clock_gettime(CLOCK_MONOTONIC, &push_begin_time);
                     for(int node_id = 0; node_id < ComputeNodeCount; node_id++){
-                        if (SYSTEM_MODE == 32 && !flush_seron(node_id)) return;
+                        if (uses_seron_page_delay() && !flush_seron(node_id)) return;
                         if(!local_node_txns[node_id].empty()){
                             txn_queues_[node_id]->push_txn_back_batch(local_node_txns[node_id]);
                             routed_txn_cnt_per_node[node_id].fetch_add(local_node_txns[node_id].size(), std::memory_order_relaxed);
@@ -1967,12 +1972,22 @@ public:
         return seron_conflicts_;
     }
 
+    void record_seron_range_sample(TxnQueueEntry* txn, double execution_ms);
+    void initialize_seron_range_rules();
+    void finalize_seron_range_rules() {
+        if (!seron_range_rules_) return;
+        seron_range_rules_->freeze();
+        seron_range_rules_->print(std::cout);
+    }
+
     void join_seron_router() {
         if (seron_router_thread_.joinable()) seron_router_thread_.join();
     }
 
 private:
     std::shared_ptr<SeronPageConflictTable> seron_conflicts_;
+    std::unique_ptr<SeronColumnRules> seron_range_rules_;
+    std::vector<seron_range::Predicate> seron_range_predicates(TxnQueueEntry* txn);
     std::thread seron_router_thread_;
 
     struct OwnershipOkResult {

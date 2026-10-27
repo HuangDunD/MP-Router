@@ -150,11 +150,15 @@ static void test_parallel_connectors() {
 }
 
 int main() {
-    SYSTEM_MODE = 32;
     BatchExecutorPOPTxnSize = 2;
-    test_queue_boundary_and_bypass();
-    test_timeout_and_batch_limit();
-    test_backpressure_and_shutdown();
-    test_parallel_connectors();
+    SYSTEM_MODE = 23;
+    check(!uses_seron_page_delay());
+    for (int mode : {32, 33}) {
+        SYSTEM_MODE = mode;
+        test_queue_boundary_and_bypass();
+        test_timeout_and_batch_limit();
+        test_backpressure_and_shutdown();
+        test_parallel_connectors();
+    }
     std::cout << "Seron connector-queue tests passed\n";
 }

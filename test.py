@@ -1448,6 +1448,8 @@ TPCCRuleRunModeType = [31]
 # RunModeType = [28]
 # ! system: 0 random, 2 page hash, 11 MP-Router, 13 without scheduling, 23 metis,
 # ! 25 load balance, 28 chimera-like
+# ! 32 PAR + page-conflict delay; 33 independent column ranges + same page-conflict delay
+# ! To compare only these variants, explicitly select RunModeType = [23, 32, 33].
 # ! TPCCRuleRunModeType: 31 TPC-C warehouse rule router, auto-added for TPC-C workloads
 # RunModeType = [13]
 # RunModeType = [1]

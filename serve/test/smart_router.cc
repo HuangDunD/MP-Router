@@ -2,6 +2,8 @@
 #include "indexed_priority_queue.h"
 
 #include <numeric>
+#include <map>
+#include <set>
 
 std::atomic<int> g_chimera_phase{0};
 std::atomic<uint64_t> g_chimera_phase1_exec_cnt{0};
@@ -143,10 +145,84 @@ void SmartRouter::compute_benefit_for_node( SchedulingCandidateTxn* sc, std::vec
     }
 }
 
+std::vector<seron_range::Predicate> SmartRouter::seron_range_predicates(TxnQueueEntry* txn) {
+    if (Workload_Type == 0) {
+        return seron_range::smallbank(txn->txn_type, txn->accounts);
+    }
+    return seron_range::tpcc(txn->txn_type, txn->tpcc_params, tpcc_->is_standard_mode(),
+                            tpcc_->is_standard_mode() && !MP_ROUTER_TPCC_LEGACY);
+}
+
+void SmartRouter::record_seron_range_sample(TxnQueueEntry* txn, double execution_ms) {
+    if (!seron_range_rules_ || seron_range_rules_->frozen()) return;
+    seron_range_rules_->observe(seron_range_predicates(txn), execution_ms);
+}
+
+void SmartRouter::initialize_seron_range_rules() {
+    if (!seron_range_rules_) return;
+    const auto specs = seron_range::specs(smallbank_ ? smallbank_->get_account_count() : 1,
+        tpcc_ ? tpcc_->get_num_warehouses() : 1, tpcc_ ? tpcc_->customers_per_dist() : 1,
+        tpcc_ ? tpcc_->item_count() : 1);
+    std::map<std::string, std::vector<size_t>> tables;
+    const size_t begin = Workload_Type == 0 ? 0 : seron_range::WarehouseId;
+    const size_t end = Workload_Type == 0 ? seron_range::WarehouseId : seron_range::Count;
+    for (size_t i = begin; i < end; ++i) tables[specs[i].table].push_back(i);
+    pqxx::connection conn(DBConnection.at(0));
+    pqxx::work db(conn);
+    for (const auto& table : tables) {
+        // Only actual indexed attributes are eligible. Composite index columns
+        // retain independent identities; encoded benchmark keys are not columns.
+        const auto indexed = db.exec("SELECT DISTINCT a.attname FROM pg_index i "
+            "JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=ANY(i.indkey) "
+            "WHERE i.indrelid='public." + table.first + "'::regclass");
+        std::set<std::string> indexed_names;
+        for (const auto& row : indexed) indexed_names.insert(row[0].as<std::string>());
+        std::vector<size_t> ids;
+        std::string fields;
+        for (auto id : table.second) if (indexed_names.count(specs[id].column)) {
+            ids.push_back(id); fields += ", " + specs[id].column;
+        }
+        if (ids.empty()) continue;
+        // Sample physical leaf tables as TABLESAMPLE cannot target a partitioned
+        // parent on all supported PG versions. tableoid disambiguates page IDs.
+        const auto leaves = db.exec("WITH RECURSIVE rels(oid) AS (SELECT 'public." +
+            table.first + "'::regclass::oid UNION ALL SELECT i.inhrelid FROM pg_inherits i "
+            "JOIN rels r ON i.inhparent=r.oid) SELECT oid::regclass::text FROM rels r "
+            "WHERE NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhparent=r.oid)");
+        std::map<size_t, std::vector<SeronColumnRules::PhysicalValue>> samples;
+        for (const auto& leaf : leaves) {
+            const std::string relation = leaf[0].as<std::string>();
+            const std::string select = "SELECT tableoid::bigint, "
+                "split_part(trim(leading '(' from ctid::text), ',', 1)::bigint" + fields +
+                " FROM " + relation;
+            auto rows = db.exec(select + " TABLESAMPLE SYSTEM (1) REPEATABLE (33) LIMIT 16384");
+            if (rows.size() < 2) rows = db.exec(select + " LIMIT 16384");
+            for (const auto& row : rows) {
+                const uint64_t page = (row[0].as<uint64_t>() << 32) | row[1].as<uint64_t>();
+                for (size_t j = 0; j < ids.size(); ++j) if (!row[j+2].is_null())
+                    samples[ids[j]].push_back({page, row[j+2].as<uint64_t>()});
+            }
+        }
+        for (auto id : ids) seron_range_rules_->add_column(id, specs[id], std::move(samples[id]));
+    }
+    db.commit();
+    seron_range_rules_->prepare();
+    seron_range_rules_->print(std::cout);
+}
+
 SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn, std::vector<table_id_t> &table_ids, std::vector<itemkey_t> &keys, std::vector<bool> &rw) {
     SmartRouterResult result;
     if (table_ids.size() != keys.size() || table_ids.empty()) {
         result.error_message = "Mismatched or empty table_ids and keys";
+        return result;
+    }
+
+    if (SYSTEM_MODE == 33) {
+        result.smart_router_id = seron_range_rules_->assign(seron_range_predicates(txn));
+        // Preserve the page observations and completion feedback used by mode 32,
+        // but do not consult/update PAR's graph or ownership when choosing a node.
+        for (size_t i = 0; i < keys.size(); ++i) lookup(txn, table_ids[i], keys[i]);
+        result.success = true;
         return result;
     }
 

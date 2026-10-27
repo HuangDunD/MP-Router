@@ -41,6 +41,7 @@ double Key_Page_Map_Cache_Ratio = 1.1; // 默认情况可以存的下
 bool Enable_Fill_Pipeline_Bubble = true; // 默认保持原有行为
 bool Enable_Important_Router_Batch_Log = true; // 默认保持原有重要逐batch日志
 int SeronMaxDelayUs = 100000; // Seron模式下，允许的最大延迟时间（微秒），超过该时间则强制调度
+int SeronRangeHistogramBins = 64; // mode 33: warmup histogram bins
 
 
 // global variables
