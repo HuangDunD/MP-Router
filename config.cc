@@ -1,6 +1,7 @@
 #include "config.h"
 
 int SYSTEM_MODE = 0;
+int SeronMaxDelayUs = 1000;
 // ! pay attention: need modify this when use different database
 int DB_TYPE = 0; // 0: PostgreSQL, 1: YashanDB, 2: MySQL
 std::vector<std::string> DBConnection;

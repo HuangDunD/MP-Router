@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include "txn_entry.h"
+#include "config.h"
 #include "Logger.h"
 #include "threadpool.h"
 
@@ -122,6 +123,9 @@ public:
 
     void mark_done(TxnQueueEntry* entry, int finish_call_id = -1) {
         if (!entry) return;
+        if (SYSTEM_MODE == 32 && on_seron_complete_) {
+            on_seron_complete_(entry->tx_id);
+        }
         mark_done_calls_.fetch_add(1, std::memory_order_relaxed);
         // std::cout << "Marking done " << entry->tx_id << "." << std::endl;
         // 直接按 tx_id 定位槽位
@@ -192,6 +196,11 @@ public:
         stats.ready_callback_calls = mark_done_ready_callback_calls_.load(std::memory_order_relaxed);
         stats.deferred_reclaims = mark_done_deferred_reclaims_.load(std::memory_order_relaxed);
         return stats;
+    }
+
+    // Install before starting execution threads; unused by all existing modes.
+    void set_seron_completion_callback(std::function<void(tx_id_t)> cb) {
+        on_seron_complete_ = std::move(cb);
     }
 
     // 获取当前容量
@@ -267,6 +276,7 @@ private:
 
     // 当后续事务ready时调用的回调
     std::function<void(std::vector<TxnQueueEntry*>, int)> on_ready_;
+    std::function<void(tx_id_t)> on_seron_complete_;
 
     Logger* logger_;
     ThreadPool reclaim_threadpool_;

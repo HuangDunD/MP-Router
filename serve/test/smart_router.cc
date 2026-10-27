@@ -233,7 +233,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
             debug_info += "], mode=" + std::to_string(owner_stats.second) + "); ";
             #endif
         }
-        else if(SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
+        else if(SYSTEM_MODE == 8 || SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25) || SYSTEM_MODE == 32) {
             // 计算page id
             auto entry = lookup(txn, table_ids[i], keys[i]);
             if (entry.page == kInvalidPageId) continue; 
@@ -613,14 +613,14 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                 ownership_table_->set_owner(txn, table_ids[i], keys[i], rw[i], txn->accessed_page_ids[i], result.smart_router_id);
             }
         }
-        else if(SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25)) {
+        else if(SYSTEM_MODE == 13 || (SYSTEM_MODE >= 23 && SYSTEM_MODE <= 25) || SYSTEM_MODE == 32) {
             // 基于page Metis的结果进行分区, 同时返回page到node的映射
             if (page_to_node_map.empty()) {
                 result.smart_router_id = rand() % cfg_.partition_nums;
                 result.success = true;
                 return result;
             }
-            if(SYSTEM_MODE == 23) {
+            if(SYSTEM_MODE == 23 || SYSTEM_MODE == 32) {
                 if (!WarmupEnd) {
                     node_id_t metis_decision_node;
                     metis_->build_internal_graph(page_to_node_map, &metis_decision_node);
@@ -654,7 +654,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
                 benefit3 = workload_balance_penalty_weights_[i].load(std::memory_order_relaxed) +
                            remain_queue_balance_penalty_weights_[i].load(std::memory_order_relaxed);
                 double total_benefit = 0.0;
-                if(SYSTEM_MODE == 23) {
+                if(SYSTEM_MODE == 23 || SYSTEM_MODE == 32) {
                     // 考虑Metis 分区和Load Balance
                     total_benefit = benefit2 + benefit3;
                 }

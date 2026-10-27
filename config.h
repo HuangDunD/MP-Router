@@ -23,6 +23,7 @@
 
 // 定义算法版本 0: random 1: affinity 2: single 3: perfect
 extern int SYSTEM_MODE; 
+extern int SeronMaxDelayUs; // mode 32 only: maximum page-conflict delay, in microseconds
 
 // 定义数据库类型 0: PostgreSQL 1: YashanDB 2: MySQL
 extern int DB_TYPE;

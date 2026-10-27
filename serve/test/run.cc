@@ -2002,6 +2002,8 @@ void print_usage(const char* program_name) {
     std::cout << "Options:" << std::endl;
     std::cout << "  --workload <name>           Workload (smallbank, ycsb, tpcc, tpcc-standard) [default: smallbank]" << std::endl;
     std::cout << "  --system-mode <mode>        System mode (0=random node, 1=account-based, 2=page-based) [default: 0]" << std::endl;
+    std::cout << "                              32=Seron page-conflict delay with PAR assignment" << std::endl;
+    std::cout << "  --seron-max-delay-us <us>   Mode 32 conflict-delay limit; 0 disables waiting [default: 1000]" << std::endl;
     std::cout << "  --access-pattern <pattern>  Data access pattern (0=uniform, 1=zipfian, 2=hotspot) [default: 0]" << std::endl;
     std::cout << "  --tpcc-partition-warehouses Partition TPC-C warehouse table by w_id ranges [default: off]" << std::endl;
     std::cout << "  --zipfian-theta <theta>     Zipfian parameter: legacy theta [0,1), finite exponent >= 0 [default: 0.99]" << std::endl;
@@ -2703,6 +2705,22 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--seron-max-delay-us") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --seron-max-delay-us requires a nonnegative integer" << std::endl;
+                return -1;
+            }
+            try {
+                const std::string value = argv[++i];
+                size_t parsed = 0;
+                const int delay = std::stoi(value, &parsed);
+                if (parsed != value.size() || delay < 0) throw std::invalid_argument("delay");
+                SeronMaxDelayUs = delay;
+            } catch (const std::exception&) {
+                std::cerr << "Error: --seron-max-delay-us requires a nonnegative integer" << std::endl;
+                return -1;
+            }
+        }
         else if (arg == "--access-pattern") {
             if (i + 1 < argc) {
                 access_pattern = std::stoi(argv[++i]);
@@ -3386,6 +3404,10 @@ int main(int argc, char *argv[]) {
     case 31:
         std::cout << "\033[31m  TPC-C warehouse rule router \033[0m" << std::endl;
         break;
+    case 32:
+        std::cout << "\033[31m  Seron page-conflict delay (PAR assignment) \033[0m" << std::endl;
+        std::cout << "Seron maximum conflict delay: " << SeronMaxDelayUs << " us" << std::endl;
+        break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
         return -1;
@@ -3928,6 +3950,12 @@ int main(int argc, char *argv[]) {
     tit->set_ready_callback([smart_router](std::vector<TxnQueueEntry*> entry, int finish_call_id){
         smart_router->schedule_ready_txn(std::move(entry), finish_call_id);
     });
+    if (SYSTEM_MODE == 32) {
+        auto conflicts = smart_router->seron_conflicts();
+        tit->set_seron_completion_callback([conflicts](tx_id_t id) {
+            conflicts->complete(id);
+        });
+    }
 
     // Initialize the key-page map
     if (without_kpmap) {
@@ -4146,7 +4174,7 @@ int main(int argc, char *argv[]) {
     if (time_based_run) {
         std::cout << "Time-based run: warmup_seconds=" << warmup_seconds
                   << " run_seconds=" << run_seconds << std::endl;
-        if (SYSTEM_MODE == 23 && warmup_seconds > 0) {
+        if ((SYSTEM_MODE == 23 || SYSTEM_MODE == 32) && warmup_seconds > 0) {
             if (warmup_seconds > 1) {
                 std::this_thread::sleep_for(std::chrono::seconds(warmup_seconds - 1));
             }
@@ -4183,6 +4211,8 @@ int main(int argc, char *argv[]) {
     // int mid_snapshot_id = create_perf_kwr_snapshot();
 
     auto measurement_end_time = std::chrono::high_resolution_clock::time_point{};
+    SeronPageConflictTable::Stats seron_begin, seron_end;
+    if (SYSTEM_MODE == 32) seron_begin = smart_router->seron_conflicts()->stats();
     uint64_t measurement_attempt_count = 0;
     uint64_t measurement_committed_count = 0;
     uint64_t measurement_aborted_count = 0;
@@ -4192,6 +4222,7 @@ int main(int argc, char *argv[]) {
         std::this_thread::sleep_for(std::chrono::seconds(run_seconds));
         measurement_end_time = std::chrono::high_resolution_clock::now();
         stop_benchmark.store(true, std::memory_order_relaxed);
+        if (SYSTEM_MODE == 32) seron_end = smart_router->seron_conflicts()->stats();
         measurement_attempt_count = static_cast<uint64_t>(exe_count.load(std::memory_order_relaxed));
         measurement_committed_count = committed_xact_count.load(std::memory_order_relaxed);
         measurement_aborted_count = aborted_xact_count.load(std::memory_order_relaxed);
@@ -4212,6 +4243,7 @@ int main(int argc, char *argv[]) {
         while(!stop_benchmark.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
+        if (SYSTEM_MODE == 32) seron_end = smart_router->seron_conflicts()->stats();
         txn_pool->stop_pool();
         force_stop_txn_queues();
         std::cout << "Dynamic workload duration ended. Stopping transaction generation and worker queues." << std::endl;
@@ -4223,6 +4255,12 @@ int main(int argc, char *argv[]) {
     // Wait for all threads to complete
     for(auto& thread : db_conn_threads) {
         thread.join();
+    }
+    if (SYSTEM_MODE == 32) {
+        smart_router->join_seron_router();
+        if (!time_based_run && !dynamic_workload) {
+            seron_end = smart_router->seron_conflicts()->stats();
+        }
     }
     snapshot2 = take_router_snapshot(smart_router);
 
@@ -4257,6 +4295,17 @@ int main(int argc, char *argv[]) {
     std::cout << "\n=== Performance Report ===" << std::endl;
     std::cout << "System mode: " << SYSTEM_MODE << " !!!" << std::endl;
     std::cout << "Router-only benchmark: " << (router_only ? "yes" : "no") << std::endl;
+    if (SYSTEM_MODE == 32) {
+        std::cout << "=== Seron page-conflict delay (measurement interval) ===" << std::endl;
+        std::cout << "  Maximum delay (us): " << SeronMaxDelayUs << std::endl;
+        std::cout << "  Admitted transactions: " << seron_end.admitted - seron_begin.admitted << std::endl;
+        std::cout << "  First conflict detections: " << seron_end.delayed - seron_begin.delayed << std::endl;
+        std::cout << "  Timeout admissions: " << seron_end.timed_out - seron_begin.timed_out << std::endl;
+        std::cout << "  Missing key-page observations: " << seron_end.missing_pages - seron_begin.missing_pages << std::endl;
+        std::cout << "  Accumulated delay of admitted transactions (ms): "
+                  << (seron_end.delay_ns - seron_begin.delay_ns) / 1000000.0 << std::endl;
+        std::cout << "  Active reservations at interval end: " << seron_end.active << std::endl;
+    }
     if(smart_router) {
         print_diff_snapshot(snapshot1, snapshot2);
     }

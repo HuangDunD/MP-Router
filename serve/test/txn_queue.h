@@ -879,6 +879,24 @@ public:
         else queue_cv_.notify_one();
     }
 
+    // Mode 32 only: do not let a full destination queue block other candidates.
+    // Existing push/pop paths are unchanged.
+    bool try_push_seron_txn(TxnQueueEntry* entry) {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (force_stopped_ || current_queue_size_ >= max_queue_size_) return false;
+        if (txn_queue_.empty() || txn_queue_.back().size() >= BatchExecutorPOPTxnSize) {
+            txn_queue_.push_back(make_vector_batch(entry));
+            ++regular_txn_vec_cnt;
+        } else {
+            txn_queue_.back().push_back(entry);
+        }
+        ++current_queue_size_;
+        ++regular_txn_cnt;
+        if (finished_) queue_cv_.notify_all();
+        else queue_cv_.notify_one();
+        return true;
+    }
+
     // push 绑定到单线程的事务到队列前端
     void push_txn_dag_ready(std::vector<TxnQueueEntry*> entries, int type = 0) {
         auto prepared = DAGTxnQueue::prepare_ready_batch(std::move(entries));
