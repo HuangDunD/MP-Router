@@ -336,6 +336,7 @@ public:
         if (SYSTEM_MODE == 32) {
             seron_conflicts_ = std::make_shared<SeronPageConflictTable>(
                 std::chrono::microseconds(SeronMaxDelayUs));
+            for (auto* queue : txn_queues_) queue->set_seron_conflicts(seron_conflicts_);
         }
         if (SYSTEM_MODE == 4) {
             ownership_table_ = nullptr;
@@ -1256,12 +1257,19 @@ public:
             clock_gettime(CLOCK_MONOTONIC, &start_time);
             std::vector<std::future<void>> futures;
             size_t batch_size = txn_batch->size();
-            std::vector<SeronPendingTxn> seron_pending;
-            if (SYSTEM_MODE == 32) seron_pending.resize(batch_size);
-
             for(int t=0; t<router_worker_threads_; t++) {
-                futures.emplace_back(threadpool.enqueue([this, &txn_batch, &seron_pending, t, batch_size]() {
+                futures.emplace_back(threadpool.enqueue([this, &txn_batch, t, batch_size]() {
                     std::vector<std::vector<TxnQueueEntry*>> local_node_txns(ComputeNodeCount);
+                    std::vector<std::vector<TxnQueue::SeronEntry>> local_seron_txns(
+                        SYSTEM_MODE == 32 ? ComputeNodeCount : 0);
+                    auto flush_seron = [&](int node) {
+                        auto& entries = local_seron_txns[node];
+                        const size_t count = entries.size();
+                        if (!txn_queues_[node]->push_seron_txns(entries)) return false;
+                        routed_txn_cnt_per_node[node].fetch_add(count, std::memory_order_relaxed);
+                        for (size_t k = 0; k < count; ++k) load_tracker_.record(node);
+                        return true;
+                    };
                     
                     for(size_t i = t; i < batch_size; i += router_worker_threads_) {
                         TxnQueueEntry* txn_entry = (*txn_batch)[i];
@@ -1408,7 +1416,7 @@ public:
                             (decision_end_time.tv_nsec - decision_begin_time.tv_nsec) / 1000000.0;
 
                         if (SYSTEM_MODE == 32) {
-                            auto& pending = seron_pending[i];
+                            TxnQueue::SeronEntry pending;
                             pending.txn = txn_entry;
                             pending.request.txn_id = txn_entry->tx_id;
                             pending.request.node = routed_node_id;
@@ -1424,7 +1432,11 @@ public:
                                 pending.request.pages.push_back({table_page, k >= rw.size() || rw[k]});
                             }
                             SeronPageConflictTable::normalize(pending.request.pages);
-                            continue; // mode 32 uses the admission path below, not direct enqueue.
+                            auto& entries = local_seron_txns[routed_node_id];
+                            entries.push_back(std::move(pending));
+                            if (entries.size() >= static_cast<size_t>(std::max(1, BatchExecutorPOPTxnSize)) &&
+                                !flush_seron(routed_node_id)) return;
+                            continue; // Queued transactions remain inactive until a connector claims them.
                         }
 
                         // 计时
@@ -1451,6 +1463,7 @@ public:
                     struct timespec push_begin_time, push_end_time;
                     clock_gettime(CLOCK_MONOTONIC, &push_begin_time);
                     for(int node_id = 0; node_id < ComputeNodeCount; node_id++){
+                        if (SYSTEM_MODE == 32 && !flush_seron(node_id)) return;
                         if(!local_node_txns[node_id].empty()){
                             txn_queues_[node_id]->push_txn_back_batch(local_node_txns[node_id]);
                             routed_txn_cnt_per_node[node_id].fetch_add(local_node_txns[node_id].size(), std::memory_order_relaxed);
@@ -1468,8 +1481,6 @@ public:
             for(auto& f : futures) {
                 f.get();
             }
-
-            if (SYSTEM_MODE == 32) dispatch_seron_pending(seron_pending);
 
             for(int node_id = 0; node_id < ComputeNodeCount; node_id++) {
                 // 把该批的事务都分发完成，设置batch处理完成标志
@@ -1961,40 +1972,6 @@ public:
     }
 
 private:
-    struct SeronPendingTxn {
-        TxnQueueEntry* txn = nullptr;
-        SeronPageConflictTable::Request request;
-    };
-
-    void dispatch_seron_pending(std::vector<SeronPendingTxn>& pending) {
-        while (!pending.empty() && !stop_benchmark.load(std::memory_order_relaxed)) {
-            size_t retained = 0;
-            bool made_progress = false;
-            for (size_t i = 0; i < pending.size(); ++i) {
-                if (stop_benchmark.load(std::memory_order_relaxed)) return;
-                auto& candidate = pending[i];
-                const int node = candidate.request.node;
-                const bool admitted = seron_conflicts_->try_dispatch(candidate.request, [&]() {
-                    return txn_queues_[node]->try_push_seron_txn(candidate.txn);
-                });
-                if (admitted) {
-                    // Do not access candidate.txn here: a consumer can already have finished it.
-                    routed_txn_cnt_per_node[node].fetch_add(1, std::memory_order_relaxed);
-                    load_tracker_.record(node);
-                    made_progress = true;
-                } else {
-                    if (retained != i) pending[retained] = std::move(candidate);
-                    ++retained;
-                }
-            }
-            pending.resize(retained);
-            if (!made_progress && !pending.empty()) {
-                // Bounded polling also retries full queues and checks benchmark shutdown.
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
-            }
-        }
-    }
-
     std::shared_ptr<SeronPageConflictTable> seron_conflicts_;
     std::thread seron_router_thread_;
 

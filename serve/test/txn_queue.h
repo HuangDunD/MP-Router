@@ -14,6 +14,7 @@
 #include "config.h"
 #include "tit.h"
 #include "txn_entry.h"
+#include "seron_pending_queue.h"
 #include "Logger.h"
 
 // the shared txn queue, some txns may be equal for every compute nodes, and this queue is for workload balance 
@@ -592,6 +593,7 @@ public:
 
     std::vector<TxnQueueEntry*> pop_txn(int* ret_call_id = nullptr, int* ret_type = nullptr, double* ret_wait_ms = nullptr) {
         if (ret_wait_ms != nullptr) *ret_wait_ms = 0.0;
+        if (SYSTEM_MODE == 32) return pop_seron_txns(ret_call_id, ret_type, ret_wait_ms);
         if (SYSTEM_MODE == 28) return pop_txn_chimera(ret_call_id, ret_type, ret_wait_ms);
         
         int call_id = rand();
@@ -879,22 +881,73 @@ public:
         else queue_cv_.notify_one();
     }
 
-    // Mode 32 only: do not let a full destination queue block other candidates.
-    // Existing push/pop paths are unchanged.
-    bool try_push_seron_txn(TxnQueueEntry* entry) {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        if (force_stopped_ || current_queue_size_ >= max_queue_size_) return false;
-        if (txn_queue_.empty() || txn_queue_.back().size() >= BatchExecutorPOPTxnSize) {
-            txn_queue_.push_back(make_vector_batch(entry));
-            ++regular_txn_vec_cnt;
-        } else {
-            txn_queue_.back().push_back(entry);
-        }
-        ++current_queue_size_;
-        ++regular_txn_cnt;
-        if (finished_) queue_cv_.notify_all();
-        else queue_cv_.notify_one();
+    using SeronEntry = SeronPendingQueue<TxnQueueEntry*>::Entry;
+
+    // Installed before starting threads; used only by mode 32.
+    void set_seron_conflicts(std::shared_ptr<SeronPageConflictTable> conflicts) {
+        seron_conflicts_ = std::move(conflicts);
+    }
+
+    void notify_seron_completion() {
+        if (seron_conflict_waiters_.load(std::memory_order_relaxed) != 0)
+            queue_cv_.notify_all();
+    }
+
+    bool push_seron_txns(std::vector<SeronEntry>& entries) {
+        if (entries.empty()) return true;
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        const int count = static_cast<int>(entries.size());
+        assert(count <= max_queue_size_);
+        queue_cv_.wait(lock, [this, count] {
+            return force_stopped_ || current_queue_size_ + count <= max_queue_size_;
+        });
+        if (force_stopped_) return false;
+        for (auto& entry : entries) seron_pending_.push(std::move(entry));
+        current_queue_size_ += count;
+        regular_txn_cnt += count;
+        entries.clear();
+        queue_cv_.notify_all();
         return true;
+    }
+
+    std::vector<TxnQueueEntry*> pop_seron_txns(int* ret_call_id, int* ret_type, double* ret_wait_ms) {
+        if (ret_call_id) *ret_call_id = rand();
+        if (ret_type) *ret_type = 0;
+        assert(seron_conflicts_);
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        while (!force_stopped_) {
+            if (!seron_pending_.empty()) {
+                auto ready = seron_pending_.pop_ready(*seron_conflicts_,
+                    static_cast<size_t>(std::max(1, BatchExecutorPOPTxnSize)));
+                if (!ready.empty()) {
+                    current_queue_size_ -= static_cast<int>(ready.size());
+                    regular_txn_cnt -= static_cast<int>(ready.size());
+                    ready.front()->combine_txn_count = static_cast<int>(ready.size());
+                    if (ret_type) *ret_type = 2;
+                    queue_cv_.notify_all();
+                    if (current_queue_size_ == 0 && batch_cv_) batch_cv_->notify_all();
+                    return ready;
+                }
+            } else if (finished_ || batch_finished_) {
+                return {};
+            }
+
+            const auto wait_start = std::chrono::steady_clock::now();
+            if (seron_pending_.empty()) {
+                queue_cv_.wait(lock, [this] {
+                    return force_stopped_ || finished_ || batch_finished_ || !seron_pending_.empty();
+                });
+            } else {
+                // Completion wakes conflict waiters; bounded polling covers
+                // missed notifications and timeout admission without a busy loop.
+                seron_conflict_waiters_.fetch_add(1, std::memory_order_relaxed);
+                queue_cv_.wait_for(lock, std::chrono::microseconds(100));
+                seron_conflict_waiters_.fetch_sub(1, std::memory_order_relaxed);
+            }
+            if (ret_wait_ms) *ret_wait_ms += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - wait_start).count();
+        }
+        return {};
     }
 
     // push 绑定到单线程的事务到队列前端
@@ -1217,6 +1270,9 @@ public:
 
 private:
     std::deque<std::vector<TxnQueueEntry*>> prior_read_txn_queue_;
+    SeronPendingQueue<TxnQueueEntry*> seron_pending_;
+    std::shared_ptr<SeronPageConflictTable> seron_conflicts_;
+    std::atomic<int> seron_conflict_waiters_{0};
     std::deque<std::vector<TxnQueueEntry*>> txn_queue_;
     std::deque<std::vector<TxnQueueEntry*>> phase2_txn_queue_; // 用于 Phase 2 跨区事务的独立积压队列
     std::mutex queue_mutex_;

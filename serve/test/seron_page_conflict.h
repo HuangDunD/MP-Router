@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -56,13 +57,14 @@ public:
         pages.resize(count);
     }
 
-    // enqueue must be nonblocking and must not call complete synchronously.
-    // Validation, registration and queue insertion are atomic with respect to
-    // other admissions/completions. A full queue leaves no active reservation.
+    // Claim a transaction for a connector, not for queue insertion. The claim
+    // callback must be nonblocking and must not call complete synchronously.
+    // Explicit time is for deterministic tests; real checks timestamp after locking.
     template <typename Enqueue>
     bool try_dispatch(Request& request, Enqueue enqueue,
-                      Clock::time_point now = Clock::now()) {
+                      std::optional<Clock::time_point> check_time = std::nullopt) {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto now = check_time ? *check_time : Clock::now();
         if (active_.count(request.txn_id)) {
             throw std::logic_error("Seron transaction admitted twice");
         }

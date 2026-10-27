@@ -3430,6 +3430,7 @@ int main(int argc, char *argv[]) {
     case 32:
         std::cout << "\033[31m  Seron page-conflict delay (PAR assignment) \033[0m" << std::endl;
         std::cout << "Seron maximum conflict delay: " << SeronMaxDelayUs << " us" << std::endl;
+        std::cout << "Seron connector claim batch limit: " << BatchExecutorPOPTxnSize << std::endl;
         break;
     default:
         std::cerr << "\033[31m  <Unknown> \033[0m" << std::endl;
@@ -3996,6 +3997,8 @@ int main(int argc, char *argv[]) {
         auto conflicts = smart_router->seron_conflicts();
         tit->set_seron_completion_callback([conflicts](tx_id_t id) {
             conflicts->complete(id);
+            // complete() releases the conflict-table lock before queue notification.
+            for (auto* queue : txn_queues) queue->notify_seron_completion();
         });
     }
 
@@ -4342,8 +4345,10 @@ int main(int argc, char *argv[]) {
     std::cout << "Router-only benchmark: " << (router_only ? "yes" : "no") << std::endl;
     if (SYSTEM_MODE == 32) {
         std::cout << "=== Seron page-conflict delay (measurement interval) ===" << std::endl;
+        std::cout << "  Active interval: connector batch claim to completion" << std::endl;
         std::cout << "  Maximum delay (us): " << SeronMaxDelayUs << std::endl;
         std::cout << "  Admitted transactions: " << seron_end.admitted - seron_begin.admitted << std::endl;
+        std::cout << "  Active transactions at measurement end: " << seron_end.active << std::endl;
         std::cout << "  First conflict detections: " << seron_end.delayed - seron_begin.delayed << std::endl;
         std::cout << "  Timeout admissions: " << seron_end.timed_out - seron_begin.timed_out << std::endl;
         std::cout << "  Missing key-page observations: " << seron_end.missing_pages - seron_begin.missing_pages << std::endl;
