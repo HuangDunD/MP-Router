@@ -151,6 +151,7 @@ struct thread_params
     int thread_count;
     std::vector<double> *latency_record = nullptr; // pointer to the latency record vector
     std::vector<double> *fetch_latency_record = nullptr; // pointer to the fetch latency record vector
+    std::vector<double> *complete_latency_record = nullptr; // pool admission to completion
 
     SmartRouter* smart_router = nullptr; // pointer to the smart router
     SlidingTransactionInforTable* tit = nullptr;  // pointer to the global transaction information table
@@ -854,6 +855,9 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency()) {
                 if (params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
+                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
+                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
+                }
                 if (params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -1125,6 +1129,9 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
+                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
+                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
+                }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -1392,6 +1399,9 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
+                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
+                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
+                }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -1490,6 +1500,9 @@ void run_mysql_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
+                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
+                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
+                }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -1599,6 +1612,9 @@ void run_mysql_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
+                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
+                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
+                }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -1874,6 +1890,9 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
+                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
+                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
+                }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -2524,6 +2543,9 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
+                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
+                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
+                }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -4110,10 +4132,12 @@ int main(int argc, char *argv[]) {
     // !Start the transaction threads
     std::vector<std::vector<double>> worker_latencies(ComputeNodeCount * worker_threads);
     std::vector<std::vector<double>> worker_fetch_latencies(ComputeNodeCount * worker_threads);
+    std::vector<std::vector<double>> worker_complete_latencies(ComputeNodeCount * worker_threads);
     // pre-reserve some space to avoid frequent reallocations, e.g. 1M per thread
     if (!router_only) {
         for(auto& v : worker_latencies) v.reserve(1000000);
         for(auto& v : worker_fetch_latencies) v.reserve(1000000);
+        for(auto& v : worker_complete_latencies) v.reserve(1000000);
     }
 
     std::vector<std::thread> db_conn_threads;
@@ -4125,6 +4149,7 @@ int main(int argc, char *argv[]) {
             params->thread_count = worker_threads;
             params->latency_record = &worker_latencies[i * worker_threads + j];
             params->fetch_latency_record = &worker_fetch_latencies[i * worker_threads + j];
+            params->complete_latency_record = &worker_complete_latencies[i * worker_threads + j];
             params->smallbank = smallbank;
             params->ycsb = ycsb;
             params->tpcc = tpcc;
@@ -4487,6 +4512,31 @@ int main(int argc, char *argv[]) {
         std::cout << "  P99: " << p99 << " ms" << std::endl;
     } else {
         std::cout << "No transactions recorded after warmup for fetch latency stats." << std::endl;
+    }
+
+    // --- Complete Latency Statistics (After Warmup) ---
+    std::vector<double> all_complete_latencies;
+    total_size = 0;
+    for (const auto& v : worker_complete_latencies) total_size += v.size();
+    all_complete_latencies.reserve(total_size);
+    for (const auto& v : worker_complete_latencies) {
+        all_complete_latencies.insert(all_complete_latencies.end(), v.begin(), v.end());
+    }
+    if (!all_complete_latencies.empty()) {
+        std::sort(all_complete_latencies.begin(), all_complete_latencies.end());
+        double sum = 0;
+        for (double lat : all_complete_latencies) sum += lat;
+        const double avg = sum / all_complete_latencies.size();
+        const double p50 = all_complete_latencies[static_cast<size_t>(all_complete_latencies.size() * 0.50)];
+        const double p95 = all_complete_latencies[static_cast<size_t>(all_complete_latencies.size() * 0.95)];
+        const double p99 = all_complete_latencies[static_cast<size_t>(all_complete_latencies.size() * 0.99)];
+        std::cout << "Complete Latency Statistics (After Warmup):" << std::endl;
+        std::cout << "  Average: " << avg << " ms" << std::endl;
+        std::cout << "  P50: " << p50 << " ms" << std::endl;
+        std::cout << "  P95: " << p95 << " ms" << std::endl;
+        std::cout << "  P99: " << p99 << " ms" << std::endl;
+    } else {
+        std::cout << "No transactions recorded after warmup for complete latency stats." << std::endl;
     }
 
     // Generate performance report, file name inluding the timestamp

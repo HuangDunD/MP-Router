@@ -45,6 +45,7 @@ struct TxnQueueEntry {
     std::vector<tx_id_t> dependencies; // 路由层决定的这些事务的前序事务，也就是执行这些事务之前检查一下TIT表中以来的事务状态是否已经done，否则拖延一小段时间再执行
     uint64_t first_exec_time = 0; // 判定为前面的依赖的事务还没执行完成, 稍微延后一会
     double fetch_time = 0.0; // 事务被从池中取出的时间
+    double pool_enter_time = 0.0; // CLOCK_MONOTONIC ms: admitted to the transaction pool
     double route_start_time = 0.0; // latency统计起点：本batch获准开始处理，不包含等待上一批释放队列
 
     // 拓扑图相关

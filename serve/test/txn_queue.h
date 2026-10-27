@@ -1267,6 +1267,9 @@ public:
         pool_cv_.wait(lock, [this]() {
             return current_pool_size_ < max_pool_size_;
         });
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        entry->pool_enter_time = ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
         txn_pool_.push_back(entry);
         current_pool_size_++;
         pool_cv_.notify_one();
@@ -1279,7 +1282,11 @@ public:
             return current_pool_size_ + size < max_pool_size_ || stop_;
         });
         if(stop_) return;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        const double pool_enter_ms = ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
         for(int i = 0; i < size; i++){
+            entry[i]->pool_enter_time = pool_enter_ms;
             txn_pool_.push_back(entry[i]);
         }
         current_pool_size_ += size;
