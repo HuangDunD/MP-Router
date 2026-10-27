@@ -5,7 +5,7 @@
 #include <vector>
 
 int main() {
-    for (uint64_t n : {1,2,3,4,5,15,16,17,1000,100003}) {
+    for (uint64_t n : {1,2,3,4,5,15,16,17,200,1000,100003}) {
         for (uint64_t seed : {0,42,12345}) {
             AccountKeyPermutation p(n,seed), same(n,seed);
             std::vector<bool> seen(n+1,false);
@@ -17,6 +17,21 @@ int main() {
         }
     }
     AccountKeyPermutation large(10000000,42), other(10000000,43);
+    // TPC-C: one bijection applies to home and remote warehouse IDs.
+    // It preserves all local/remote relationships and the 50-warehouse hot set size.
+    AccountKeyPermutation warehouses(200,42);
+    std::vector<bool> hot(201,false);
+    int hot_bins[4] = {};
+    for (uint64_t w=1; w<=200; ++w) {
+        if (w<=50) {
+            assert(!hot[warehouses(w)]);
+            hot[warehouses(w)] = true;
+            ++hot_bins[(warehouses(w)-1)/50];
+        }
+        for (uint64_t remote=1; remote<=200; ++remote)
+            assert((w==remote) == (warehouses(w)==warehouses(remote)));
+    }
+    for (int count : hot_bins) assert(count>0);
     int bins[4]={}, changed=0;
     for (uint64_t k=1;k<=10000;++k) {
         auto v=large(k); assert(v>=1 && v<=10000000);

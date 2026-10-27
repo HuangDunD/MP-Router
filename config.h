@@ -27,6 +27,8 @@ extern int SeronMaxDelayUs; // modes 32/33: maximum page-conflict delay, in micr
 extern int SeronRangeHistogramBins; // mode 33 only: latency-weighted range histogram
 extern bool SmallBankPermuteKeys; // opt-in workload transform, independent of system mode
 extern uint64_t SmallBankKeyPermutationSeed;
+extern bool TPCCPermuteWarehouses; // opt-in warehouse-ID relabeling, independent of system mode
+extern uint64_t TPCCWarehousePermutationSeed;
 inline bool uses_seron_page_delay() { return SYSTEM_MODE == 32 || SYSTEM_MODE == 33; }
 
 // 定义数据库类型 0: PostgreSQL 1: YashanDB 2: MySQL

@@ -1,4 +1,5 @@
 #include "tpcc.h"
+#include "account_key_permutation.h"
 #include <iostream>
 #include <algorithm>
 #include <chrono>
@@ -1299,6 +1300,7 @@ struct OrderLine {
 
 void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
     pthread_setname_np(pthread_self(), ("txn_gen_t_" + std::to_string(thread_id)).c_str());
+    const AccountKeyPermutation warehouse_permutation(num_warehouses_, TPCCWarehousePermutationSeed);
     
     // Generate transactions
     int total_txn_to_generate = MetisWarmupRound * PARTITION_INTERVAL + try_count * worker_threads * ComputeNodeCount;
@@ -1343,6 +1345,8 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
             } else {
                 w_id = random_int(1, num_warehouses_);
             }
+            const int original_w_id = w_id;
+            if (TPCCPermuteWarehouses) w_id = static_cast<int>(warehouse_permutation(w_id));
             int d_id = random_int(1, DIST_PER_WARE);
             int c_id = nurand(1023, 1, customers_per_dist());
             
@@ -1372,7 +1376,11 @@ void TPCC::generate_tpcc_txns_worker(int thread_id, TxnPool* txn_pool) {
                         int supply_w_id = w_id; // !Simplified: home warehouse
                         if (num_warehouses_ > 1 && random_int(1, 100) == 1) {
                             supply_w_id = random_int(1, num_warehouses_);
-                            while (supply_w_id == w_id) supply_w_id = random_int(1, num_warehouses_);
+                            // Select in the original ID space, then apply the same
+                            // bijection so local/remote relationships are unchanged.
+                            while (supply_w_id == original_w_id) supply_w_id = random_int(1, num_warehouses_);
+                            if (TPCCPermuteWarehouses)
+                                supply_w_id = static_cast<int>(warehouse_permutation(supply_w_id));
                         }
                         int quantity = random_int(1, 10);
                         itemkey_t s_key = make_stock_key(supply_w_id, i_id);

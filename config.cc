@@ -44,6 +44,8 @@ int SeronMaxDelayUs = 100000; // Seron模式下，允许的最大延迟时间（
 int SeronRangeHistogramBins = 64; // mode 33: warmup histogram bins
 bool SmallBankPermuteKeys = false;
 uint64_t SmallBankKeyPermutationSeed = 42;
+bool TPCCPermuteWarehouses = false;
+uint64_t TPCCWarehousePermutationSeed = 42;
 
 
 // global variables

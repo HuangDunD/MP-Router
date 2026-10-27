@@ -2034,6 +2034,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --zipfian-theta <theta>     Zipfian parameter: legacy theta [0,1), finite exponent >= 0 [default: 0.99]" << std::endl;
     std::cout << "  --zipfian-generator <mode>  Zipfian generator (legacy, finite) [default: legacy]" << std::endl;
     std::cout << "  --smallbank-key-permutation-seed <seed>  Enable deterministic account-ID permutation (all modes; default: off)" << std::endl;
+    std::cout << "  --tpcc-warehouse-permutation-seed <seed>  Enable deterministic warehouse-ID permutation (all modes; default: off)" << std::endl;
     std::cout << "  --hotspot-fraction <frac>   Fraction of hot accounts (0.0-1.0) [default: 0.1]" << std::endl;
     std::cout << "  --hotspot-prob <prob>       Probability of accessing hot accounts (0.0-1.0) [default: 0.8]" << std::endl;
     std::cout << "  --ycsb-read-pct <pct>       YCSB read percentage: per-op probability in random mode, fixed count in fixed mode (0-100) [default: 90]" << std::endl;
@@ -2807,6 +2808,21 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--tpcc-warehouse-permutation-seed") {
+            try {
+                if (i + 1 >= argc) throw std::invalid_argument("missing seed");
+                const std::string value = argv[++i];
+                if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos)
+                    throw std::invalid_argument("seed");
+                size_t parsed = 0;
+                TPCCWarehousePermutationSeed = std::stoull(value, &parsed);
+                if (parsed != value.size()) throw std::invalid_argument("seed");
+                TPCCPermuteWarehouses = true;
+            } catch (const std::exception&) {
+                std::cerr << "Error: --tpcc-warehouse-permutation-seed requires a uint64 seed" << std::endl;
+                return -1;
+            }
+        }
         else if (arg == "--hotspot-fraction") {
             if (i + 1 < argc) {
                 hotspot_fraction = std::stod(argv[++i]);
@@ -3536,6 +3552,16 @@ int main(int argc, char *argv[]) {
         std::cout << "SmallBank key permutation seed: " << SmallBankKeyPermutationSeed
                   << " (feistel6-cyclewalk-v1; post-permutation account ordering)" << std::endl;
     SmallBank* smallbank = nullptr;
+    if (TPCCPermuteWarehouses && Workload_Type != 2 && Workload_Type != 3) {
+        std::cerr << "Warehouse-ID permutation supports TPC-C only." << std::endl;
+        return -1;
+    }
+    if (Workload_Type == 2 || Workload_Type == 3) {
+        std::cout << "TPC-C warehouse permutation: " << (TPCCPermuteWarehouses ? "enabled" : "disabled") << std::endl;
+        if (TPCCPermuteWarehouses)
+            std::cout << "TPC-C warehouse permutation seed: " << TPCCWarehousePermutationSeed
+                      << " (feistel6-cyclewalk-v1)" << std::endl;
+    }
     YCSB* ycsb = nullptr;
     TPCC* tpcc = nullptr;
     if (Workload_Type == 0) {

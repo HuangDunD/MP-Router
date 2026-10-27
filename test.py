@@ -1003,6 +1003,7 @@ def build_case_plan():
             case_config.get("key_page_ratio"),
             case_config.get("mlp_enabled"),
             case_config.get("smallbank_key_permutation_seed"),
+            case_config.get("tpcc_warehouse_permutation_seed"),
             run_mode,
         )
 
@@ -1017,6 +1018,9 @@ def build_case_plan():
             for case_config in build_case_configs_for_workload(workload_name, account_count, warehouse_count):
                 case_config["smallbank_key_permutation_seed"] = (
                     SmallBankKeyPermutationSeed if workload_name == "smallbank" else None
+                )
+                case_config["tpcc_warehouse_permutation_seed"] = (
+                    TPCCWarehousePermutationSeed if workload_name in ("tpcc", "tpcc-standard") else None
                 )
                 group_key = case_group_key(case_config)
                 if group_key not in case_group_ids:
@@ -1097,6 +1101,7 @@ def normalize_case_from_plan(row):
         "worker_threads", "batch_size", "num_bucket", "compute_node_count", "mlp_enabled",
         "account_count", "warehouse_count", "tpcc_partition_warehouses", "long_txn_length",
         "long_txn_write_pct", "smallbank_key_permutation_seed",
+        "tpcc_warehouse_permutation_seed",
     ]
     float_fields = [
         "zipfian_theta", "hotspot_fraction", "hotspot_prob",
@@ -1201,6 +1206,8 @@ def case_group_dir_name(case):
         parts.append(f"ZipfGen{value_for_path(case['zipfian_generator'])}")
     if case.get("smallbank_key_permutation_seed") is not None:
         parts.append(f"KeyPerm{case['smallbank_key_permutation_seed']}")
+    if case.get("tpcc_warehouse_permutation_seed") is not None:
+        parts.append(f"WhPerm{case['tpcc_warehouse_permutation_seed']}")
     if case.get("hotspot_fraction") is not None:
         parts.append(f"HsFrac{value_for_path(case['hotspot_fraction'])}")
     if case.get("hotspot_prob") is not None:
@@ -1314,6 +1321,8 @@ def access_extra_args(case):
     permutation = ""
     if case.get("workload") == "smallbank" and case.get("smallbank_key_permutation_seed") is not None:
         permutation = f" --smallbank-key-permutation-seed {case['smallbank_key_permutation_seed']}"
+    if case.get("workload") in ("tpcc", "tpcc-standard") and case.get("tpcc_warehouse_permutation_seed") is not None:
+        permutation = f" --tpcc-warehouse-permutation-seed {case['tpcc_warehouse_permutation_seed']}"
     if case["access_pattern"] == 1:
         return permutation + f" --zipfian-theta {case['zipfian_theta']} --zipfian-generator {case['zipfian_generator']}"
     if case["access_pattern"] == 2:
@@ -1477,6 +1486,7 @@ ZipfianTheta = [0.8]
 # ZipfianTheta = [0.8]
 ZipfianGenerator = "finite" # options: finite, legacy
 SmallBankKeyPermutationSeed = None # None: unchanged workload; integer: enable seeded key permutation
+TPCCWarehousePermutationSeed = None # None: unchanged workload; integer: enable seeded warehouse permutation
 # HotspotFraction = [0.25]
 HotspotFraction = [0.001, 0.01, 0.1, 1]
 HotspotProb = [0.8]
@@ -1564,6 +1574,8 @@ if __name__ == "__main__":
     parser.add_argument("--zipfian-generator", choices=("finite", "legacy"), default=None, help="Zipfian generator type")
     parser.add_argument("--smallbank-key-permutation-seed", type=int, default=None,
                         help="Enable seeded SmallBank account-ID permutation for every selected mode")
+    parser.add_argument("--tpcc-warehouse-permutation-seed", type=int, default=None,
+                        help="Enable seeded TPC-C warehouse-ID permutation for every selected mode")
     parser.add_argument("--db-type", type=int, choices=(0, 1, 2), default=None, help="0: PostgreSQL/KES, 1: YashanDB, 2: MySQL")
     parser.add_argument("--warmup-seconds", type=int, default=None, help="Override WarmupSeconds for --time-run")
     parser.add_argument("--run-seconds", type=int, default=None, help="Override RunSeconds for --time-run")
@@ -1609,6 +1621,10 @@ if __name__ == "__main__":
         if not 0 <= args.smallbank_key_permutation_seed <= 2**64 - 1:
             parser.error("--smallbank-key-permutation-seed must be a uint64")
         SmallBankKeyPermutationSeed = args.smallbank_key_permutation_seed
+    if args.tpcc_warehouse_permutation_seed is not None:
+        if not 0 <= args.tpcc_warehouse_permutation_seed <= 2**64 - 1:
+            parser.error("--tpcc-warehouse-permutation-seed must be a uint64")
+        TPCCWarehousePermutationSeed = args.tpcc_warehouse_permutation_seed
     if args.db_type is not None:
         DBType = args.db_type
     if args.warmup_seconds is not None:
