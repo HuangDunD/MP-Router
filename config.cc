@@ -49,6 +49,7 @@ uint64_t TPCCWarehousePermutationSeed = 42;
 bool TPCCShuffleWarehouseLoad = false;
 uint64_t TPCCWarehouseLoadSeed = 42;
 bool TPCCRoutingDiagnostics = false;
+bool HotPageWeightedAffinity = false;
 
 
 // global variables

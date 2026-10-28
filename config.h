@@ -32,6 +32,7 @@ extern uint64_t TPCCWarehousePermutationSeed;
 extern bool TPCCShuffleWarehouseLoad;
 extern uint64_t TPCCWarehouseLoadSeed;
 extern bool TPCCRoutingDiagnostics; // default off; mode11 observation only
+extern bool HotPageWeightedAffinity; // default off; mode11 window-local hot-page scoring
 inline bool uses_seron_page_delay() { return SYSTEM_MODE == 32 || SYSTEM_MODE == 33; }
 
 // 定义数据库类型 0: PostgreSQL 1: YashanDB 2: MySQL

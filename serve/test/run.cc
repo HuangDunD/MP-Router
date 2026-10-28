@@ -2038,6 +2038,7 @@ void print_usage(const char* program_name) {
     std::cout << "  --tpcc-warehouse-permutation-seed <seed>  Enable deterministic warehouse-ID permutation (all modes; default: off)" << std::endl;
     std::cout << "  --tpcc-warehouse-load-seed <seed>  Shuffle whole-warehouse loading tasks (default: off)" << std::endl;
     std::cout << "  --tpcc-routing-diagnostics  Record mode11 TPC-C window assignments and planning decisions [default: off]" << std::endl;
+    std::cout << "  --hot-page-weighted-affinity  Weight mode11 ownership affinity by window-local page heat [default: off]" << std::endl;
     std::cout << "  --hotspot-fraction <frac>   Fraction of hot accounts (0.0-1.0) [default: 0.1]" << std::endl;
     std::cout << "  --hotspot-prob <prob>       Probability of accessing hot accounts (0.0-1.0) [default: 0.8]" << std::endl;
     std::cout << "  --ycsb-read-pct <pct>       YCSB read percentage: per-op probability in random mode, fixed count in fixed mode (0-100) [default: 90]" << std::endl;
@@ -2814,6 +2815,9 @@ int main(int argc, char *argv[]) {
         else if (arg == "--tpcc-routing-diagnostics") {
             TPCCRoutingDiagnostics = true;
         }
+        else if (arg == "--hot-page-weighted-affinity") {
+            HotPageWeightedAffinity = true;
+        }
         else if (arg == "--tpcc-warehouse-permutation-seed") {
             try {
                 if (i + 1 >= argc) throw std::invalid_argument("missing seed");
@@ -3573,6 +3577,13 @@ int main(int argc, char *argv[]) {
         std::cout << "SmallBank key permutation seed: " << SmallBankKeyPermutationSeed
                   << " (feistel6-cyclewalk-v1; post-permutation account ordering)" << std::endl;
     SmallBank* smallbank = nullptr;
+    if (HotPageWeightedAffinity && SYSTEM_MODE != 11) {
+        std::cerr << "Hot-page weighted affinity requires mode11." << std::endl;
+        return -1;
+    }
+    std::cout << "Hot-page weighted affinity: "
+              << (HotPageWeightedAffinity ? "enabled (RW page weight = distinct transactions per window; other pages = 1)" : "disabled")
+              << std::endl;
     if (TPCCRoutingDiagnostics && (SYSTEM_MODE != 11 || (Workload_Type != 2 && Workload_Type != 3))) {
         std::cerr << "TPC-C routing diagnostics require mode11 and a TPC-C workload." << std::endl;
         return -1;

@@ -82,10 +82,10 @@ void SmartRouter::update_sc_ownership_count(SchedulingCandidateTxn* sc, int page
     if (!old_ownership.first.empty()) {
         for(const auto& ownership_node : old_ownership.first) {
             if(old_ownership.second == 1) { // Exclusive
-                 sc->ownership_node_count[ownership_node]--;
+                 sc->hot_affinity.adjust(sc->ownership_node_count, page_idx, ownership_node, -1);
             } else{ // Shared
                 if(!rw) { // Read op
-                    sc->ownership_node_count[ownership_node]--;
+                    sc->hot_affinity.adjust(sc->ownership_node_count, page_idx, ownership_node, -1);
                 }
             }
         }
@@ -94,10 +94,10 @@ void SmartRouter::update_sc_ownership_count(SchedulingCandidateTxn* sc, int page
     // 2. add new ownership count
     for(const auto& ownership_node : new_ownership.first) {
         if(new_ownership.second == 1) { // Exclusive
-             sc->ownership_node_count[ownership_node]++;
+             sc->hot_affinity.adjust(sc->ownership_node_count, page_idx, ownership_node, 1);
         } else{ // Shared
             if(!rw) { // Read op
-                sc->ownership_node_count[ownership_node]++;
+                sc->hot_affinity.adjust(sc->ownership_node_count, page_idx, ownership_node, 1);
             }
         }
     }
@@ -109,9 +109,9 @@ void SmartRouter::update_sc_ownership_count_fast(SchedulingCandidateTxn* sc, int
     while (mask != 0) {
         const int owner = __builtin_ctzll(mask);
         if (ownership.mode) { // Exclusive
-            sc->ownership_node_count[owner]++;
+            sc->hot_affinity.adjust(sc->ownership_node_count, page_idx, owner, 1);
         } else if (!rw) { // Shared ownership only satisfies read operations
-            sc->ownership_node_count[owner]++;
+            sc->hot_affinity.adjust(sc->ownership_node_count, page_idx, owner, 1);
         }
         mask &= (mask - 1);
     }
@@ -135,6 +135,9 @@ void SmartRouter::compute_benefit_for_node( SchedulingCandidateTxn* sc, std::vec
         // 计算每一个节点的benefit
         // benefit 计算：已经有ownership的页面比例
         double benefit1 = ownership_node_count[i] * ownership_benefit_weight / sum_pages;
+        if (sc->hot_affinity.enabled()) {
+            benefit1 = sc->hot_affinity.affinity(i) * ownership_benefit_weight;
+        }
         // benefit 计算: 满足metis分区结果的页面比例
         double benefit2 = 0.0;
         if(metis_benefit_weight > 0) {
@@ -1417,6 +1420,8 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
     prepared->dependency_conflict_page_flags.reserve(all_page_pairs.size());
     prepared->unique_ownership_pages.reserve(all_page_pairs.size());
     prepared->conflict_page_index_map.reserve(all_page_pairs.size());
+    const bool use_hot_affinity = SYSTEM_MODE == 11 && HotPageWeightedAffinity;
+    std::vector<double> hot_page_weights;
     for (size_t i = 0; i < all_page_pairs.size();) {
         const uint64_t page = all_page_pairs[i].page;
         const size_t range_begin = prepared->global_page_pairs.size();
@@ -1424,7 +1429,14 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
         bool has_writer = false;
         uint32_t first_txn = all_page_pairs[i].txn_idx;
         bool has_distinct_txn = false;
+        uint32_t distinct_transactions = 0;
         while (range_end_idx < all_page_pairs.size() && all_page_pairs[range_end_idx].page == page) {
+            // Pairs are sorted by (page, txn_idx). Multiple keys on one page
+            // must not count as multiple transactions when estimating heat.
+            if (use_hot_affinity && (range_end_idx == i ||
+                all_page_pairs[range_end_idx].txn_idx != all_page_pairs[range_end_idx - 1].txn_idx)) {
+                ++distinct_transactions;
+            }
             has_writer = has_writer || all_page_pairs[range_end_idx].is_write;
             if (all_page_pairs[range_end_idx].txn_idx != first_txn) has_distinct_txn = true;
             ++range_end_idx;
@@ -1453,6 +1465,10 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
             prepared->unique_conflict_pages.push_back(page);
             prepared->dependency_conflict_page_flags.push_back(
                 static_cast<uint8_t>(page_has_rw_conflict));
+            if (use_hot_affinity) {
+                hot_page_weights.push_back(HotPageAffinityState::page_weight(
+                    page_has_rw_conflict, distinct_transactions));
+            }
         }
     }
     for (SchedulingCandidateTxn* sc : prepared->global_conflicted_txns) {
@@ -1460,6 +1476,8 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
         prepared->conflicted_txn_involved_page_total += sc->valid_page_count;
         prepared->conflicted_txn_dependency_page_total += sc->dependency_conflict_page_count;
         sc->conflict_page_indexes.assign(sc->involved_pages.size(), -1);
+        std::vector<double> weights;
+        if (use_hot_affinity) weights.assign(sc->involved_pages.size(), 1.0);
         for (size_t page_idx = 0; page_idx < sc->involved_pages.size(); ++page_idx) {
             const uint64_t page = sc->involved_pages[page_idx];
             if ((page & 0xFFFFFFFF) != 0xFFFFFFFF) {
@@ -1468,8 +1486,12 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
             auto index_it = prepared->conflict_page_index_map.find(page);
             if (index_it != prepared->conflict_page_index_map.end()) {
                 sc->conflict_page_indexes[page_idx] = static_cast<int32_t>(index_it->second);
+                if (use_hot_affinity) weights[page_idx] = hot_page_weights[index_it->second];
             }
         }
+        // Freeze weights for this window, before initializing ownership counts.
+        // Keep the existing access-slot representation (including missing pages).
+        if (use_hot_affinity) sc->hot_affinity.reset(std::move(weights), ComputeNodeCount);
     }
     std::sort(prepared->unique_ownership_pages.begin(), prepared->unique_ownership_pages.end());
     prepared->unique_ownership_pages.erase(

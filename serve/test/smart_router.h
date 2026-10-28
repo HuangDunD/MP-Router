@@ -36,6 +36,7 @@
 #include "tpcc.h"
 #include "seron_page_conflict.h"
 #include "seron_column_rules.h"
+#include "hot_page_affinity.h"
 
 // SmartRouter: 一个针对 hot-key hash cache 设有严格内存预算的事务路由器。
 // 它维护：
@@ -837,6 +838,7 @@ public:
         std::vector<int32_t> conflict_page_indexes;
         std::vector<bool> rw_flags; 
         std::vector<int> ownership_node_count; // 记录每个节点作为ownership节点的页面数量
+        HotPageAffinityState hot_affinity; // mode11 opt-in; fixed weights per window
         // 在这里面存储对应页面的metis node和ownership node, 这样可以避免全局维护一个page_to_node_map，对map修改需要mutex锁
         std::vector<node_id_t> page_to_metis_node_vec;
         // std::vector<std::pair<std::vector<node_id_t>, bool> > page_to_ownership_node_vec; // pages 可能对应多个ownership节点, bool表示锁的模式

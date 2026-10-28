@@ -1057,6 +1057,7 @@ def build_case_plan():
                     seen.add(key)
                     case = dict(case_config)
                     case["run_mode"] = run_mode
+                    case["hot_page_weighted_affinity"] = bool(HotPageWeightedAffinity and run_mode == 11)
                     case["case_group_id"] = case_group_ids[group_key]
                     case["data_cache_path"] = data_cache_path(
                         workload_name,
@@ -1131,6 +1132,9 @@ def normalize_case_from_plan(row):
             case[field] = None
     if "use_data_cache" in case:
         case["use_data_cache"] = parse_bool_value(case["use_data_cache"])
+    case["hot_page_weighted_affinity"] = parse_bool_value(
+        case.get("hot_page_weighted_affinity", False)
+    )
     case.setdefault("compute_node_count", DefaultComputeNodeCount)
     return case
 
@@ -1222,6 +1226,8 @@ def case_group_dir_name(case):
         parts.append(f"WhPerm{case['tpcc_warehouse_permutation_seed']}")
     if case.get("tpcc_warehouse_load_seed") is not None:
         parts.append(f"WhLoad{case['tpcc_warehouse_load_seed']}")
+    if case.get("hot_page_weighted_affinity"):
+        parts.append("HotPageAffinity")
     if case.get("hotspot_fraction") is not None:
         parts.append(f"HsFrac{value_for_path(case['hotspot_fraction'])}")
     if case.get("hotspot_prob") is not None:
@@ -1506,6 +1512,7 @@ TPCCWarehousePermutationSeed = None # None: unchanged workload; integer: enable 
 TPCCShuffleWarehouseLoad = False # shuffle whole-warehouse load tasks; independent of access permutation
 TPCCWarehouseLoadSeed = 42
 TPCCRoutingDiagnostics = True # diagnostic output only; no routing policy changes
+HotPageWeightedAffinity = False # mode11 only: weight ownership affinity by window-local RW page heat
 HotspotFraction = [0.25]
 # HotspotFraction = [0.001, 0.01, 0.1, 1]
 # HotspotProb = [0.8]
@@ -1840,6 +1847,8 @@ if __name__ == "__main__":
             )
             if case.get("tpcc_partition_warehouses"):
                 cmd += " --tpcc-partition-warehouses"
+            if case.get("hot_page_weighted_affinity"):
+                cmd += " --hot-page-weighted-affinity"
             if TPCCRoutingDiagnostics:
                 cmd += " --tpcc-routing-diagnostics"
                 for name in ("tpcc_window_assignments.csv", "tpcc_plan_decisions.csv"):
