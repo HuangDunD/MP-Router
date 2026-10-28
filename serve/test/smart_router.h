@@ -838,7 +838,6 @@ public:
         std::vector<int32_t> conflict_page_indexes;
         std::vector<bool> rw_flags; 
         std::vector<int> ownership_node_count; // 记录每个节点作为ownership节点的页面数量
-        HotPageAffinityState hot_affinity; // mode11 opt-in; fixed weights per window
         // 在这里面存储对应页面的metis node和ownership node, 这样可以避免全局维护一个page_to_node_map，对map修改需要mutex锁
         std::vector<node_id_t> page_to_metis_node_vec;
         // std::vector<std::pair<std::vector<node_id_t>, bool> > page_to_ownership_node_vec; // pages 可能对应多个ownership节点, bool表示锁的模式
@@ -851,6 +850,8 @@ public:
         bool is_conflicted = false;
         int valid_page_count = 0; // 有效页面数量
         int dependency_conflict_page_count = 0; // Pages with batch-local RW conflict, excluding read-read/private pages.
+        // Keep optional scoring state last to preserve legacy aggregate initialization.
+        HotPageAffinityState hot_affinity{}; // mode11 opt-in; fixed weights per window
     };
 
     struct PreparedBatch {
