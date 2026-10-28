@@ -7,6 +7,24 @@
 int main() {
     using namespace seron_range;
     auto s = specs(100, 4, 3000, 10000);
+    // Diagnostic is only an exact-score tie-break; default behavior is preserved.
+    for (bool did_first : {false, true}) {
+        SeronColumnRules tied(2, 4, did_first);
+        tied.add_column(WarehouseId,s[WarehouseId],{{1,1},{2,4}},true);
+        tied.add_column(DistrictWarehouse,s[DistrictWarehouse],{{1,1},{2,4}},true);
+        tied.add_column(DistrictId,s[DistrictId],{{1,1},{2,10}},true);
+        tied.prepare();
+        assert(tied.assign({{DistrictWarehouse,1},{DistrictId,10}})==(did_first?1:0));
+        assert(tied.assign({{WarehouseId,1},{DistrictWarehouse,1},{DistrictId,10}})==(did_first?1:0));
+        std::ostringstream policy;
+        tied.print(policy);
+        assert((policy.str().find("DIAGNOSTIC district.d_id")!=std::string::npos)==did_first);
+    }
+    SeronColumnRules unequal(2,4,true);
+    unequal.add_column(DistrictWarehouse,s[DistrictWarehouse],{{1,1},{2,4}},true);
+    unequal.add_column(DistrictId,s[DistrictId],{{1,1},{1,10}},true);
+    unequal.prepare();
+    assert(unequal.assign({{DistrictWarehouse,1},{DistrictId,10}})==0);
     SeronColumnRules independent(2, 10);
     independent.add_column(CheckingId, s[CheckingId], {{1,1},{1,2},{2,99},{2,100}}, true);
     independent.add_column(SavingsId, s[SavingsId], {{1,1},{1,100},{2,2},{2,99}}, true);
@@ -68,6 +86,11 @@ int main() {
     balanced.add_column(CheckingId,s[CheckingId],{});
     balanced.prepare();
     const std::vector<Predicate> tie{{CheckingId,1},{CheckingId,100}};
+    SeronColumnRules::Selection selected;
+    balanced.assign(tie, {}, 0, &selected);
+    assert(selected.column == CheckingId && selected.risk == 1.0);
+    balanced.assign({}, {}, 0, &selected);
+    assert(selected.column == -1);
     assert(balanced.assign(tie,{0.2,1.6,1.6,1.2}) == 3); // only matched nodes eligible
     assert(balanced.assign(tie,{1.2,1.6,1.6,0.2}) == 0);
     assert(balanced.assign({{CheckingId,1}},{0.2,1.6,1.6,1.2}) == 0); // unique match unchanged

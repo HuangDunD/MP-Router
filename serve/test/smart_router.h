@@ -337,11 +337,13 @@ public:
         metis_->init_node_nums(cfg.partition_nums);
         if (SYSTEM_MODE == 33) {
             seron_range_rules_ = std::make_unique<SeronColumnRules>(
-                ComputeNodeCount, SeronRangeHistogramBins);
+                ComputeNodeCount, SeronRangeHistogramBins,
+                SeronColumnRules::diagnostic_did_first_from_env(), SeronRangeUseExecutionTime);
         }
         if (uses_seron_page_delay()) {
             seron_conflicts_ = std::make_shared<SeronPageConflictTable>(
-                std::chrono::microseconds(SeronMaxDelayUs));
+                std::chrono::microseconds(SeronMaxDelayUs),
+                SYSTEM_MODE == 33 && SeronRuleConflictDetection);
             for (auto* queue : txn_queues_) queue->set_seron_conflicts(seron_conflicts_);
         }
         if (SYSTEM_MODE == 4) {
@@ -714,6 +716,7 @@ public:
     // ******************* METIS ******************
     // 执行分区操作，返回分区结果
     struct SmartRouterResult {
+        SeronColumnRules::Selection seron_selection;
         bool success = false;
         int smart_router_id = -1;
         std::string error_message;
@@ -1288,6 +1291,7 @@ public:
 
                         tx_id_t tx_id = txn_entry->tx_id;
                         int txn_type = txn_entry->txn_type;
+                        SeronColumnRules::Selection seron_selection;
 
                         // 获取 keys 和 table_ids（smallbank_ 的函数是线程安全的）
                         std::vector<itemkey_t> keys;
@@ -1404,6 +1408,7 @@ public:
                             SmartRouter::SmartRouterResult result = this->get_route_primary(txn_entry, const_cast<std::vector<table_id_t>&>(table_ids), keys, rw);
                             if(result.success) {
                                 routed_node_id = result.smart_router_id;
+                                seron_selection = result.seron_selection;
                                 if(SYSTEM_MODE == 3) txn_entry->txn_decision_type = result.sys_3_decision_type; 
                                 else if(SYSTEM_MODE == 8) txn_entry->txn_decision_type = result.sys_8_decision_type; 
                             }
@@ -1428,6 +1433,16 @@ public:
                             pending.txn = txn_entry;
                             pending.request.txn_id = txn_entry->tx_id;
                             pending.request.node = routed_node_id;
+                            if (SYSTEM_MODE == 33 && SeronRuleConflictDetection) {
+                                auto& rule = pending.request.rule_access;
+                                rule.rule = seron_selection.column;
+                                rule.high_conflict = seron_selection.risk > SeronRuleHighConflictThreshold;
+                                rule.write = rw.size() < keys.size() ||
+                                    std::any_of(rw.begin(), rw.end(), [](bool value) { return value; });
+                                rule.tables.assign(table_ids.begin(), table_ids.end());
+                                std::sort(rule.tables.begin(), rule.tables.end());
+                                rule.tables.erase(std::unique(rule.tables.begin(), rule.tables.end()), rule.tables.end());
+                            }
                             // Mode 32 uses these pages for PAR; mode 33 only uses them for delay.
                             for (size_t k = 0; k < keys.size(); ++k) {
                                 if (k >= table_ids.size() || k >= txn_entry->accessed_page_ids.size() ||

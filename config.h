@@ -25,6 +25,9 @@
 extern int SYSTEM_MODE; 
 extern int SeronMaxDelayUs; // modes 32/33: maximum page-conflict delay, in microseconds
 extern int SeronRangeHistogramBins; // mode 33 only: latency-weighted range histogram
+extern bool SeronRangeUseExecutionTime; // mode 33 only: use execution-time-weighted range histogram
+extern bool SeronRuleConflictDetection; // mode 33 only; false preserves page detection
+extern double SeronRuleHighConflictThreshold; // estimated conflict probability, [0,1]
 extern bool SmallBankPermuteKeys; // opt-in workload transform, independent of system mode
 extern uint64_t SmallBankKeyPermutationSeed;
 extern bool TPCCPermuteWarehouses; // opt-in warehouse-ID relabeling, independent of system mode

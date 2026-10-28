@@ -9,6 +9,7 @@
 #include <utility>
 #include <array>
 #include <iomanip>
+#include <cstdlib>
 
 // Independent per-column histograms. Physical samples rank matching rules;
 // they never supply the destination directly. No cross-table alignment is
@@ -24,7 +25,18 @@ class SeronColumnRules {
 public:
     using Predicate = seron_range::Predicate;
     using PhysicalValue = seron_tv::PhysicalValue;
-    explicit SeronColumnRules(int nodes, int bins) : nodes_(nodes), bins_(bins) {
+    struct Selection { int column = -1; double risk = 0.0; };
+    static bool diagnostic_did_first_from_env() {
+        const char* value = std::getenv("MP_ROUTER_SERON_DIAGNOSTIC_DID_FIRST");
+        if (!value || std::string(value) == "0") return false;
+        if (std::string(value) == "1") return true;
+        throw std::invalid_argument("MP_ROUTER_SERON_DIAGNOSTIC_DID_FIRST must be 0 or 1");
+    }
+    explicit SeronColumnRules(int nodes, int bins,
+                             bool diagnostic_did_first = diagnostic_did_first_from_env(),
+                             bool execution_time_weighted = true)
+        : nodes_(nodes), bins_(bins), diagnostic_did_first_(diagnostic_did_first),
+          execution_time_weighted_(execution_time_weighted) {
         columns_.resize(seron_range::Count);
         for (auto& count : selection_counts_) count.store(0, std::memory_order_relaxed);
     }
@@ -33,7 +45,7 @@ public:
                     std::vector<PhysicalValue> physical, bool complete = false) {
         auto c = std::make_unique<Column>();
         c->name = spec.table + "." + spec.column;
-        c->ranges = std::make_unique<SeronRangeRules>(spec.max_value, nodes_, bins_);
+        c->ranges = std::make_unique<SeronRangeRules>(spec.max_value, nodes_, bins_, execution_time_weighted_);
         c->physical = std::move(physical);
         std::stable_sort(c->physical.begin(), c->physical.end(), [](const auto& a, const auto& b) {
             return a.page != b.page ? a.page < b.page : a.offset < b.offset;
@@ -51,8 +63,8 @@ public:
         if (frozen_.load(std::memory_order_acquire)) return;
         std::map<size_t, std::vector<uint64_t>> values;
         for (const auto& p : predicates) if (columns_.at(p.column)) values[p.column].push_back(p.value);
-        // Each index-column histogram receives the query latency independently.
-        // Multiple predicates on that column divide that weight, not other columns.
+        // Each column observes its predicates independently. RangeRules either
+        // counts each key access or divides execution time over this column's keys.
         for (const auto& pair : values) columns_[pair.first]->ranges->observe(pair.second, latency_ms);
     }
     void freeze() {
@@ -62,7 +74,9 @@ public:
     }
     bool frozen() const { return frozen_.load(std::memory_order_acquire); }
     int assign(const std::vector<Predicate>& predicates,
-               const std::vector<double>& load_weights = {}, int txn_type = -1) const {
+               const std::vector<double>& load_weights = {}, int txn_type = -1,
+               Selection* selected = nullptr) const {
+        if (selected) *selected = Selection{};
         if (!load_weights.empty() && load_weights.size() != static_cast<size_t>(nodes_))
             throw std::invalid_argument("Seron load-weight dimensions do not match nodes");
         const auto rules = std::atomic_load(&published_);
@@ -75,6 +89,7 @@ public:
                 ++matches[destination(rule.boundaries, p.value)]; ++count;
             }
             if (count) {
+                if (selected) *selected = Selection{static_cast<int>(rule.column), rule.risk};
                 const size_t most = *std::max_element(matches.begin(), matches.end());
                 std::vector<int> candidates;
                 double best = -std::numeric_limits<double>::infinity();
@@ -96,6 +111,9 @@ public:
         const auto precision = out.precision();
         out << std::defaultfloat << std::setprecision(10);
         out << "=== Seron independent column rules (mode 33) ===\n"
+            << "  Rule tie policy: " << (diagnostic_did_first_
+                ? "DIAGNOSTIC district.d_id first among exactly equal scores (not default)"
+                : "default stable column order") << '\n'
             << "  Phase: " << (frozen() ? "frozen rules" : "initial rules") << '\n'
             << "  Ranking: physical-order TV / Monte Carlo page conflict rate (Sec. 5.1)\n"
             << "  Random walk: empirical starts, symmetric +/- step, reflecting value-domain boundaries\n"
@@ -204,11 +222,18 @@ private:
             const double r = risk(*columns_[i], bounds);
             rules->push_back({i, std::move(bounds), r});
         }
-        std::stable_sort(rules->begin(), rules->end(), [](const auto& a, const auto& b) { return a.risk < b.risk; });
+        std::stable_sort(rules->begin(), rules->end(), [this](const auto& a, const auto& b) {
+            if (a.risk != b.risk) return a.risk < b.risk;
+            if (diagnostic_did_first_)
+                return a.column == seron_range::DistrictId && b.column != seron_range::DistrictId;
+            return false;
+        });
         std::shared_ptr<const std::vector<RankedRule>> immutable = rules;
         std::atomic_store(&published_, immutable);
     }
     int nodes_, bins_;
+    bool diagnostic_did_first_ = false;
+    bool execution_time_weighted_ = true;
     std::vector<std::unique_ptr<Column>> columns_;
     std::shared_ptr<const std::vector<RankedRule>> published_;
     std::atomic<bool> frozen_{false};

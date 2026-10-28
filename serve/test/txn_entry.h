@@ -46,6 +46,7 @@ struct TxnQueueEntry {
     uint64_t first_exec_time = 0; // 判定为前面的依赖的事务还没执行完成, 稍微延后一会
     double fetch_time = 0.0; // 事务被从池中取出的时间
     double pool_enter_time = 0.0; // CLOCK_MONOTONIC ms: admitted to the transaction pool
+    double virtual_arrival_time = 0.0; // CLOCK_MONOTONIC ms: fixed-rate timeline assigned at pool dequeue
     double route_start_time = 0.0; // latency统计起点：本batch获准开始处理，不包含等待上一批释放队列
 
     // 拓扑图相关

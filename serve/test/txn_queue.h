@@ -14,6 +14,7 @@
 #include "config.h"
 #include "tit.h"
 #include "txn_entry.h"
+#include "virtual_arrival_clock.h"
 #include "seron_pending_queue.h"
 #include "Logger.h"
 
@@ -1315,7 +1316,9 @@ private:
 
 class MiniTxnPool{
 public:
-    MiniTxnPool(int max_pool_size, SlidingTransactionInforTable* tit) : max_pool_size_(max_pool_size), tit(tit){}
+    MiniTxnPool(int max_pool_size, SlidingTransactionInforTable* tit,
+                VirtualArrivalClock* arrival_clock = nullptr)
+        : max_pool_size_(max_pool_size), tit(tit), arrival_clock_(arrival_clock) {}
     ~MiniTxnPool() = default;
 
     void receive_txn_from_client(TxnQueueEntry* entry) {
@@ -1364,10 +1367,15 @@ public:
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
             double now_ms = ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+            const double arrival_first = arrival_clock_
+                ? arrival_clock_->reserve(batch_size, now_ms) : 0;
             for (int i = 0; i < batch_size; i++) {
                 TxnQueueEntry* entry = txn_pool_.front();
                 txn_pool_.pop_front();
                 entry->fetch_time = now_ms;
+                if (arrival_first > 0) {
+                    entry->virtual_arrival_time = arrival_first + i * arrival_clock_->interval_ms();
+                }
                 batch_txns->push_back(entry);
             }
         }
@@ -1406,6 +1414,7 @@ public:
     
 private:
     SlidingTransactionInforTable *tit; // pointer to the SlidingTransactionInforTable instance
+    VirtualArrivalClock* arrival_clock_;
 
     const int max_pool_size_; // batch process txn size 
     std::atomic<int> current_pool_size_{0};
@@ -1419,10 +1428,12 @@ private:
 // the txn pool, receive txns from clients and dispatch to txn queues of compute nodes
 class TxnPool {
 public:
-    TxnPool(int num_sub_pool, int max_pool_size, SlidingTransactionInforTable* tit):num_sub_pool_(num_sub_pool) {
+    TxnPool(int num_sub_pool, int max_pool_size, SlidingTransactionInforTable* tit,
+            double virtual_arrival_rate = 0)
+        : num_sub_pool_(num_sub_pool), arrival_clock_(virtual_arrival_rate) {
         pools = new MiniTxnPool*[num_sub_pool];
         for(int i = 0; i < num_sub_pool; i++){
-            pools[i] = new MiniTxnPool(max_pool_size, tit);
+            pools[i] = new MiniTxnPool(max_pool_size, tit, &arrival_clock_);
         }
     }
     ~TxnPool() = default;
@@ -1467,6 +1478,7 @@ public:
     
 private:
     int num_sub_pool_;
+    VirtualArrivalClock arrival_clock_; // shared across all sub-pools; never reset at window/warmup boundaries
     MiniTxnPool** pools; // 由于单个事务池的开销可能会很大, 这里做一个分区
     bool stop_ = false;
 };

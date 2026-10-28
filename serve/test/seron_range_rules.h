@@ -11,9 +11,9 @@
 #include <stdexcept>
 #include <vector>
 
-// Mode 33: a shared, aligned key-range rule learned from completed warmup
-// transactions. Each transaction contributes its DB execution time once,
-// divided equally over its predicate occurrences. No page IDs enter this rule.
+// Mode 33: a per-column key-range rule learned from completed warmup transactions.
+// Count mode adds one per key access. Legacy time mode divides each transaction's
+// execution time over its predicates on this column. No page IDs enter this rule.
 class SeronRangeRules {
 public:
     using Key = uint64_t;
@@ -21,11 +21,13 @@ public:
         std::vector<Key> boundaries; // [start, end), one interval per primary
         bool learned = false;
         uint64_t samples = 0;
+        uint64_t key_accesses = 0;
         double latency_ms = 0;
     };
 
-    SeronRangeRules(Key key_count, int nodes, int bins = 64)
-        : key_count_(key_count), nodes_(nodes) {
+    SeronRangeRules(Key key_count, int nodes, int bins = 64,
+                    bool execution_time_weighted = true)
+        : key_count_(key_count), nodes_(nodes), execution_time_weighted_(execution_time_weighted) {
         if (key_count == 0 || key_count == UINT64_MAX || nodes <= 0 || bins <= 0)
             throw std::invalid_argument("Invalid Seron range-rule dimensions");
         const size_t count = static_cast<size_t>(std::min<Key>(key_count, bins));
@@ -41,17 +43,20 @@ public:
     bool frozen() const { return frozen_.load(std::memory_order_acquire); }
 
     void observe(const std::vector<Key>& keys, double latency_ms) {
-        if (frozen() || keys.empty() || !std::isfinite(latency_ms) || latency_ms <= 0) return;
+        if (frozen() || keys.empty()) return;
+        const bool valid_time = std::isfinite(latency_ms) && latency_ms > 0;
+        if (execution_time_weighted_ && !valid_time) return;
         for (auto key : keys) validate(key);
         std::lock_guard<std::mutex> lock(mutex_);
         if (frozen()) return;
-        const double share = latency_ms / keys.size();
+        const double share = execution_time_weighted_ ? latency_ms / keys.size() : 1.0;
         for (auto key : keys) {
             const auto bin = std::upper_bound(edges_.begin(), edges_.end(), key) - edges_.begin() - 1;
             weights_[bin] += share;
         }
         ++samples_;
-        latency_ms_ += latency_ms;
+        key_accesses_ += keys.size();
+        if (valid_time) latency_ms_ += latency_ms;
     }
 
     // Publish an immutable rule once. Routing threads can continue concurrently;
@@ -61,6 +66,7 @@ public:
         if (frozen()) return;
         auto rule = std::make_shared<Rule>(*snapshot());
         rule->samples = samples_;
+        rule->key_accesses = key_accesses_;
         rule->latency_ms = latency_ms_;
         const double total = std::accumulate(weights_.begin(), weights_.end(), 0.0);
         if (total > 0) {
@@ -109,8 +115,13 @@ public:
         out << "=== Seron range rules (mode 33) ===\n"
             << "  Histogram bins: " << weights_.size() << "\n"
             << "  Warmup samples: " << rule->samples << "\n"
-            << "  Warmup DB execution weight (ms): " << rule->latency_ms << "\n"
-            << "  Rule source: " << (rule->learned ? "latency-weighted warmup" : "equal-width fallback (no samples)") << "\n";
+            << "  Histogram weighting: " << (execution_time_weighted_ ? "execution time" : "key-access count") << "\n"
+            << "  Warmup key accesses: " << rule->key_accesses << "\n"
+            << (execution_time_weighted_ ? "  Warmup DB execution weight (ms): " :
+                "  Warmup DB execution time (ms, diagnostic only): ") << rule->latency_ms << "\n"
+            << "  Rule source: " << (rule->learned ?
+                (execution_time_weighted_ ? "latency-weighted warmup" : "access-count warmup") :
+                "equal-width fallback (no samples)") << "\n";
         for (int n = 0; n < nodes_; ++n)
             out << "  N" << n << ": [" << rule->boundaries[n] << ", "
                 << rule->boundaries[n + 1] << ")\n";
@@ -122,11 +133,13 @@ private:
     }
     Key key_count_;
     int nodes_;
+    bool execution_time_weighted_;
     std::vector<Key> edges_;
     std::vector<double> weights_;
     std::shared_ptr<const Rule> rules_;
     std::atomic<bool> frozen_{false};
     std::mutex mutex_;
     uint64_t samples_ = 0;
+    uint64_t key_accesses_ = 0;
     double latency_ms_ = 0;
 };

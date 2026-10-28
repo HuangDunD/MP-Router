@@ -1,4 +1,5 @@
 #include "seron_range_rules.h"
+#include "seron_column_rules.h"
 #include "seron_pending_queue.h"
 #include <cassert>
 #include <iostream>
@@ -6,6 +7,31 @@
 #include <thread>
 
 int main() {
+    // Count-based cuts must be independent of execution duration.
+    SeronRangeRules count_a(100, 2, 10, false), count_b(100, 2, 10, false);
+    count_a.observe({1}, 90); count_a.observe({100}, 10);
+    count_b.observe({1}, 1); count_b.observe({100}, 9999);
+    count_a.freeze(); count_b.freeze();
+    assert(count_a.snapshot()->boundaries == count_b.snapshot()->boundaries);
+    assert(count_a.snapshot()->boundaries[1] == 11);
+    SeronRangeRules key_counts(100, 2, 10, false);
+    key_counts.observe({1, 1, 100}, 0); // each occurrence counts, including zero-time observations
+    key_counts.freeze();
+    assert(key_counts.snapshot()->samples == 1 && key_counts.snapshot()->key_accesses == 3);
+    assert(key_counts.snapshot()->boundaries[1] == 9);
+    std::ostringstream count_log;
+    key_counts.print(count_log);
+    assert(count_log.str().find("Rule source: access-count warmup") != std::string::npos);
+    assert(count_log.str().find("Warmup DB execution weight") == std::string::npos);
+    SeronColumnRules columns(2, 10, false, false);
+    auto specs = seron_range::specs(100, 1, 1, 1);
+    columns.add_column(seron_range::CheckingId, specs[seron_range::CheckingId], {});
+    columns.prepare();
+    columns.observe({{seron_range::CheckingId, 1}}, 90);
+    columns.observe({{seron_range::CheckingId, 100}}, 10);
+    columns.freeze();
+    assert(columns.column_snapshot(seron_range::CheckingId)->boundaries == count_a.snapshot()->boundaries);
+
     SeronRangeRules uniform(100, 4, 10);
     assert(uniform.assign({1}) == 0 && uniform.assign({25}) == 0);
     assert(uniform.assign({26}) == 1 && uniform.assign({100}) == 3);

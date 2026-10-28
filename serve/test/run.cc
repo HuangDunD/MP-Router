@@ -153,6 +153,7 @@ struct thread_params
     std::vector<double> *latency_record = nullptr; // pointer to the latency record vector
     std::vector<double> *fetch_latency_record = nullptr; // pointer to the fetch latency record vector
     std::vector<double> *complete_latency_record = nullptr; // pool admission to completion
+    std::vector<double> *virtual_arrival_latency_record = nullptr;
 
     SmartRouter* smart_router = nullptr; // pointer to the smart router
     SlidingTransactionInforTable* tit = nullptr;  // pointer to the global transaction information table
@@ -859,6 +860,9 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
                 if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
                     params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
                 }
+                if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
+                    params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
+                }
                 if (params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -1135,6 +1139,9 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                 if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
                     params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
                 }
+                if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
+                    params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
+                }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -1405,6 +1412,9 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
                 if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
                     params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
                 }
+                if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
+                    params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
+                }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -1505,6 +1515,9 @@ void run_mysql_ycsb_txns_sp(thread_params* params, Logger* logger_) {
                 double latency_start_ms = latency_start_time_ms(txn_entry);
                 if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
                     params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
+                }
+                if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
+                    params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
                 }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
@@ -1617,6 +1630,9 @@ void run_mysql_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                 double latency_start_ms = latency_start_time_ms(txn_entry);
                 if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
                     params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
+                }
+                if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
+                    params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
                 }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
@@ -1898,6 +1914,9 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
                 if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
                     params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
                 }
+                if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
+                    params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
+                }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -2029,7 +2048,10 @@ void print_usage(const char* program_name) {
     std::cout << "  --system-mode <mode>        System mode (0=random node, 1=account-based, 2=page-based) [default: 0]" << std::endl;
     std::cout << "                              32=Seron page-conflict delay with PAR assignment" << std::endl;
     std::cout << "                              33=independent column-range rules + page-conflict delay" << std::endl;
+    std::cout << "  --virtual-arrival-rate <TPS> Fixed-rate latency timeline; 0 disables it (no pacing)" << std::endl;
     std::cout << "  --seron-max-delay-us <us>   Modes 32/33 conflict-delay limit; 0 disables waiting [default: " << SeronMaxDelayUs << "]" << std::endl;
+    std::cout << "  --seron-conflict-detection <page|rule>  Mode 33 only; default page" << std::endl;
+    std::cout << "  --seron-rule-high-conflict-threshold <0..1>  Rule detection threshold; default 0.10" << std::endl;
     std::cout << "  --access-pattern <pattern>  Data access pattern (0=uniform, 1=zipfian, 2=hotspot) [default: 0]" << std::endl;
     std::cout << "  --tpcc-partition-warehouses Partition TPC-C warehouse table by w_id ranges [default: off]" << std::endl;
     std::cout << "  --zipfian-theta <theta>     Zipfian parameter: legacy theta [0,1), finite exponent >= 0 [default: 0.99]" << std::endl;
@@ -2557,6 +2579,9 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                 if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
                     params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
                 }
+                if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
+                    params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
+                }
                 if(params->fetch_latency_record && latency_start_ms > 0) {
                      params->fetch_latency_record->push_back(current_time_ms - latency_start_ms);
                 }
@@ -2657,6 +2682,7 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
 }
 
 int main(int argc, char *argv[]) {
+    double virtual_arrival_rate = 0; // TPS; measurement only, zero disables it
     // Tee std::cout/std::cerr to both console and output.txt for easy collection
     static std::ofstream output_file("result.txt", std::ios::out | std::ios::trunc);
     static TeeBuf cout_tbuf(std::cout.rdbuf(), output_file.rdbuf());
@@ -2736,6 +2762,42 @@ int main(int argc, char *argv[]) {
             } else {
                 std::cerr << "Error: --system-mode requires a value" << std::endl;
                 print_usage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--seron-conflict-detection") {
+            if (i + 1 >= argc) return -1;
+            const std::string value = argv[++i];
+            if (value != "page" && value != "rule") {
+                std::cerr << "Seron conflict detection must be page or rule" << std::endl;
+                return -1;
+            }
+            SeronRuleConflictDetection = value == "rule";
+        }
+        else if (arg == "--seron-rule-high-conflict-threshold") {
+            if (i + 1 >= argc) return -1;
+            try {
+                const std::string value = argv[++i];
+                size_t parsed = 0;
+                const double threshold = std::stod(value, &parsed);
+                if (parsed != value.size() || !std::isfinite(threshold) || threshold < 0 || threshold > 1)
+                    throw std::invalid_argument("threshold");
+                SeronRuleHighConflictThreshold = threshold;
+            } catch (const std::exception&) {
+                std::cerr << "Seron rule threshold must be in [0,1]" << std::endl;
+                return -1;
+            }
+        }
+        else if (arg == "--virtual-arrival-rate") {
+            if (i + 1 >= argc) return -1;
+            try {
+                const std::string value = argv[++i];
+                size_t parsed = 0;
+                virtual_arrival_rate = std::stod(value, &parsed);
+                if (parsed != value.size() || !std::isfinite(virtual_arrival_rate) || virtual_arrival_rate < 0)
+                    throw std::invalid_argument("rate");
+            } catch (const std::exception&) {
+                std::cerr << "Virtual arrival rate must be finite and nonnegative (TPS)" << std::endl;
                 return -1;
             }
         }
@@ -3410,6 +3472,11 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+    if (SeronRuleConflictDetection && SYSTEM_MODE != 33) {
+        std::cerr << "Rule conflict detection is only supported in mode 33." << std::endl;
+        return -1;
+    }
+
     // Display current configuration
     std::cout << "\n=== Configuration ===" << std::endl;
     std::cout << "Workload: ";
@@ -3503,7 +3570,13 @@ int main(int argc, char *argv[]) {
             std::cerr << "Mode 33 requires PostgreSQL/KES stored procedures, DB execution, a key-page map, and positive histogram bins." << std::endl;
             return -1;
         }
-        std::cout << "Seron range-rule assignment + page-conflict delay" << std::endl;
+        std::cout << "Seron range-rule assignment + "
+                  << (SeronRuleConflictDetection ? "rule" : "page") << "-conflict delay" << std::endl;
+        if (SeronRuleConflictDetection) {
+            std::cout << "Seron rule high-conflict threshold: " << SeronRuleHighConflictThreshold
+                      << " (implementation choice); short-query bypass: disabled" << std::endl;
+            std::cout << "Seron rule conflicts: same high-risk rule across nodes, or distinct rules on overlapping tables; independent columns, no inferred FK/correlation groups" << std::endl;
+        }
         std::cout << "Seron maximum conflict delay: " << SeronMaxDelayUs << " us" << std::endl;
         std::cout << "Seron connector claim batch limit: " << BatchExecutorPOPTxnSize << std::endl;
         std::cout << "Seron range histogram bins: " << SeronRangeHistogramBins << std::endl;
@@ -4048,7 +4121,8 @@ int main(int argc, char *argv[]) {
     const size_t tit_table_size = std::max<size_t>(1000000, estimated_inflight_txns * 2);
     std::cout << "TIT table size: " << tit_table_size << std::endl;
     SlidingTransactionInforTable* tit = new SlidingTransactionInforTable(logger_, tit_table_size);
-    TxnPool* txn_pool = new TxnPool(4, TxnPoolMaxSize, tit);
+    std::cout << "Virtual arrival rate (TPS): " << virtual_arrival_rate << std::endl;
+    TxnPool* txn_pool = new TxnPool(4, TxnPoolMaxSize, tit, virtual_arrival_rate);
     auto shared_txn_queue = new SharedTxnQueue(tit, logger_, TxnQueueMaxSize);
     auto pending_txn_queue = new PendingTxnSet(tit, logger_);
     // initialize the transaction queues for each compute node connection
@@ -4250,11 +4324,14 @@ int main(int argc, char *argv[]) {
     std::vector<std::vector<double>> worker_latencies(ComputeNodeCount * worker_threads);
     std::vector<std::vector<double>> worker_fetch_latencies(ComputeNodeCount * worker_threads);
     std::vector<std::vector<double>> worker_complete_latencies(ComputeNodeCount * worker_threads);
+    std::vector<std::vector<double>> worker_virtual_arrival_latencies(ComputeNodeCount * worker_threads);
     // pre-reserve some space to avoid frequent reallocations, e.g. 1M per thread
     if (!router_only) {
         for(auto& v : worker_latencies) v.reserve(1000000);
         for(auto& v : worker_fetch_latencies) v.reserve(1000000);
         for(auto& v : worker_complete_latencies) v.reserve(1000000);
+        if (virtual_arrival_rate > 0)
+            for(auto& v : worker_virtual_arrival_latencies) v.reserve(1000000);
     }
 
     std::vector<std::thread> db_conn_threads;
@@ -4267,6 +4344,7 @@ int main(int argc, char *argv[]) {
             params->latency_record = &worker_latencies[i * worker_threads + j];
             params->fetch_latency_record = &worker_fetch_latencies[i * worker_threads + j];
             params->complete_latency_record = &worker_complete_latencies[i * worker_threads + j];
+            params->virtual_arrival_latency_record = &worker_virtual_arrival_latencies[i * worker_threads + j];
             params->smallbank = smallbank;
             params->ycsb = ycsb;
             params->tpcc = tpcc;
@@ -4467,7 +4545,8 @@ int main(int argc, char *argv[]) {
     std::cout << "Router-only benchmark: " << (router_only ? "yes" : "no") << std::endl;
     if (SYSTEM_MODE == 33) smart_router->print_seron_rule_diagnostics();
     if (uses_seron_page_delay()) {
-        std::cout << "=== Seron page-conflict delay (measurement interval) ===" << std::endl;
+        std::cout << "=== Seron " << (SYSTEM_MODE == 33 && SeronRuleConflictDetection ? "rule" : "page")
+                  << "-conflict delay (measurement interval) ===" << std::endl;
         std::cout << "  Active interval: connector batch claim to completion" << std::endl;
         std::cout << "  Maximum delay (us): " << SeronMaxDelayUs << std::endl;
         std::cout << "  Admitted transactions: " << seron_end.admitted - seron_begin.admitted << std::endl;
@@ -4665,6 +4744,30 @@ int main(int argc, char *argv[]) {
         std::cout << "  P99: " << p99 << " ms" << std::endl;
     } else {
         std::cout << "No transactions recorded after warmup for complete latency stats." << std::endl;
+    }
+
+    if (virtual_arrival_rate > 0) {
+        std::vector<double> latencies;
+        size_t count = 0;
+        for (const auto& v : worker_virtual_arrival_latencies) count += v.size();
+        latencies.reserve(count);
+        for (const auto& v : worker_virtual_arrival_latencies)
+            latencies.insert(latencies.end(), v.begin(), v.end());
+        std::cout << "Virtual-Arrival-to-Complete Latency Statistics (After Warmup):" << std::endl;
+        std::cout << "  Arrival rate: " << virtual_arrival_rate << " TPS" << std::endl;
+        std::cout << "  Samples: " << count << std::endl;
+        if (!latencies.empty()) {
+            std::sort(latencies.begin(), latencies.end());
+            double sum = 0;
+            for (double latency : latencies) sum += latency;
+            std::cout << "  Average: " << sum / count << " ms" << std::endl;
+            std::cout << "  P50: " << latencies[static_cast<size_t>(count * 0.50)] << " ms" << std::endl;
+            std::cout << "  P95: " << latencies[static_cast<size_t>(count * 0.95)] << " ms" << std::endl;
+            std::cout << "  P99: " << latencies[static_cast<size_t>(count * 0.99)] << " ms" << std::endl;
+            const auto negative = std::lower_bound(latencies.begin(), latencies.end(), 0.0) - latencies.begin();
+            if (negative > 0)
+                std::cout << "  Negative samples: " << negative << " (completion before virtual arrival)" << std::endl;
+        }
     }
 
     // Generate performance report, file name inluding the timestamp
