@@ -1,5 +1,6 @@
 #include "tpcc.h"
 #include "account_key_permutation.h"
+#include "tpcc_warehouse_load_order.h"
 #include <iostream>
 #include <algorithm>
 #include <chrono>
@@ -651,11 +652,22 @@ void TPCC::load_data() {
         std::cout << "Loading Warehouses in parallel..." << std::endl;
         int wh_threads_count = std::min(num_warehouses_, 10); 
         if (wh_threads_count < 1) wh_threads_count = 1;
+        TPCCWarehouseLoadOrder warehouse_order(num_warehouses_, wh_threads_count,
+            TPCCShuffleWarehouseLoad, TPCCWarehouseLoadSeed);
+        std::cout << "Warehouse load policy: "
+                  << (TPCCShuffleWarehouseLoad ? "shuffled whole-warehouse tasks" : "legacy strided workers")
+                  << std::endl;
+        if (TPCCShuffleWarehouseLoad) {
+            std::cout << "Warehouse load seed: " << TPCCWarehouseLoadSeed
+                      << " (mt19937_64-fisher-yates-v1)\nWarehouse load claim order:";
+            for (int warehouse : warehouse_order.order()) std::cout << ' ' << warehouse;
+            std::cout << "\nConcurrent start/completion order and physical page layout may differ." << std::endl;
+        }
         
         std::vector<std::thread> wh_threads;
         
         for (int i = 0; i < wh_threads_count; ++i) {
-            wh_threads.emplace_back([i, wh_threads_count, this]() {
+            wh_threads.emplace_back([i, &warehouse_order, this]() {
                 pqxx::connection c(DBConnection[0]);
                 if (!c.is_open()) {
                     std::cerr << "Failed to connect to database for warehouse loading." << std::endl;
@@ -663,7 +675,7 @@ void TPCC::load_data() {
                 }
                 try {
                     pqxx::nontransaction txn(c);
-                    for (int w = i + 1; w <= num_warehouses_; w += wh_threads_count) {
+                    for (int w = warehouse_order.next(i); w != 0; w = warehouse_order.next(i)) {
                         std::cout << "Loading Warehouse " << w << "..." << std::endl;
                         load_warehouse(txn, w);
                         load_stock(txn, w);

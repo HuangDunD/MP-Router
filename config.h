@@ -29,6 +29,9 @@ extern bool SmallBankPermuteKeys; // opt-in workload transform, independent of s
 extern uint64_t SmallBankKeyPermutationSeed;
 extern bool TPCCPermuteWarehouses; // opt-in warehouse-ID relabeling, independent of system mode
 extern uint64_t TPCCWarehousePermutationSeed;
+extern bool TPCCShuffleWarehouseLoad;
+extern uint64_t TPCCWarehouseLoadSeed;
+extern bool TPCCRoutingDiagnostics; // default off; mode11 observation only
 inline bool uses_seron_page_delay() { return SYSTEM_MODE == 32 || SYSTEM_MODE == 33; }
 
 // 定义数据库类型 0: PostgreSQL 1: YashanDB 2: MySQL

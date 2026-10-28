@@ -1,6 +1,7 @@
 // Copyright 2025
 // Author: huangdund
 #include <iostream>
+#include "tpcc_routing_diagnostics.h"
 #include <pqxx/pqxx> // PostgreSQL C++ library
 #include <chrono>
 #include <vector>
@@ -2035,6 +2036,8 @@ void print_usage(const char* program_name) {
     std::cout << "  --zipfian-generator <mode>  Zipfian generator (legacy, finite) [default: legacy]" << std::endl;
     std::cout << "  --smallbank-key-permutation-seed <seed>  Enable deterministic account-ID permutation (all modes; default: off)" << std::endl;
     std::cout << "  --tpcc-warehouse-permutation-seed <seed>  Enable deterministic warehouse-ID permutation (all modes; default: off)" << std::endl;
+    std::cout << "  --tpcc-warehouse-load-seed <seed>  Shuffle whole-warehouse loading tasks (default: off)" << std::endl;
+    std::cout << "  --tpcc-routing-diagnostics  Record mode11 TPC-C window assignments and planning decisions [default: off]" << std::endl;
     std::cout << "  --hotspot-fraction <frac>   Fraction of hot accounts (0.0-1.0) [default: 0.1]" << std::endl;
     std::cout << "  --hotspot-prob <prob>       Probability of accessing hot accounts (0.0-1.0) [default: 0.8]" << std::endl;
     std::cout << "  --ycsb-read-pct <pct>       YCSB read percentage: per-op probability in random mode, fixed count in fixed mode (0-100) [default: 90]" << std::endl;
@@ -2808,6 +2811,9 @@ int main(int argc, char *argv[]) {
                 return -1;
             }
         }
+        else if (arg == "--tpcc-routing-diagnostics") {
+            TPCCRoutingDiagnostics = true;
+        }
         else if (arg == "--tpcc-warehouse-permutation-seed") {
             try {
                 if (i + 1 >= argc) throw std::invalid_argument("missing seed");
@@ -2820,6 +2826,21 @@ int main(int argc, char *argv[]) {
                 TPCCPermuteWarehouses = true;
             } catch (const std::exception&) {
                 std::cerr << "Error: --tpcc-warehouse-permutation-seed requires a uint64 seed" << std::endl;
+                return -1;
+            }
+        }
+        else if (arg == "--tpcc-warehouse-load-seed") {
+            try {
+                if (i + 1 >= argc) throw std::invalid_argument("missing seed");
+                const std::string value = argv[++i];
+                if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos)
+                    throw std::invalid_argument("seed");
+                size_t parsed = 0;
+                TPCCWarehouseLoadSeed = std::stoull(value, &parsed);
+                if (parsed != value.size()) throw std::invalid_argument("seed");
+                TPCCShuffleWarehouseLoad = true;
+            } catch (const std::exception&) {
+                std::cerr << "Error: --tpcc-warehouse-load-seed requires a uint64 seed" << std::endl;
                 return -1;
             }
         }
@@ -3552,11 +3573,23 @@ int main(int argc, char *argv[]) {
         std::cout << "SmallBank key permutation seed: " << SmallBankKeyPermutationSeed
                   << " (feistel6-cyclewalk-v1; post-permutation account ordering)" << std::endl;
     SmallBank* smallbank = nullptr;
+    if (TPCCRoutingDiagnostics && (SYSTEM_MODE != 11 || (Workload_Type != 2 && Workload_Type != 3))) {
+        std::cerr << "TPC-C routing diagnostics require mode11 and a TPC-C workload." << std::endl;
+        return -1;
+    }
+    std::cout << "TPC-C routing diagnostics: " << (TPCCRoutingDiagnostics ? "enabled" : "disabled") << std::endl;
     if (TPCCPermuteWarehouses && Workload_Type != 2 && Workload_Type != 3) {
         std::cerr << "Warehouse-ID permutation supports TPC-C only." << std::endl;
         return -1;
     }
+    if (TPCCShuffleWarehouseLoad && Workload_Type != 2 && Workload_Type != 3) {
+        std::cerr << "Warehouse load shuffle supports TPC-C only." << std::endl;
+        return -1;
+    }
     if (Workload_Type == 2 || Workload_Type == 3) {
+        std::cout << "TPC-C warehouse load shuffle: " << (TPCCShuffleWarehouseLoad ? "enabled" : "disabled") << std::endl;
+        if (TPCCShuffleWarehouseLoad)
+            std::cout << "TPC-C warehouse load seed: " << TPCCWarehouseLoadSeed << std::endl;
         std::cout << "TPC-C warehouse permutation: " << (TPCCPermuteWarehouses ? "enabled" : "disabled") << std::endl;
         if (TPCCPermuteWarehouses)
             std::cout << "TPC-C warehouse permutation seed: " << TPCCWarehousePermutationSeed
@@ -4396,6 +4429,13 @@ int main(int argc, char *argv[]) {
 
     auto end = std::chrono::high_resolution_clock::now();
     auto metrics_end = time_based_run ? measurement_end_time : end;
+    if (TPCCRoutingDiagnostics) {
+        // Snapshot fully scheduled windows; no measurement-time file I/O.
+        // The existing mode11 router is detached, so an in-flight final window
+        // may be excluded. Closing the collector makes that boundary explicit.
+        tpcc_diagnostics::collector().write("tpcc_window_assignments.csv", "tpcc_plan_decisions.csv");
+        std::cout << "TPC-C routing diagnostics written (windows starting after warmup; assignments, not completions)." << std::endl;
+    }
     double ms = std::chrono::duration_cast<std::chrono::milliseconds>(metrics_end - start).count();
 
     // Create a performance snapshot after running transactions
@@ -4414,6 +4454,7 @@ int main(int argc, char *argv[]) {
     std::cout << "\n=== Performance Report ===" << std::endl;
     std::cout << "System mode: " << SYSTEM_MODE << " !!!" << std::endl;
     std::cout << "Router-only benchmark: " << (router_only ? "yes" : "no") << std::endl;
+    if (SYSTEM_MODE == 33) smart_router->print_seron_rule_diagnostics();
     if (uses_seron_page_delay()) {
         std::cout << "=== Seron page-conflict delay (measurement interval) ===" << std::endl;
         std::cout << "  Active interval: connector batch claim to completion" << std::endl;

@@ -2,6 +2,7 @@
 #include <cassert>
 #include <iostream>
 #include <thread>
+#include <sstream>
 
 int main() {
     using namespace seron_range;
@@ -25,6 +26,43 @@ int main() {
     tpcc_rules.prepare();
     // A warehouse predicate cannot override a better-ranked item predicate.
     assert(tpcc_rules.assign({{DistrictWarehouse,1},{StockItem,10000}}) == 1);
+
+    // Explicit synthetic layout counterexample, not a benchmark measurement:
+    // mixed-warehouse stock pages versus physically grouped item IDs.
+    // Reverse the layouts as a control: selection must then reverse too.
+    const std::vector<Predicate> new_order{{StockWarehouse,1},{ItemId,10000}};
+    for (bool mixed_stock : {true, false}) {
+        SeronColumnRules layout(2,4);
+        layout.add_column(StockWarehouse,s[StockWarehouse], mixed_stock ?
+            std::vector<SeronColumnRules::PhysicalValue>{{1,1},{1,4},{2,1},{2,4}} :
+            std::vector<SeronColumnRules::PhysicalValue>{{1,1},{1,1},{2,4},{2,4}});
+        layout.add_column(ItemId,s[ItemId], mixed_stock ?
+            std::vector<SeronColumnRules::PhysicalValue>{{1,1},{1,2},{2,9999},{2,10000}} :
+            std::vector<SeronColumnRules::PhysicalValue>{{1,1},{1,10000},{2,2},{2,9999}});
+        layout.prepare();
+        assert(layout.assign(new_order,{},0) == (mixed_stock ? 1 : 0));
+        layout.freeze(); // no observations: equal-width boundaries unchanged
+        assert(layout.assign(new_order,{},0) == (mixed_stock ? 1 : 0));
+        std::ostringstream log;
+        log << std::fixed << std::setprecision(2);
+        layout.print(log);
+        assert(log.precision() == 2 && (log.flags() & std::ios::fixed));
+        layout.print_selection_counts(log,true);
+        const auto rule = mixed_stock ? "item.i_id" : "stock.s_w_id";
+        assert(log.str().find(std::string("txn=NewOrder rule=")+rule+" assigned=1") != std::string::npos);
+        assert(log.str().find("ordered_pairs=4 cross_interval_pairs=4") != std::string::npos);
+        assert(log.str().find("ordered_pairs=4 cross_interval_pairs=0") != std::string::npos);
+        std::cout << "Synthetic layout: " << (mixed_stock ? "mixed stock / grouped item" : "grouped stock / mixed item") << '\n'
+                  << log.str();
+    }
+
+    SeronColumnRules unsupported(2,4);
+    unsupported.add_column(ItemId,s[ItemId],{{1,1},{2,10000}});
+    unsupported.prepare();
+    std::ostringstream insufficient;
+    unsupported.print(insufficient);
+    assert(insufficient.str().find("conflict_rate=1") != std::string::npos);
+    assert(insufficient.str().find("pair_supported_pages=0") != std::string::npos);
 
     SeronColumnRules balanced(4,10);
     balanced.add_column(CheckingId,s[CheckingId],{});

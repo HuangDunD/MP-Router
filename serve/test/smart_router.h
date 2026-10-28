@@ -1983,6 +1983,10 @@ public:
     void join_seron_router() {
         if (seron_router_thread_.joinable()) seron_router_thread_.join();
     }
+    void print_seron_rule_diagnostics() const {
+        if (seron_range_rules_)
+            seron_range_rules_->print_selection_counts(std::cout, Workload_Type == 2 || Workload_Type == 3);
+    }
 
 private:
     std::shared_ptr<SeronPageConflictTable> seron_conflicts_;

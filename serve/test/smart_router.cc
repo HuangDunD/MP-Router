@@ -1,5 +1,6 @@
 #include "smart_router.h"
 #include "indexed_priority_queue.h"
+#include "tpcc_routing_diagnostics.h"
 
 #include <numeric>
 #include <map>
@@ -222,7 +223,7 @@ SmartRouter::SmartRouterResult SmartRouter::get_route_primary(TxnQueueEntry* txn
 
     if (SYSTEM_MODE == 33) {
         result.smart_router_id = seron_range_rules_->assign(
-            seron_range_predicates(txn), load_total_balance_penalty_weights());
+            seron_range_predicates(txn), load_total_balance_penalty_weights(), txn->txn_type);
         // Preserve the page observations and completion feedback used by mode 32,
         // but do not consult/update PAR's graph or ownership when choosing a node.
         for (size_t i = 0; i < keys.size(); ++i) lookup(txn, table_ids[i], keys[i]);
@@ -2945,6 +2946,19 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     clock_gettime(CLOCK_MONOTONIC, &entry_setup_start);
     auto& txn_batch = prepared.txn_batch;
     auto& candidates = prepared.candidates;
+    const bool diagnose = TPCCRoutingDiagnostics && SYSTEM_MODE == 11 &&
+        (Workload_Type == 2 || Workload_Type == 3) && WarmupEnd;
+    tpcc_diagnostics::Window diagnostic_window;
+    std::vector<tpcc_diagnostics::TxnIdentity> diagnostic_identities;
+    if (diagnose) {
+        diagnostic_window.id = batch_id + 1; // advanced below before dispatch
+        diagnostic_window.transactions = candidates.size();
+        diagnostic_identities.reserve(candidates.size());
+        // Copy before dispatch: transaction objects can be reclaimed by connectors.
+        for (const auto& c : candidates)
+            diagnostic_identities.push_back({c.txn->tx_id,
+                static_cast<int>(c.txn->tpcc_params.at(0)), c.txn->txn_type});
+    }
     auto& txid_to_txn_map = prepared.txid_to_txn_map;
     auto& conflicted_txns = prepared.conflicted_txns;
     auto& global_conflicted_txns = prepared.global_conflicted_txns;
@@ -3908,6 +3922,7 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     std::atomic<int> dependency_group_id_source{1};
     std::vector<double> conflict_worker_wall_ms(thread_count, 0.0);
     std::vector<double> conflict_worker_backpressure_sleep_ms(thread_count, 0.0);
+    if (diagnose) diagnostic_window.plans.resize(thread_count);
     for (size_t t = 0; t < thread_count; ++t) {
         // Resize the local vector for this thread
         local_ownership_ok_txn_queues_list[t].resize(ComputeNodeCount);
@@ -3928,7 +3943,8 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                                             &prior_dag_push_txn_cnt, &prior_dag_push_max_batch_size,
                                             &conflict_transfer_plan_cnt, &conflict_transfer_page_cnt,
                                             &conflict_worker_wall_ms, &conflict_worker_backpressure_sleep_ms,
-                                            &update_atomic_max]() {
+                                            &update_atomic_max, diagnose, &diagnostic_window,
+                                            &diagnostic_identities]() {
             struct timespec worker_start_time, worker_end_time;
             clock_gettime(CLOCK_MONOTONIC, &worker_start_time);
             double queue_backpressure_sleep_ms = 0.0;
@@ -4257,6 +4273,8 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                 int min_txn_count = INT32_MAX;
                 int max_txn_count = -1;
 
+                const bool diagnostic_reused = diagnose && now_plan_trans_txn < op && last_selected_node != -1;
+
                 if(now_plan_trans_txn < op && last_selected_node != -1) {
                     // 减少碎片
                     min_txn_node = last_selected_node;
@@ -4321,6 +4339,25 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                 
                 if(selected_candidate_txn->is_scheduled) {
                     continue;
+                }
+
+                if (diagnose) {
+                    const auto identity = diagnostic_identities.at(selected_candidate_txn->batch_dense_id);
+                    if (identity.type == 0 || identity.type == 1) {
+                        auto& records = diagnostic_window.plans[t];
+                        tpcc_diagnostics::Plan record{identity, records.size(), min_txn_node,
+                            static_cast<int>(selected_candidate_txn->involved_pages.size()),
+                            diagnostic_reused, {}};
+                        record.nodes.reserve(ComputeNodeCount);
+                        for (int node=0; node<ComputeNodeCount; ++node) {
+                            // Record the exact cached load values used by selection.
+                            // For reused-node steps these intentionally remain stale.
+                            record.nodes.push_back({selected_candidate_txn->ownership_node_count[node],
+                                queue_sizes[node], workloads[node]-queue_sizes[node], workloads[node],
+                                selected_candidate_txn->node_benefit_map[node]});
+                        }
+                        records.push_back(std::move(record));
+                    }
                 }
                 
                 double max_benefit_score = best_benefit;
@@ -5342,6 +5379,14 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
 
     // Join workers
     for(auto& fut : futs) fut.get();
+    if (diagnose) {
+        for (size_t i=0; i<candidates.size(); ++i) {
+            const auto& identity = diagnostic_identities[i];
+            if (identity.type == 0 || identity.type == 1)
+                ++diagnostic_window.assigned[{identity.warehouse, identity.type, candidates[i].will_route_node}];
+        }
+        tpcc_diagnostics::collector().append(std::move(diagnostic_window));
+    }
     if (!conflict_worker_wall_ms.empty()) {
         const auto critical_worker = std::max_element(
             conflict_worker_wall_ms.begin(), conflict_worker_wall_ms.end());

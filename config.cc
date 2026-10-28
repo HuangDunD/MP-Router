@@ -46,6 +46,9 @@ bool SmallBankPermuteKeys = false;
 uint64_t SmallBankKeyPermutationSeed = 42;
 bool TPCCPermuteWarehouses = false;
 uint64_t TPCCWarehousePermutationSeed = 42;
+bool TPCCShuffleWarehouseLoad = false;
+uint64_t TPCCWarehouseLoadSeed = 42;
+bool TPCCRoutingDiagnostics = false;
 
 
 // global variables
