@@ -312,7 +312,7 @@ void TPCC::create_table(pqxx::connection *conn) {
                 w_tax DECIMAL(4,4),
                 w_ytd DECIMAL(12,2),
                 w_padding VARCHAR(1000)
-            ) WITH (FILLFACTOR = 20);
+            ) WITH (FILLFACTOR = 40);
             )SQL");
             txn.exec("ALTER TABLE warehouse ALTER COLUMN w_padding SET STORAGE PLAIN");
         }
@@ -332,7 +332,7 @@ void TPCC::create_table(pqxx::connection *conn) {
                 d_next_o_id INT,
                 d_padding VARCHAR(1000),
                 PRIMARY KEY (d_w_id, d_id)
-            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (d_w_id);" : "WITH (FILLFACTOR = 20);"));
+            ) )SQL" + std::string(TPCCPartitionWarehouses ? "PARTITION BY RANGE (d_w_id);" : "WITH (FILLFACTOR = 40);"));
         txn.exec("ALTER TABLE district ALTER COLUMN d_padding SET STORAGE PLAIN");
         create_warehouse_range_partitions("district", 20);
 
@@ -621,7 +621,7 @@ void TPCC::load_data() {
     try {
         // 1. Load Items in parallel
         std::cout << "Loading Items in parallel..." << std::endl;
-        int item_threads_count = 10; 
+        int item_threads_count = 1; 
         std::vector<std::thread> item_threads;
         int items_per_thread = item_count() / item_threads_count;
         
