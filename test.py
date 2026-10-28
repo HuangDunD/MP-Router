@@ -1004,6 +1004,7 @@ def build_case_plan():
             case_config.get("mlp_enabled"),
             case_config.get("smallbank_key_permutation_seed"),
             case_config.get("tpcc_warehouse_permutation_seed"),
+            case_config.get("tpcc_warehouse_load_seed"),
             run_mode,
         )
 
@@ -1022,6 +1023,13 @@ def build_case_plan():
                 case_config["tpcc_warehouse_permutation_seed"] = (
                     TPCCWarehousePermutationSeed if workload_name in ("tpcc", "tpcc-standard") else None
                 )
+                case_config["tpcc_warehouse_load_seed"] = (
+                    TPCCWarehouseLoadSeed
+                    if TPCCShuffleWarehouseLoad and workload_name in ("tpcc", "tpcc-standard") else None
+                )
+                load_seed = case_config["tpcc_warehouse_load_seed"]
+                if load_seed is not None and (not isinstance(load_seed, int) or not 0 <= load_seed <= 2**64 - 1):
+                    raise ValueError("TPCCWarehouseLoadSeed must be a uint64")
                 group_key = case_group_key(case_config)
                 if group_key not in case_group_ids:
                     case_group_id += 1
@@ -1057,6 +1065,8 @@ def build_case_plan():
                     )
                     if case.get("tpcc_partition_warehouses"):
                         case["data_cache_path"] += "_whpart"
+                    if case.get("tpcc_warehouse_load_seed") is not None:
+                        case["data_cache_path"] += f"_whload{case['tpcc_warehouse_load_seed']}"
                     if is_mlp_delta:
                         mlp_case_pairs.append(case)
                     else:
@@ -1102,6 +1112,7 @@ def normalize_case_from_plan(row):
         "account_count", "warehouse_count", "tpcc_partition_warehouses", "long_txn_length",
         "long_txn_write_pct", "smallbank_key_permutation_seed",
         "tpcc_warehouse_permutation_seed",
+        "tpcc_warehouse_load_seed",
     ]
     float_fields = [
         "zipfian_theta", "hotspot_fraction", "hotspot_prob",
@@ -1137,6 +1148,7 @@ def write_case_metadata(case, dest_dir, kwr_report_name, command):
     metadata["kwr_report_name"] = kwr_report_name
     metadata["kwr_scope"] = KWRScope
     metadata["router_only"] = RouterOnly
+    metadata["tpcc_routing_diagnostics"] = TPCCRoutingDiagnostics
     metadata["load_restart_run"] = LoadRestartRun
     metadata["build_type"] = "Release" if RouterOnly else "Debug"
     metadata["preprocess_batch_concurrency"] = runtime_preprocess_batch_concurrency()
@@ -1208,6 +1220,8 @@ def case_group_dir_name(case):
         parts.append(f"KeyPerm{case['smallbank_key_permutation_seed']}")
     if case.get("tpcc_warehouse_permutation_seed") is not None:
         parts.append(f"WhPerm{case['tpcc_warehouse_permutation_seed']}")
+    if case.get("tpcc_warehouse_load_seed") is not None:
+        parts.append(f"WhLoad{case['tpcc_warehouse_load_seed']}")
     if case.get("hotspot_fraction") is not None:
         parts.append(f"HsFrac{value_for_path(case['hotspot_fraction'])}")
     if case.get("hotspot_prob") is not None:
@@ -1323,6 +1337,8 @@ def access_extra_args(case):
         permutation = f" --smallbank-key-permutation-seed {case['smallbank_key_permutation_seed']}"
     if case.get("workload") in ("tpcc", "tpcc-standard") and case.get("tpcc_warehouse_permutation_seed") is not None:
         permutation = f" --tpcc-warehouse-permutation-seed {case['tpcc_warehouse_permutation_seed']}"
+    if case.get("workload") in ("tpcc", "tpcc-standard") and case.get("tpcc_warehouse_load_seed") is not None:
+        permutation += f" --tpcc-warehouse-load-seed {case['tpcc_warehouse_load_seed']}"
     if case["access_pattern"] == 1:
         return permutation + f" --zipfian-theta {case['zipfian_theta']} --zipfian-generator {case['zipfian_generator']}"
     if case["access_pattern"] == 2:
@@ -1487,6 +1503,9 @@ ZipfianTheta = [0.8]
 ZipfianGenerator = "finite" # options: finite, legacy
 SmallBankKeyPermutationSeed = None # None: unchanged workload; integer: enable seeded key permutation
 TPCCWarehousePermutationSeed = None # None: unchanged workload; integer: enable seeded warehouse permutation
+TPCCShuffleWarehouseLoad = False # shuffle whole-warehouse load tasks; independent of access permutation
+TPCCWarehouseLoadSeed = 42
+TPCCRoutingDiagnostics = True # diagnostic output only; no routing policy changes
 # HotspotFraction = [0.25]
 HotspotFraction = [0.001, 0.01, 0.1, 1]
 HotspotProb = [0.8]
@@ -1576,6 +1595,8 @@ if __name__ == "__main__":
                         help="Enable seeded SmallBank account-ID permutation for every selected mode")
     parser.add_argument("--tpcc-warehouse-permutation-seed", type=int, default=None,
                         help="Enable seeded TPC-C warehouse-ID permutation for every selected mode")
+    parser.add_argument("--tpcc-routing-diagnostics", action="store_true", default=TPCCRoutingDiagnostics,
+                        help="Record mode11 TPC-C assignment/selection diagnostics")
     parser.add_argument("--db-type", type=int, choices=(0, 1, 2), default=None, help="0: PostgreSQL/KES, 1: YashanDB, 2: MySQL")
     parser.add_argument("--warmup-seconds", type=int, default=None, help="Override WarmupSeconds for --time-run")
     parser.add_argument("--run-seconds", type=int, default=None, help="Override RunSeconds for --time-run")
@@ -1611,6 +1632,7 @@ if __name__ == "__main__":
         help="Resume from this case_id in the selected case plan.",
     )
     args = parser.parse_args()
+    TPCCRoutingDiagnostics = args.tpcc_routing_diagnostics
 
     # Handle LongTxnSize override
     if args.long_txn_length is not None:
@@ -1731,6 +1753,8 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     capture_run_reproducibility_metadata(figure_path)
+    if TPCCRoutingDiagnostics and any(c["run_mode"] != 11 or c["workload"] not in ("tpcc", "tpcc-standard") for c in planned_cases):
+        raise ValueError("TPC-C routing diagnostics require mode11 TPC-C cases only")
 
     # !开始本次的测试
     os.chdir(workspace)
@@ -1814,6 +1838,12 @@ if __name__ == "__main__":
             )
             if case.get("tpcc_partition_warehouses"):
                 cmd += " --tpcc-partition-warehouses"
+            if TPCCRoutingDiagnostics:
+                cmd += " --tpcc-routing-diagnostics"
+                for name in ("tpcc_window_assignments.csv", "tpcc_plan_decisions.csv"):
+                    path = os.path.join(Run_Path, name)
+                    if os.path.exists(path):
+                        os.remove(path)
             if UseDataCache or reuse_router_only_data:
                 cmd += " --skip-load-data"
             if LoadRestartRun:
@@ -1894,6 +1924,9 @@ if __name__ == "__main__":
                 shutil.copy2(result, dest_file)
                 log_file = os.path.join(dest_dir, "partitioning_log.log")
                 shutil.copy2(log, log_file)
+                if TPCCRoutingDiagnostics:
+                    for name in ("tpcc_window_assignments.csv", "tpcc_plan_decisions.csv"):
+                        shutil.copy2(os.path.join(Run_Path, name), os.path.join(dest_dir, name))
 
                 if is_postgres_like_db() and not RouterOnly:
                     download_kwr_reports(case, dest_dir, kwr_report_name)
