@@ -8,8 +8,8 @@ int main() {
     using namespace seron_range;
     auto s = specs(100, 4, 3000, 10000);
     SeronColumnRules independent(2, 10);
-    independent.add_column(CheckingId, s[CheckingId], {{1,1},{1,2},{2,99},{2,100}});
-    independent.add_column(SavingsId, s[SavingsId], {{1,1},{1,100},{2,2},{2,99}});
+    independent.add_column(CheckingId, s[CheckingId], {{1,1},{1,2},{2,99},{2,100}}, true);
+    independent.add_column(SavingsId, s[SavingsId], {{1,1},{1,100},{2,2},{2,99}}, true);
     independent.prepare();
     independent.observe({{CheckingId,1},{SavingsId,100}}, 100);
     independent.freeze();
@@ -21,8 +21,8 @@ int main() {
     assert(independent.assign({{CheckingId,1},{SavingsId,100},{SavingsId,100}}) == 0);
 
     SeronColumnRules tpcc_rules(2, 4);
-    tpcc_rules.add_column(DistrictWarehouse, s[DistrictWarehouse], {{1,1},{1,4}});
-    tpcc_rules.add_column(StockItem, s[StockItem], {{1,1},{1,2},{2,9999},{2,10000}});
+    tpcc_rules.add_column(DistrictWarehouse, s[DistrictWarehouse], {{1,1},{1,4}}, true);
+    tpcc_rules.add_column(StockItem, s[StockItem], {{1,1},{1,2},{2,9999},{2,10000}}, true);
     tpcc_rules.prepare();
     // A warehouse predicate cannot override a better-ranked item predicate.
     assert(tpcc_rules.assign({{DistrictWarehouse,1},{StockItem,10000}}) == 1);
@@ -35,10 +35,10 @@ int main() {
         SeronColumnRules layout(2,4);
         layout.add_column(StockWarehouse,s[StockWarehouse], mixed_stock ?
             std::vector<SeronColumnRules::PhysicalValue>{{1,1},{1,4},{2,1},{2,4}} :
-            std::vector<SeronColumnRules::PhysicalValue>{{1,1},{1,1},{2,4},{2,4}});
+            std::vector<SeronColumnRules::PhysicalValue>{{1,1},{1,1},{2,4},{2,4}}, true);
         layout.add_column(ItemId,s[ItemId], mixed_stock ?
             std::vector<SeronColumnRules::PhysicalValue>{{1,1},{1,2},{2,9999},{2,10000}} :
-            std::vector<SeronColumnRules::PhysicalValue>{{1,1},{1,10000},{2,2},{2,9999}});
+            std::vector<SeronColumnRules::PhysicalValue>{{1,1},{1,10000},{2,2},{2,9999}}, true);
         layout.prepare();
         assert(layout.assign(new_order,{},0) == (mixed_stock ? 1 : 0));
         layout.freeze(); // no observations: equal-width boundaries unchanged
@@ -100,7 +100,7 @@ int main() {
     for (int type = 0; type <= 6; ++type) assert(!smallbank(type,std::vector<int>{1,2}).empty());
 
     SeronColumnRules concurrent(2,10);
-    concurrent.add_column(CheckingId,s[CheckingId],{{1,1},{1,2}});
+    concurrent.add_column(CheckingId,s[CheckingId],{{1,1},{1,2}}, true);
     concurrent.prepare();
     std::vector<std::thread> threads;
     for (int n=0; n<4; ++n) threads.emplace_back([&] {

@@ -2,6 +2,7 @@
 
 #include "seron_range_rules.h"
 #include "seron_range_workload.h"
+#include "seron_tv_estimator.h"
 #include <map>
 #include <limits>
 #include <string>
@@ -14,25 +15,31 @@
 // inferred merely because two columns have equal names or numeric values.
 // This mode implements row-level range assignment, not Seron's complete hybrid
 // table/row partitioning, correlation alignment or online rule adaptation.
-// Rank estimation uses observed same-page pairs, not the paper's TV/random walk.
+// Rule ranking follows Sec. 5.1's TV/random-walk pipeline. See estimator header
+// for explicit choices where the paper leaves simulation details unspecified.
 // If a selected column has multiple equality values, use the interval matching
 // most values, then the highest existing load-balance weight, then round-robin;
 // never vote across different columns or override a unique interval match.
 class SeronColumnRules {
 public:
     using Predicate = seron_range::Predicate;
-    struct PhysicalValue { uint64_t page, value; };
+    using PhysicalValue = seron_tv::PhysicalValue;
     explicit SeronColumnRules(int nodes, int bins) : nodes_(nodes), bins_(bins) {
         columns_.resize(seron_range::Count);
         for (auto& count : selection_counts_) count.store(0, std::memory_order_relaxed);
     }
     // Initialization only, before router/connector threads start.
     void add_column(size_t id, const seron_range::ColumnSpec& spec,
-                    std::vector<PhysicalValue> physical) {
+                    std::vector<PhysicalValue> physical, bool complete = false) {
         auto c = std::make_unique<Column>();
         c->name = spec.table + "." + spec.column;
         c->ranges = std::make_unique<SeronRangeRules>(spec.max_value, nodes_, bins_);
         c->physical = std::move(physical);
+        std::stable_sort(c->physical.begin(), c->physical.end(), [](const auto& a, const auto& b) {
+            return a.page != b.page ? a.page < b.page : a.offset < b.offset;
+        });
+        c->tv = seron_tv::statistics(c->physical, spec.max_value, complete);
+        c->complete = complete;
         columns_.at(id) = std::move(c);
     }
     void prepare() {
@@ -90,10 +97,13 @@ public:
         out << std::defaultfloat << std::setprecision(10);
         out << "=== Seron independent column rules (mode 33) ===\n"
             << "  Phase: " << (frozen() ? "frozen rules" : "initial rules") << '\n'
-            << "  Ranking: sampled same-page cross-interval pair fraction\n"
-            << "  Estimator: implementation proxy, not paper TV/random-walk estimator\n"
-            << "  Score scope: this column's sampled pages, not full-transaction write cost\n"
-            << "  Zero sampled conflicts do not establish zero population conflicts\n"
+            << "  Ranking: physical-order TV / Monte Carlo page conflict rate (Sec. 5.1)\n"
+            << "  Random walk: empirical starts, symmetric +/- step, reflecting value-domain boundaries\n"
+            << "  Simulation pages: " << seron_tv::Simulations << ", seed: " << seron_tv::Seed << '\n'
+            << "  Page occupancy: mean live rows per occupied sampled page; m rounded, m-1 steps\n"
+            << "  Sample minimum: " << seron_tv::MinRows << " rows, " << seron_tv::MinPages
+            << " pages, " << seron_tv::MinCrossPagePairs << " adjacent page transitions; full scans exempt\n"
+            << "  Score scope: intra-index layout conflicts, not full-transaction write cost\n"
             << "  Interval ties: existing workload+queue balance weight, then round-robin\n"
             << "  Cross-table alignment: disabled; no business-semantic pivot\n";
         size_t rank = 0;
@@ -101,6 +111,12 @@ public:
             const auto& c = columns_[r.column];
             out << "  " << c->name << " physical_samples=" << c->physical.size()
                 << " conflict_rate=" << r.risk << " rank=" << ++rank << '\n';
+            out << "    full_scan=" << c->complete << " sufficient=" << c->tv.sufficient
+                << " tv_adjacent_pairs=" << c->tv.adjacent_pairs
+                << " tv_cross_page_pairs=" << c->tv.cross_page_pairs
+                << " mean_difference=" << c->tv.mean_difference
+                << " normalized_step=" << c->tv.normalized_step
+                << " mean_records_per_page=" << c->tv.records_per_page << '\n';
             const auto evidence = risk_evidence(*c, r.boundaries);
             out << "    sampled_pages=" << evidence.pages
                 << " pair_supported_pages=" << evidence.pair_pages
@@ -108,7 +124,9 @@ public:
                 << " ordered_pairs=" << evidence.pairs
                 << " cross_interval_pairs=" << evidence.cross_pairs
                 << " observed_value_min=" << evidence.min_value
-                << " observed_value_max=" << evidence.max_value << '\n';
+                << " observed_value_max=" << evidence.max_value
+                << " empirical_pair_rate=" << (evidence.pairs ? evidence.cross_pairs / evidence.pairs : -1)
+                << '\n';
             c->ranges->print(out);
         }
         out.flags(flags);
@@ -136,6 +154,8 @@ private:
         std::string name;
         std::unique_ptr<SeronRangeRules> ranges;
         std::vector<PhysicalValue> physical;
+        seron_tv::Statistics tv;
+        bool complete = false;
     };
     struct RankedRule { size_t column; std::vector<uint64_t> boundaries; double risk; };
     struct RiskEvidence {
@@ -175,9 +195,7 @@ private:
         return result;
     }
     double risk(const Column& c, const std::vector<uint64_t>& bounds) const {
-        const auto evidence = risk_evidence(c, bounds);
-        // Missing physical evidence is not evidence of a conflict-free rule.
-        return evidence.pairs > 0 ? 1 - evidence.same_pairs / evidence.pairs : 1.0;
+        return seron_tv::estimate(c.physical, c.tv, bounds);
     }
     void publish() {
         auto rules = std::make_shared<std::vector<RankedRule>>();

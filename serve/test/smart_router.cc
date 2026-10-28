@@ -1,4 +1,5 @@
 #include "smart_router.h"
+#include "seron_physical_sampling.h"
 #include "indexed_priority_queue.h"
 #include "tpcc_routing_diagnostics.h"
 
@@ -179,9 +180,8 @@ void SmartRouter::initialize_seron_range_rules() {
         std::set<std::string> indexed_names;
         for (const auto& row : indexed) indexed_names.insert(row[0].as<std::string>());
         std::vector<size_t> ids;
-        std::string fields;
         for (auto id : table.second) if (indexed_names.count(specs[id].column)) {
-            ids.push_back(id); fields += ", " + specs[id].column;
+            ids.push_back(id);
         }
         if (ids.empty()) continue;
         // Sample physical leaf tables as TABLESAMPLE cannot target a partitioned
@@ -191,23 +191,20 @@ void SmartRouter::initialize_seron_range_rules() {
             "JOIN rels r ON i.inhparent=r.oid) SELECT oid::regclass::text FROM rels r "
             "WHERE NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhparent=r.oid)");
         std::map<size_t, std::vector<SeronColumnRules::PhysicalValue>> samples;
+        bool complete = true;
         for (const auto& leaf : leaves) {
             const std::string relation = leaf[0].as<std::string>();
-            const std::string select = "SELECT tableoid::bigint, "
-                "split_part(trim(leading '(' from ctid::text), ',', 1)::bigint" + fields +
-                " FROM " + relation;
-            auto rows = db.exec(select + " TABLESAMPLE SYSTEM (1) REPEATABLE (33) LIMIT 16384");
-            if (rows.size() < 2) rows = db.exec(select + " LIMIT 16384");
-            for (const auto& row : rows) {
-                const uint64_t page = (row[0].as<uint64_t>() << 32) | row[1].as<uint64_t>();
-                for (size_t j = 0; j < ids.size(); ++j) {
-                    const auto field = row[static_cast<pqxx::row::size_type>(j + 2)];
-                    if (!field.is_null())
-                        samples[ids[j]].push_back({page, field.as<uint64_t>()});
-                }
+            std::vector<std::string> names;
+            std::vector<uint64_t> domains;
+            for (auto id : ids) { names.push_back(specs[id].column); domains.push_back(specs[id].max_value); }
+            auto sample = seron_tv::sample_relation(db, relation, names, domains, std::cout);
+            complete &= sample.complete;
+            for (size_t j = 0; j < ids.size(); ++j) {
+                auto& values = sample.columns[j];
+                samples[ids[j]].insert(samples[ids[j]].end(), values.begin(), values.end());
             }
         }
-        for (auto id : ids) seron_range_rules_->add_column(id, specs[id], std::move(samples[id]));
+        for (auto id : ids) seron_range_rules_->add_column(id, specs[id], std::move(samples[id]), complete);
     }
     db.commit();
     seron_range_rules_->prepare();
