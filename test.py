@@ -1426,8 +1426,8 @@ output = workspace + "/build/output.txt"
 result = workspace + "/build/serve/test/result.txt"
 log = workspace + "/build/serve/test/partitioning_log.log"
 Run_Path = workspace + "/build/serve/test/"
-kwr_report_ip = "172.16.0.25"
-kwr_ip_password = "Wljwlj123."
+kwr_report_ip = "172.16.0.108"
+kwr_ip_password = "Hcyhcy123."
 kwr_report_path = "/home/kingbase/MP-Router/kwr/"
 KWRScope = "single" # single: node0 only; all: one snapshot/report per active database node
 database_data_path = "/sharedata/kingbase/data-hot/"
@@ -1446,10 +1446,10 @@ load_pause_timeout_seconds = 12 * 60 * 60
 test_interval_seconds = 5
 config_group_interval_seconds = 30
 db_ready_probe_conninfos = [
-    "host=172.16.0.25 port=44321 user=system password=123456 dbname=smallbank",
-    "host=172.16.0.27 port=44321 user=system password=123456 dbname=smallbank",
-    "host=172.16.0.24 port=44321 user=system password=123456 dbname=smallbank",
-    "host=172.16.0.26 port=44321 user=system password=123456 dbname=smallbank",
+    "host=172.16.0.108 port=44321 user=system password=123456 dbname=smallbank",
+    "host=172.16.0.110 port=44321 user=system password=123456 dbname=smallbank",
+    "host=172.16.0.109 port=44321 user=system password=123456 dbname=smallbank",
+    "host=172.16.0.111 port=44321 user=system password=123456 dbname=smallbank",
     # "host=172.16.0.30 port=44321 user=system password=123456 dbname=smallbank",
     # "host=172.16.0.29 port=44321 user=system password=123456 dbname=smallbank",
     # "host=172.16.0.31 port=44321 user=system password=123456 dbname=smallbank",
@@ -1473,11 +1473,11 @@ LoadRestartRun = False
 # dynamic
 # RunModeType = [0, 3, 8, 11, 4, 13]
 # RunModeType = [11]
-RunModeType = [11, 23, 28, 0 , 2, 25]
+RunModeType = [11]
 # RunModeType = [23]
 # RunModeType = [11]
 # RunModeType = [28]
-TPCCRuleRunModeType = [31]
+TPCCRuleRunModeType = []
 # RunModeType = [11, 13, 2]
 # RunModeType = [28]
 # ! system: 0 random, 2 page hash, 11 MP-Router, 13 without scheduling, 23 metis,
@@ -1487,7 +1487,7 @@ TPCCRuleRunModeType = [31]
 # ! TPCCRuleRunModeType: 31 TPC-C warehouse rule router, auto-added for TPC-C workloads
 # RunModeType = [13]
 # RunModeType = [1]
-Workloads = ["smallbank"] # one script run can cover multiple workloads
+Workloads = ["tpcc-standard"] # one script run can cover multiple workloads
 WorkloadAccessPatterns = {
     "smallbank": [1],
     "tpcc": [2,0],
@@ -1497,29 +1497,31 @@ SweepMode = "axis" # axis: vary one dimension from defaults; full: Cartesian pro
 AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
 # AccessPattern = [1]
 # ZipfianTheta = [0.4]
-ZipfianTheta = [0.8]
+ZipfianTheta = [1.1, 0.9, 0.8, 0.6, 0.1]
 # ZipfianTheta = [0.9, 0.8, 0.6]
 # ZipfianTheta = [0.8]
 ZipfianGenerator = "finite" # options: finite, legacy
-SmallBankKeyPermutationSeed = None # None: unchanged workload; integer: enable seeded key permutation
+SmallBankKeyPermutationSeed = 42 # None: unchanged workload; integer: enable seeded key permutation
 TPCCWarehousePermutationSeed = None # None: unchanged workload; integer: enable seeded warehouse permutation
 TPCCShuffleWarehouseLoad = False # shuffle whole-warehouse load tasks; independent of access permutation
 TPCCWarehouseLoadSeed = 42
 TPCCRoutingDiagnostics = True # diagnostic output only; no routing policy changes
-# HotspotFraction = [0.25]
-HotspotFraction = [0.001, 0.01, 0.1, 1]
-HotspotProb = [0.8]
-# HotspotProb = [0.5, 0.8, 0.9]
+HotspotFraction = [0.25]
+# HotspotFraction = [0.001, 0.01, 0.1, 1]
+# HotspotProb = [0.8]
+HotspotProb = [0.5, 0.8, 0.9]
 # account = 100W, 单个表大概14W个页面, 每个页面8KB, 大小约1.1GB
-AccountCount = [100000000]
-WarehouseCount = [500]
+AccountCount = [10000000]
+WarehouseCount = [200]
 WorkerThreadCount = [16]
 # WorkerThreadCount = [16, 2, 4, 8, 32, 64]
 try_count = 35000
 TimeRun = 1 # 0:disable, 1:enable
 EnableDynamicWorkload = 0 # 0:disable, 1:enable dynamic workload phases in ./run
-WarmupSeconds = 120
-RunSeconds = 150
+# WarmupSeconds = 120
+# RunSeconds = 150
+WarmupSeconds = 15
+RunSeconds = 30
 FillPipelineBubble = 0
 PreprocessBatchConcurrency = 1
 RouterOnlyWorkerThreads = 4
@@ -1561,7 +1563,7 @@ DefaultAccessPattern = {
     "tpcc-standard": 2,
 }
 DefaultZipfianTheta = 0.8
-DefaultHotspotFraction = 0.01
+DefaultHotspotFraction = 0.25
 DefaultHotspotProb = 0.8
 DefaultWorkerThreads = WorkerThreadCount[0]
 DefaultBatchSize = BatchSize[0]
