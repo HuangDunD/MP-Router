@@ -1024,12 +1024,12 @@ def build_case_plan():
                     TPCCWarehousePermutationSeed if workload_name in ("tpcc", "tpcc-standard") else None
                 )
                 case_config["tpcc_warehouse_load_seed"] = (
-                    TPCCWarehouseLoadSeed
-                    if TPCCShuffleWarehouseLoad and workload_name in ("tpcc", "tpcc-standard") else None
+                    TPCCShuffleWarehouseLoadSeed
+                    if workload_name in ("tpcc", "tpcc-standard") else None
                 )
                 load_seed = case_config["tpcc_warehouse_load_seed"]
                 if load_seed is not None and (not isinstance(load_seed, int) or not 0 <= load_seed <= 2**64 - 1):
-                    raise ValueError("TPCCWarehouseLoadSeed must be a uint64")
+                    raise ValueError("TPCCShuffleWarehouseLoadSeed must be None or a uint64")
                 group_key = case_group_key(case_config)
                 if group_key not in case_group_ids:
                     case_group_id += 1
@@ -1057,6 +1057,15 @@ def build_case_plan():
                     seen.add(key)
                     case = dict(case_config)
                     case["run_mode"] = run_mode
+                    case["seron_conflict_detection"] = None
+                    case["seron_rule_high_conflict_threshold"] = None
+                    if run_mode == 33:
+                        if SeronConflictDetection not in ("page", "rule"):
+                            raise ValueError("SeronConflictDetection must be page or rule")
+                        if not 0 <= SeronRuleHighConflictThreshold <= 1:
+                            raise ValueError("SeronRuleHighConflictThreshold must be in [0,1]")
+                        case["seron_conflict_detection"] = SeronConflictDetection
+                        case["seron_rule_high_conflict_threshold"] = SeronRuleHighConflictThreshold
                     case["hot_page_weighted_affinity"] = bool(HotPageWeightedAffinity and run_mode == 11)
                     case["case_group_id"] = case_group_ids[group_key]
                     case["data_cache_path"] = data_cache_path(
@@ -1118,8 +1127,9 @@ def normalize_case_from_plan(row):
     float_fields = [
         "zipfian_theta", "hotspot_fraction", "hotspot_prob",
         "affinity_txn_ratio", "key_page_ratio",
+        "seron_rule_high_conflict_threshold",
     ]
-    none_string_fields = ["zipfian_generator"]
+    none_string_fields = ["zipfian_generator", "seron_conflict_detection"]
 
     for field in int_fields:
         if field in case:
@@ -1153,6 +1163,7 @@ def write_case_metadata(case, dest_dir, kwr_report_name, command):
     metadata["kwr_scope"] = KWRScope
     metadata["router_only"] = RouterOnly
     metadata["tpcc_routing_diagnostics"] = TPCCRoutingDiagnostics
+    metadata["virtual_arrival_rate"] = VirtualArrivalRate
     metadata["load_restart_run"] = LoadRestartRun
     metadata["build_type"] = "Release" if RouterOnly else "Debug"
     metadata["preprocess_batch_concurrency"] = runtime_preprocess_batch_concurrency()
@@ -1220,14 +1231,10 @@ def case_group_dir_name(case):
         parts.append(f"ZipfTheta{value_for_path(case['zipfian_theta'])}")
     if case.get("zipfian_generator") is not None:
         parts.append(f"ZipfGen{value_for_path(case['zipfian_generator'])}")
-    if case.get("smallbank_key_permutation_seed") is not None:
-        parts.append(f"KeyPerm{case['smallbank_key_permutation_seed']}")
-    if case.get("tpcc_warehouse_permutation_seed") is not None:
-        parts.append(f"WhPerm{case['tpcc_warehouse_permutation_seed']}")
-    if case.get("tpcc_warehouse_load_seed") is not None:
-        parts.append(f"WhLoad{case['tpcc_warehouse_load_seed']}")
     if case.get("hot_page_weighted_affinity"):
         parts.append("HotPageAffinity")
+    if case.get("seron_conflict_detection") == "rule":
+        parts.append(f"RuleDelay{value_for_path(case['seron_rule_high_conflict_threshold'])}")
     if case.get("hotspot_fraction") is not None:
         parts.append(f"HsFrac{value_for_path(case['hotspot_fraction'])}")
     if case.get("hotspot_prob") is not None:
@@ -1345,6 +1352,10 @@ def access_extra_args(case):
         permutation = f" --tpcc-warehouse-permutation-seed {case['tpcc_warehouse_permutation_seed']}"
     if case.get("workload") in ("tpcc", "tpcc-standard") and case.get("tpcc_warehouse_load_seed") is not None:
         permutation += f" --tpcc-warehouse-load-seed {case['tpcc_warehouse_load_seed']}"
+    if case.get("run_mode") == 33:
+        # Old saved plans retain page detection rather than inheriting new defaults.
+        permutation += f" --seron-conflict-detection {case.get('seron_conflict_detection', 'page')}"
+        permutation += f" --seron-rule-high-conflict-threshold {case.get('seron_rule_high_conflict_threshold', 0.10)}"
     if case["access_pattern"] == 1:
         return permutation + f" --zipfian-theta {case['zipfian_theta']} --zipfian-generator {case['zipfian_generator']}"
     if case["access_pattern"] == 2:
@@ -1478,8 +1489,8 @@ LoadRestartRun = False
 # -------------------------------------------- # test parameters -------------------------------------------- #
 # dynamic
 # RunModeType = [0, 3, 8, 11, 4, 13]
-# RunModeType = [11]
-RunModeType = [11]
+RunModeType = [33]
+# RunModeType = [33]
 # RunModeType = [23]
 # RunModeType = [11]
 # RunModeType = [28]
@@ -1507,12 +1518,13 @@ ZipfianTheta = [1.1, 0.9, 0.8, 0.6, 0.1]
 # ZipfianTheta = [0.9, 0.8, 0.6]
 # ZipfianTheta = [0.8]
 ZipfianGenerator = "finite" # options: finite, legacy
-SmallBankKeyPermutationSeed = 42 # None: unchanged workload; integer: enable seeded key permutation
+SmallBankKeyPermutationSeed = None # None: unchanged workload; integer: enable seeded key permutation
 TPCCWarehousePermutationSeed = None # None: unchanged workload; integer: enable seeded warehouse permutation
-TPCCShuffleWarehouseLoad = False # shuffle whole-warehouse load tasks; independent of access permutation
-TPCCWarehouseLoadSeed = 42
-TPCCRoutingDiagnostics = True # diagnostic output only; no routing policy changes
+TPCCShuffleWarehouseLoadSeed = 42 # None: original load order; integer: shuffle whole-warehouse load tasks
+SeronConflictDetection = "page" # mode 33 only: "page" preserves the existing detector
+SeronRuleHighConflictThreshold = 0.10 # rule risk > threshold triggers intra-rule detection
 HotPageWeightedAffinity = False # mode11 only: weight ownership affinity by window-local RW page heat
+TPCCRoutingDiagnostics = False # diagnostic output only; no routing policy changes
 HotspotFraction = [0.25]
 # HotspotFraction = [0.001, 0.01, 0.1, 1]
 # HotspotProb = [0.8]
@@ -1529,6 +1541,7 @@ EnableDynamicWorkload = 0 # 0:disable, 1:enable dynamic workload phases in ./run
 # RunSeconds = 150
 WarmupSeconds = 15
 RunSeconds = 30
+VirtualArrivalRate = 150000 # TPS for virtual-arrival latency only; 0 disables it, no pacing
 FillPipelineBubble = 0
 PreprocessBatchConcurrency = 1
 RouterOnlyWorkerThreads = 4
@@ -1845,6 +1858,7 @@ if __name__ == "__main__":
                 f" --key-page-ratio {case['key_page_ratio']}"
                 f" --preprocess-batch-concurrency {runtime_preprocess_batch_concurrency()}"
             )
+            cmd += f" --virtual-arrival-rate {VirtualArrivalRate}"
             if case.get("tpcc_partition_warehouses"):
                 cmd += " --tpcc-partition-warehouses"
             if case.get("hot_page_weighted_affinity"):
