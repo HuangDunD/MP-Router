@@ -258,7 +258,19 @@ def sync_remote_servers_after_case():
         hosts = [kwr_report_ip]
 
     for host in hosts:
-        run_remote_cmd("sync", check=False, max_retries=1, host=host, display_cmd="sync")
+        try:
+            result = run_remote_cmd("sync", check=False, max_retries=3, host=host, display_cmd="sync")
+        except Exception:
+            logging.warning(
+                "Post-case sync failed on %s after retries; continuing with saved results.",
+                host, exc_info=True,
+            )
+        else:
+            if result.returncode != 0:
+                logging.warning(
+                    "Post-case sync on %s returned %s; continuing with saved results.",
+                    host, result.returncode,
+                )
 
 def configured_db_conninfos():
     if int(DBType) == 1:
@@ -1446,7 +1458,7 @@ Run_Path = workspace + "/build/serve/test/"
 kwr_report_ip = "172.16.0.108"
 kwr_ip_password = "Hcyhcy123."
 kwr_report_path = "/home/kingbase/MP-Router/kwr/"
-KWRScope = "single" # single: node0 only; all: one snapshot/report per active database node
+KWRScope = "all" # single: node0 only; all: one snapshot/report per active database node
 database_data_path = "/sharedata/kingbase/data-hot/"
 db_resource_name = "clone-DB"
 remote_retry_sleep_seconds = 3
@@ -1488,13 +1500,13 @@ LoadRestartRun = False
 # !      !       !            注意：根据实际环境修改以上路径和参数                  !        !        !
 # -------------------------------------------- # test parameters -------------------------------------------- #
 # dynamic
-# RunModeType = [0, 3, 8, 11, 4, 13]
-RunModeType = [33]
+# RunModeType = [0, 25, 2, 23, 28, 33, 11]
+# RunModeType = [33]
 # RunModeType = [33]
 # RunModeType = [23]
-# RunModeType = [11]
+RunModeType = [11]
 # RunModeType = [28]
-TPCCRuleRunModeType = []
+TPCCRuleRunModeType = [31]
 # RunModeType = [11, 13, 2]
 # RunModeType = [28]
 # ! system: 0 random, 2 page hash, 11 MP-Router, 13 without scheduling, 23 metis,
@@ -1504,7 +1516,7 @@ TPCCRuleRunModeType = []
 # ! TPCCRuleRunModeType: 31 TPC-C warehouse rule router, auto-added for TPC-C workloads
 # RunModeType = [13]
 # RunModeType = [1]
-Workloads = ["tpcc-standard"] # one script run can cover multiple workloads
+Workloads = ["smallbank"] # one script run can cover multiple workloads
 WorkloadAccessPatterns = {
     "smallbank": [1],
     "tpcc": [2,0],
