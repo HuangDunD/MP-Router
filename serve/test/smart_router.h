@@ -860,6 +860,7 @@ public:
     struct PreparedBatch {
         std::unique_ptr<std::vector<TxnQueueEntry*>> txn_batch;
         double preprocess_ms = 0.0;
+        double preprocess_end_ms = 0.0; // CLOCK_MONOTONIC: ready for subsequent window admission
         std::vector<SchedulingCandidateTxn> candidates;
         std::unordered_map<tx_id_t, SchedulingCandidateTxn*> txid_to_txn_map;
         std::unordered_set<tx_id_t> conflicted_txns;

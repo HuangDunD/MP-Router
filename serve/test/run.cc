@@ -2,6 +2,7 @@
 // Author: huangdund
 #include <iostream>
 #include "tpcc_routing_diagnostics.h"
+#include <algorithm>
 #include <pqxx/pqxx> // PostgreSQL C++ library
 #include <chrono>
 #include <vector>
@@ -152,7 +153,8 @@ struct thread_params
     int thread_count;
     std::vector<double> *latency_record = nullptr; // pointer to the latency record vector
     std::vector<double> *fetch_latency_record = nullptr; // pointer to the fetch latency record vector
-    std::vector<double> *complete_latency_record = nullptr; // pool admission to completion
+    std::vector<double> *complete_latency_record = nullptr; // pool admission to completion minus prepared-window wait
+    std::vector<double> *raw_complete_latency_record = nullptr; // unadjusted pool admission to completion
     std::vector<double> *virtual_arrival_latency_record = nullptr;
 
     SmartRouter* smart_router = nullptr; // pointer to the smart router
@@ -161,6 +163,19 @@ struct thread_params
     YCSB* ycsb = nullptr;
     TPCC* tpcc = nullptr;
 };
+
+static void record_complete_latency(thread_params* params, const TxnQueueEntry* txn,
+                                    double completion_ms) {
+    if (txn->pool_enter_time <= 0.0) return;
+    if (params->complete_latency_record) {
+        const double raw = std::max(0.0, completion_ms - txn->pool_enter_time);
+        const double excluded_wait = std::min(raw, std::max(0.0, txn->prepared_window_wait_ms));
+        params->complete_latency_record->push_back(raw - excluded_wait);
+    }
+    if (params->raw_complete_latency_record) {
+        params->raw_complete_latency_record->push_back(completion_ms - txn->pool_enter_time);
+    }
+}
 
 // A streambuf that tees output to two destinations (console + file)
 class TeeBuf : public std::streambuf {
@@ -857,9 +872,7 @@ void run_smallbank_txns(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency()) {
                 if (params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
-                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
-                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
-                }
+                record_complete_latency(params, txn_entry, current_time_ms);
                 if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
                     params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
                 }
@@ -1136,9 +1149,7 @@ void run_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
-                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
-                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
-                }
+                record_complete_latency(params, txn_entry, current_time_ms);
                 if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
                     params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
                 }
@@ -1409,9 +1420,7 @@ void run_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
-                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
-                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
-                }
+                record_complete_latency(params, txn_entry, current_time_ms);
                 if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
                     params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
                 }
@@ -1513,9 +1522,7 @@ void run_mysql_ycsb_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
-                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
-                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
-                }
+                record_complete_latency(params, txn_entry, current_time_ms);
                 if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
                     params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
                 }
@@ -1628,9 +1635,7 @@ void run_mysql_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
-                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
-                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
-                }
+                record_complete_latency(params, txn_entry, current_time_ms);
                 if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
                     params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
                 }
@@ -1911,9 +1916,7 @@ void run_tpcc_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency(database_committed)) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
-                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
-                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
-                }
+                record_complete_latency(params, txn_entry, current_time_ms);
                 if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
                     params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
                 }
@@ -2576,9 +2579,7 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             if (should_record_after_warmup_latency()) {
                 if(params->latency_record) params->latency_record->push_back(exec_time);
                 double latency_start_ms = latency_start_time_ms(txn_entry);
-                if (params->complete_latency_record && txn_entry->pool_enter_time > 0) {
-                    params->complete_latency_record->push_back(current_time_ms - txn_entry->pool_enter_time);
-                }
+                record_complete_latency(params, txn_entry, current_time_ms);
                 if (params->virtual_arrival_latency_record && txn_entry->virtual_arrival_time > 0) {
                     params->virtual_arrival_latency_record->push_back(current_time_ms - txn_entry->virtual_arrival_time);
                 }
@@ -4324,12 +4325,14 @@ int main(int argc, char *argv[]) {
     std::vector<std::vector<double>> worker_latencies(ComputeNodeCount * worker_threads);
     std::vector<std::vector<double>> worker_fetch_latencies(ComputeNodeCount * worker_threads);
     std::vector<std::vector<double>> worker_complete_latencies(ComputeNodeCount * worker_threads);
+    std::vector<std::vector<double>> worker_raw_complete_latencies(ComputeNodeCount * worker_threads);
     std::vector<std::vector<double>> worker_virtual_arrival_latencies(ComputeNodeCount * worker_threads);
     // pre-reserve some space to avoid frequent reallocations, e.g. 1M per thread
     if (!router_only) {
         for(auto& v : worker_latencies) v.reserve(1000000);
         for(auto& v : worker_fetch_latencies) v.reserve(1000000);
         for(auto& v : worker_complete_latencies) v.reserve(1000000);
+        for(auto& v : worker_raw_complete_latencies) v.reserve(1000000);
         if (virtual_arrival_rate > 0)
             for(auto& v : worker_virtual_arrival_latencies) v.reserve(1000000);
     }
@@ -4344,6 +4347,7 @@ int main(int argc, char *argv[]) {
             params->latency_record = &worker_latencies[i * worker_threads + j];
             params->fetch_latency_record = &worker_fetch_latencies[i * worker_threads + j];
             params->complete_latency_record = &worker_complete_latencies[i * worker_threads + j];
+            params->raw_complete_latency_record = &worker_raw_complete_latencies[i * worker_threads + j];
             params->virtual_arrival_latency_record = &worker_virtual_arrival_latencies[i * worker_threads + j];
             params->smallbank = smallbank;
             params->ycsb = ycsb;
@@ -4722,6 +4726,8 @@ int main(int argc, char *argv[]) {
     }
 
     // --- Complete Latency Statistics (After Warmup) ---
+    std::cout << "Complete latency definition: pool admission to completion minus "
+                 "preprocessing-complete-to-window-start wait (per transaction)." << std::endl;
     std::vector<double> all_complete_latencies;
     total_size = 0;
     for (const auto& v : worker_complete_latencies) total_size += v.size();
@@ -4744,6 +4750,28 @@ int main(int argc, char *argv[]) {
         std::cout << "  P99: " << p99 << " ms" << std::endl;
     } else {
         std::cout << "No transactions recorded after warmup for complete latency stats." << std::endl;
+    }
+
+    {
+        std::vector<double> raw_latencies;
+        size_t count = 0;
+        for (const auto& v : worker_raw_complete_latencies) count += v.size();
+        raw_latencies.reserve(count);
+        for (const auto& v : worker_raw_complete_latencies)
+            raw_latencies.insert(raw_latencies.end(), v.begin(), v.end());
+        if (!raw_latencies.empty()) {
+            std::sort(raw_latencies.begin(), raw_latencies.end());
+            double sum = 0.0;
+            for (double latency : raw_latencies) sum += latency;
+            std::cout << "Raw Complete Latency Statistics (After Warmup):" << std::endl;
+            std::cout << "  Average: " << sum / raw_latencies.size() << " ms" << std::endl;
+            for (const auto& percentile : std::vector<std::pair<const char*, double>>{
+                     {"P50", 0.50}, {"P95", 0.95}, {"P99", 0.99}}) {
+                std::cout << "  " << percentile.first << ": "
+                          << raw_latencies[static_cast<size_t>(raw_latencies.size() * percentile.second)]
+                          << " ms" << std::endl;
+            }
+        }
     }
 
     if (virtual_arrival_rate > 0) {

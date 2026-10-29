@@ -48,6 +48,7 @@ struct TxnQueueEntry {
     double pool_enter_time = 0.0; // CLOCK_MONOTONIC ms: admitted to the transaction pool
     double virtual_arrival_time = 0.0; // CLOCK_MONOTONIC ms: fixed-rate timeline assigned at pool dequeue
     double route_start_time = 0.0; // latency统计起点：本batch获准开始处理，不包含等待上一批释放队列
+    double prepared_window_wait_ms = 0.0; // Complete统计扣除项：预处理完成至本窗口正式开始；其他模式为0
 
     // 拓扑图相关
     // std::vector<TxnQueueEntry*> after_txns; // 移除：依赖关系现由 DependencyGroup 维护

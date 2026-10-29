@@ -1569,6 +1569,8 @@ std::unique_ptr<SmartRouter::PreparedBatch> SmartRouter::preprocess_route_batch_
             time_stats_.tpcc_conflict_txns_by_table[i] += batch_tpcc_conflict_txns_by_table[i].size();
         }
     }
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    prepared->preprocess_end_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
     return prepared;
 }
 
@@ -3423,8 +3425,12 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     struct timespec route_start_ts;
     clock_gettime(CLOCK_MONOTONIC, &route_start_ts);
     double route_start_ms = route_start_ts.tv_sec * 1000.0 + route_start_ts.tv_nsec / 1000000.0;
+    const double prepared_window_wait_ms =
+        prepared.preprocess_end_ms > 0.0 && route_start_ms > 0.0
+            ? std::max(0.0, route_start_ms - prepared.preprocess_end_ms) : 0.0;
     for (auto* txn_entry : *txn_batch) {
         txn_entry->route_start_time = route_start_ms;
+        txn_entry->prepared_window_wait_ms = prepared_window_wait_ms;
     }
     
     // 计时
