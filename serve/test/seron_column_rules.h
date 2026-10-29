@@ -18,9 +18,9 @@
 // table/row partitioning, correlation alignment or online rule adaptation.
 // Rule ranking follows Sec. 5.1's TV/random-walk pipeline. See estimator header
 // for explicit choices where the paper leaves simulation details unspecified.
-// If a selected column has multiple equality values, use the interval matching
-// most values, then the highest existing load-balance weight, then round-robin;
-// never vote across different columns or override a unique interval match.
+// For the selected column, score every node by its range-match fraction plus
+// existing workload/queue balance weights. Score ties prefer more matches,
+// then round-robin. Never vote across different columns.
 class SeronColumnRules {
 public:
     using Predicate = seron_range::Predicate;
@@ -90,13 +90,20 @@ public:
             }
             if (count) {
                 if (selected) *selected = Selection{static_cast<int>(rule.column), rule.risk};
-                const size_t most = *std::max_element(matches.begin(), matches.end());
                 std::vector<int> candidates;
                 double best = -std::numeric_limits<double>::infinity();
-                for (int n = 0; n < nodes_; ++n) if (matches[n] == most) {
+                size_t best_matches = 0;
+                for (int n = 0; n < nodes_; ++n) {
                     const double weight = load_weights.empty() ? 0.0 : load_weights[n];
-                    if (weight > best) { best = weight; candidates.clear(); }
-                    if (weight == best) candidates.push_back(n);
+                    // Reuse the router's workload/queue weights on the same
+                    // normalized affinity scale; no additional tuning factor.
+                    const double score = static_cast<double>(matches[n]) / count + weight;
+                    if (score > best || (score == best && matches[n] > best_matches)) {
+                        best = score;
+                        best_matches = matches[n];
+                        candidates.clear();
+                    }
+                    if (score == best && matches[n] == best_matches) candidates.push_back(n);
                 }
                 record_selection(rule.column, txn_type);
                 if (candidates.size() == 1) return candidates.front();
@@ -122,7 +129,7 @@ public:
             << "  Sample minimum: " << seron_tv::MinRows << " rows, " << seron_tv::MinPages
             << " pages, " << seron_tv::MinCrossPagePairs << " adjacent page transitions; full scans exempt\n"
             << "  Score scope: intra-index layout conflicts, not full-transaction write cost\n"
-            << "  Interval ties: existing workload+queue balance weight, then round-robin\n"
+            << "  Assignment: range-match fraction + existing workload/queue balance weights across all nodes; ties prefer more matches, then round-robin\n"
             << "  Cross-table alignment: disabled; no business-semantic pivot\n";
         size_t rank = 0;
         for (const auto& r : *std::atomic_load(&published_)) {

@@ -91,12 +91,33 @@ int main() {
     assert(selected.column == CheckingId && selected.risk == 1.0);
     balanced.assign({}, {}, 0, &selected);
     assert(selected.column == -1);
-    assert(balanced.assign(tie,{0.2,1.6,1.6,1.2}) == 3); // only matched nodes eligible
+    assert(balanced.assign(tie,{0.2,1.6,1.6,1.2}) == 3); // affinity still contributes to score
     assert(balanced.assign(tie,{1.2,1.6,1.6,0.2}) == 0);
-    assert(balanced.assign({{CheckingId,1}},{0.2,1.6,1.6,1.2}) == 0); // unique match unchanged
+    const int spilled = balanced.assign({{CheckingId,1}},{0.2,1.6,1.6,1.2});
+    assert(spilled == 1 || spilled == 2); // unique matches can spill under severe imbalance
     int counts[4] = {};
     for (int i=0;i<100;++i) ++counts[balanced.assign(tie,{1,1,1,1})];
     assert(counts[0] == 50 && counts[3] == 50 && counts[1] == 0 && counts[2] == 0);
+
+    // All workloads: preserve range affinity at equal loads, but allow
+    // overloaded unique matches to spill to an otherwise idle primary.
+    SeronColumnRules load_aware(4,10,false,false);
+    load_aware.add_column(CheckingId,s[CheckingId],{});
+    load_aware.prepare();
+    const std::vector<Predicate> unique{{CheckingId,1}};
+    assert(load_aware.assign(unique) == 0);
+    assert(load_aware.assign(unique,{1,1,1,1}) == 0);
+    assert(load_aware.assign(unique,{0.9,1.1,1.1,1.1}) == 0);
+    assert(load_aware.assign(unique,{0.4,1.6,1.0,1.0},0,&selected) == 1);
+    assert(selected.column == CheckingId && selected.risk == 1.0);
+    assert(load_aware.assign(unique,{0.5,1.5,1,1}) == 0); // equal score favors locality
+    assert(load_aware.assign(tie,{0.4,1.6,1.0,0.4}) == 1);
+    int spill_counts[4] = {};
+    for (int i=0;i<100;++i) ++spill_counts[load_aware.assign(unique,{0.4,1.6,1.6,1.0})];
+    assert(spill_counts[0] == 0 && spill_counts[1] == 50 && spill_counts[2] == 50 && spill_counts[3] == 0);
+    std::ostringstream load_aware_log;
+    load_aware.print(load_aware_log);
+    assert(load_aware_log.str().find("balance weights across all nodes") != std::string::npos);
 
     auto has = [](const auto& p, size_t c, uint64_t v) {
         return std::any_of(p.begin(), p.end(), [&](const auto& x) { return x.column == c && x.value == v; });
