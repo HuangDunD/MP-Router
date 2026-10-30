@@ -313,7 +313,7 @@ void SmartRouter::initialize_seron_range_rules() {
             seron_range_rules_->add_column(id, spec,
                 sampler.sample(spec.table, spec.column, spec.max_value, std::cout), true);
         }
-        seron_range_rules_->prepare();
+        seron_range_rules_->prepare(dynamic_workload);
         seron_range_rules_->print(std::cout);
         return;
     }
@@ -355,7 +355,7 @@ void SmartRouter::initialize_seron_range_rules() {
         for (auto id : ids) seron_range_rules_->add_column(id, specs[id], std::move(samples[id]), complete);
     }
     db.commit();
-    seron_range_rules_->prepare();
+    seron_range_rules_->prepare(dynamic_workload);
     seron_range_rules_->print(std::cout);
 }
 

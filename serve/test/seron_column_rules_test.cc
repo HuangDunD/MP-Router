@@ -7,6 +7,30 @@
 int main() {
     using namespace seron_range;
     auto s = specs(100, 4, 3000, 10000);
+    // Dynamic warmup must not use initial equal-width rules, even for hot keys.
+    SeronColumnRules collecting(4,10,false,false);
+    collecting.add_column(CheckingId,s[CheckingId],{{1,1},{2,100}},true);
+    collecting.prepare(true);
+    int warmup_counts[4] = {};
+    for (int i=0;i<100;++i) {
+        SeronColumnRules::Selection choice;
+        ++warmup_counts[collecting.assign({{CheckingId,1}},{0,1,2,3},0,&choice)];
+        assert(choice.column == -1);
+        collecting.observe({{CheckingId,1}},1);
+    }
+    for (int count : warmup_counts) assert(count == 25);
+    std::ostringstream warmup_log;
+    collecting.print(warmup_log);
+    collecting.print_selection_counts(warmup_log,false);
+    assert(warmup_log.str().find("no active rules") != std::string::npos);
+    assert(warmup_log.str().find("conflict_rate=") == std::string::npos);
+    assert(warmup_log.str().find("phase=collecting txn_type=0 rule=fallback assigned=100") != std::string::npos);
+    collecting.freeze();
+    assert(collecting.column_snapshot(CheckingId)->samples == 100);
+    assert(collecting.column_snapshot(CheckingId)->boundaries[1] < 20);
+    SeronColumnRules::Selection learned;
+    collecting.assign({{CheckingId,1}}, {}, 0, &learned);
+    assert(learned.column == CheckingId);
     // Diagnostic is only an exact-score tie-break; default behavior is preserved.
     for (bool did_first : {false, true}) {
         SeronColumnRules tied(2, 4, did_first);
@@ -145,7 +169,7 @@ int main() {
 
     SeronColumnRules concurrent(2,10);
     concurrent.add_column(CheckingId,s[CheckingId],{{1,1},{1,2}}, true);
-    concurrent.prepare();
+    concurrent.prepare(true);
     std::vector<std::thread> threads;
     for (int n=0; n<4; ++n) threads.emplace_back([&] {
         for (int i=0;i<1000;++i) {

@@ -54,10 +54,19 @@ public:
         c->complete = complete;
         columns_.at(id) = std::move(c);
     }
-    void prepare() {
+    void prepare(bool collect_only = false) {
         if (std::none_of(columns_.begin(), columns_.end(), [](const auto& c) { return bool(c); }))
             throw std::runtime_error("No indexed columns available for Seron range rules");
-        publish();
+        collect_before_freeze_ = collect_only;
+        if (collect_only) {
+            // Dynamic warmup collects observations without ranking or applying
+            // initial equal-width rules. An empty rule set uses round-robin.
+            std::shared_ptr<const std::vector<RankedRule>> empty =
+                std::make_shared<const std::vector<RankedRule>>();
+            std::atomic_store(&published_, empty);
+        } else {
+            publish();
+        }
     }
     void observe(const std::vector<Predicate>& predicates, double latency_ms) {
         if (frozen_.load(std::memory_order_acquire)) return;
@@ -121,7 +130,8 @@ public:
             << "  Rule tie policy: " << (diagnostic_did_first_
                 ? "DIAGNOSTIC district.d_id first among exactly equal scores (not default)"
                 : "default stable column order") << '\n'
-            << "  Phase: " << (frozen() ? "frozen rules" : "initial rules") << '\n'
+            << "  Phase: " << (frozen() ? "frozen rules" :
+                (collect_before_freeze_ ? "collecting warmup samples (round-robin; no active rules)" : "initial rules")) << '\n'
             << "  Ranking: physical-order TV / Monte Carlo page conflict rate (Sec. 5.1)\n"
             << "  Random walk: empirical starts, symmetric +/- step, reflecting value-domain boundaries\n"
             << "  Simulation pages: " << seron_tv::Simulations << ", seed: " << seron_tv::Seed << '\n'
@@ -165,7 +175,8 @@ public:
                 for (size_t col = 0; col <= seron_range::Count; ++col) {
                     const auto count = selection_counts_[count_index(phase, type, col)].load(std::memory_order_relaxed);
                     if (!count) continue;
-                    out << "  phase=" << (phase ? "frozen" : "initial") << " txn_type=" << type;
+                    out << "  phase=" << (phase ? "frozen" :
+                        (collect_before_freeze_ ? "collecting" : "initial")) << " txn_type=" << type;
                     if (tpcc && type < 5) out << " txn=" << names[type];
                     out << " rule=" << (col == seron_range::Count ? "fallback" : columns_[col]->name)
                         << " assigned=" << count << '\n';
@@ -241,6 +252,7 @@ private:
     int nodes_, bins_;
     bool diagnostic_did_first_ = false;
     bool execution_time_weighted_ = true;
+    bool collect_before_freeze_ = false; // Set before routing/connector threads start.
     std::vector<std::unique_ptr<Column>> columns_;
     std::shared_ptr<const std::vector<RankedRule>> published_;
     std::atomic<bool> frozen_{false};
