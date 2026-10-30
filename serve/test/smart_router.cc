@@ -1,11 +1,142 @@
 #include "smart_router.h"
 #include "seron_physical_sampling.h"
+#include "yacli.h"
 #include "indexed_priority_queue.h"
 #include "tpcc_routing_diagnostics.h"
 
 #include <numeric>
 #include <map>
 #include <set>
+#include <array>
+#include <cctype>
+
+namespace {
+// Yashan SmallBank adapter. Initialization runs before workload execution.
+// Use complete ID/ROWID scans: Yashan SAMPLE samples rows, not whole pages,
+// which would distort records-per-page and physical-order TV if used directly.
+namespace seron_yashan {
+inline void check(YacResult result, const char* operation) {
+    if (result == YAC_SUCCESS) return;
+    YacInt32 code = 0;
+    char message[1024] = {};
+    YacTextPos position;
+    yacGetDiagRec(&code, message, sizeof(message), NULL, NULL, 0, &position);
+    throw std::runtime_error(std::string("Seron Yashan ") + operation +
+        " failed (" + std::to_string(code) + "): " + message);
+}
+
+class Handle {
+public:
+    Handle(YacHandleType type, YacHandle parent) : type_(type) {
+        check(yacAllocHandle(type, parent, &value_), "allocate handle");
+    }
+    ~Handle() { if (value_) yacFreeHandle(type_, value_); }
+    Handle(const Handle&) = delete;
+    Handle& operator=(const Handle&) = delete;
+    YacHandle get() const { return value_; }
+private:
+    YacHandleType type_;
+    YacHandle value_ = NULL;
+};
+
+inline std::string identifier(const std::string& name) {
+    if (name.empty()) throw std::invalid_argument("Empty Seron Yashan identifier");
+    std::string upper;
+    for (unsigned char ch : name) {
+        if (!std::isalnum(ch) && ch != '_')
+            throw std::invalid_argument("Invalid Seron Yashan identifier");
+        upper += static_cast<char>(std::toupper(ch));
+    }
+    return upper;
+}
+
+// String bindings avoid truncating unsigned physical block numbers to int32.
+class NumericRows {
+public:
+    NumericRows(YacHandle conn, const std::string& sql, size_t count)
+        : stmt_(YAC_HANDLE_STMT, conn), count_(count) {
+        if (count > fields_.size()) throw std::invalid_argument("Too many Yashan sample columns");
+        check(yacDirectExecute(stmt_.get(), (YacChar*)sql.c_str(), YAC_NULL_TERM_STR), "query");
+        for (size_t i = 0; i < count_; ++i)
+            check(yacBindColumn(stmt_.get(), i, YAC_SQLT_VARCHAR2, fields_[i].data(),
+                fields_[i].size(), &indicators_[i]), "bind column");
+    }
+    bool next() {
+        for (auto& field : fields_) field.fill(0);
+        YacUint32 fetched = 0;
+        const auto result = yacFetch(stmt_.get(), &fetched);
+        if (result == 100) return false; // YAC no-data, as in the existing SmallBank reader
+        check(result, "fetch"); // Do not silently accept truncated conversions.
+        return fetched != 0;
+    }
+    uint64_t value(size_t i) const {
+        if (i >= count_ || indicators_[i] < 0)
+            throw std::runtime_error("Null/invalid Seron Yashan physical sample");
+        const auto& field = fields_[i];
+        std::string text(field.data(), std::find(field.begin(), field.end(), '\0') - field.begin());
+        const auto begin = text.find_first_not_of(" \t\r\n");
+        const auto end = text.find_last_not_of(" \t\r\n");
+        if (begin == std::string::npos) throw std::runtime_error("Empty Yashan numeric value");
+        text = text.substr(begin, end - begin + 1);
+        if (text.find_first_not_of("0123456789") != std::string::npos)
+            throw std::runtime_error("Invalid Yashan unsigned numeric value");
+        return std::stoull(text);
+    }
+private:
+    Handle stmt_;
+    size_t count_;
+    std::array<std::array<char, 64>, 4> fields_{};
+    std::array<YacInt32, 4> indicators_{};
+};
+
+class Sampler {
+public:
+    Sampler(const std::string& address, const std::string& user, const std::string& password)
+        : env_(YAC_HANDLE_ENV, NULL), conn_(YAC_HANDLE_DBC, env_.get()) {
+        check(yacConnect(conn_.get(), (YacChar*)address.c_str(), YAC_NULL_TERM_STR,
+            (YacChar*)user.c_str(), YAC_NULL_TERM_STR,
+            (YacChar*)password.c_str(), YAC_NULL_TERM_STR), "connect");
+    }
+    ~Sampler() { yacDisconnect(conn_.get()); }
+
+    bool indexed(const std::string& table, const std::string& column) {
+        NumericRows rows(conn_.get(), "SELECT COUNT(*) FROM USER_IND_COLUMNS WHERE TABLE_NAME='" +
+            identifier(table) + "' AND COLUMN_NAME='" + identifier(column) + "'", 1);
+        if (!rows.next()) throw std::runtime_error("Yashan index query returned no count");
+        return rows.value(0) != 0;
+    }
+
+    std::vector<seron_tv::PhysicalValue> sample(const std::string& table,
+            const std::string& column, uint64_t domain, std::ostream& log) {
+        NumericRows rows(conn_.get(),
+            "SELECT DBMS_ROWID.ROWID_RELATIVE_FNO(ROWID), "
+            "DBMS_ROWID.ROWID_BLOCK_NUMBER(ROWID), DBMS_ROWID.ROWID_ROW_NUMBER(ROWID), " +
+            identifier(column) + " FROM " + identifier(table), 4);
+        std::vector<seron_tv::PhysicalValue> values;
+        while (rows.next()) {
+            const auto file = rows.value(0), block = rows.value(1), slot = rows.value(2);
+            if (file > UINT32_MAX || block > UINT32_MAX || slot > UINT32_MAX)
+                throw std::runtime_error("Yashan ROWID component exceeds sample encoding");
+            values.push_back({(file << 32) | block, rows.value(3), static_cast<uint32_t>(slot)});
+        }
+        std::sort(values.begin(), values.end(), [](const auto& a, const auto& b) {
+            return a.page != b.page ? a.page < b.page : a.offset < b.offset;
+        });
+        const auto stats = seron_tv::statistics(values, domain, true);
+        if (!stats.sufficient) throw std::runtime_error("Empty Seron Yashan table: " + table);
+        log << "Seron physical sample " << table << '.' << column
+            << " source=yashan-full-scan percent=100 rows=" << stats.rows
+            << " pages=" << stats.pages << " adjacent_pairs=" << stats.adjacent_pairs
+            << " cross_page_pairs=" << stats.cross_page_pairs
+            << " sufficient=" << stats.sufficient << '\n';
+        return values;
+    }
+private:
+    Handle env_;
+    Handle conn_;
+};
+} // namespace seron_yashan
+} // namespace
 
 std::atomic<int> g_chimera_phase{0};
 std::atomic<uint64_t> g_chimera_phase1_exec_cnt{0};
@@ -172,6 +303,20 @@ void SmartRouter::initialize_seron_range_rules() {
     const size_t begin = Workload_Type == 0 ? 0 : seron_range::WarehouseId;
     const size_t end = Workload_Type == 0 ? seron_range::WarehouseId : seron_range::Count;
     for (size_t i = begin; i < end; ++i) tables[specs[i].table].push_back(i);
+    if (DB_TYPE == 1) {
+        if (Workload_Type != 0) throw std::runtime_error("Seron Yashan supports SmallBank only");
+        const auto& info = YashanDBConnections.at(0);
+        seron_yashan::Sampler sampler(info.ip_port, info.user, info.password);
+        for (size_t id = begin; id < end; ++id) {
+            const auto& spec = specs[id];
+            if (!sampler.indexed(spec.table, spec.column)) continue;
+            seron_range_rules_->add_column(id, spec,
+                sampler.sample(spec.table, spec.column, spec.max_value, std::cout), true);
+        }
+        seron_range_rules_->prepare();
+        seron_range_rules_->print(std::cout);
+        return;
+    }
     pqxx::connection conn(DBConnection.at(0));
     pqxx::work db(conn);
     for (const auto& table : tables) {

@@ -2466,6 +2466,7 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             if (txn_type == 3) amount_val = 5;
             if (txn_type == 5) amount_val = 20;
 
+            bool seron_execution_succeeded = false;
             // Construct SQL for Direct Execution
             if (USE_SCALAR_PARAM) {
                 // Scalar Binding Logic
@@ -2503,7 +2504,8 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                         yacGetDiagRec(&errCode, msg, sizeof(msg), NULL, NULL, 0, &pos);
                         std::cerr << "Error Code: " << errCode << ", Message: " << msg << std::endl;
                     } else {
-                        // yacCommit(conn);
+                        // Scalar procedures commit internally before returning.
+                        seron_execution_succeeded = true;
                         // Collect outputs into ctid_ret_page_ids
                         
                         ctid_ret_page_ids.clear();
@@ -2558,7 +2560,7 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
                         // In V2, no cursor output is returned.
                         
                         // commit
-                        yacCommit(conn);
+                        seron_execution_succeeded = yacCommit(conn) == YAC_SUCCESS;
                         
                         // Update Router Stats (ctid_ret_page_ids will be empty)
                         // smart_router->update_key_page(txn_entry, tables, keys, rw, ctid_ret_page_ids, compute_node_id); // no need to update pages   
@@ -2573,6 +2575,8 @@ void run_yashan_smallbank_txns_sp(thread_params* params, Logger* logger_) {
             clock_gettime(CLOCK_MONOTONIC, &end_time);
             double exec_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 + 
                                (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+            if (SYSTEM_MODE == 33 && seron_execution_succeeded)
+                smart_router->record_seron_range_sample(txn_entry, exec_time);
             smart_router->add_worker_thread_exec_time(params->compute_node_id_connecter, params->thread_id, exec_time);
 
             double current_time_ms = end_time.tv_sec * 1000.0 + end_time.tv_nsec / 1000000.0;
@@ -3567,8 +3571,12 @@ int main(int argc, char *argv[]) {
             std::cerr << "Mode 33 supports SmallBank and TPC-C only." << std::endl;
             return -1;
         }
-        if (DB_TYPE != 0 || !use_sp || router_only || without_kpmap || SeronRangeHistogramBins <= 0) {
-            std::cerr << "Mode 33 requires PostgreSQL/KES stored procedures, DB execution, a key-page map, and positive histogram bins." << std::endl;
+        if ((DB_TYPE != 0 && DB_TYPE != 1) || !use_sp || router_only || without_kpmap || SeronRangeHistogramBins <= 0) {
+            std::cerr << "Mode 33 requires PostgreSQL/KES or YashanDB stored procedures, DB execution, a key-page map, and positive histogram bins." << std::endl;
+            return -1;
+        }
+        if (DB_TYPE == 1 && (Workload_Type != 0 || Enable_Long_Txn)) {
+            std::cerr << "Mode 33 on YashanDB supports the six SmallBank stored-procedure transaction types only." << std::endl;
             return -1;
         }
         std::cout << "Seron range-rule assignment + "
