@@ -221,6 +221,9 @@ void SmallBank::load_data_yashan() {
 
         int count = 0;
         int city_cnt = static_cast<int>(SmallBankCityType::Count);
+#if SMALLBANK_SHUFFLE_CITY
+        const SmallBankCityAssignment city_assignment(smallbank_account, city_cnt, true, SMALLBANK_CITY_SEED);
+#endif
 
         for(int i = start_index; i < end_index; i++) {
             // id comes from shuffled list
@@ -231,7 +234,11 @@ void SmallBank::load_data_yashan() {
             id_arr[idx] = cur_id;
             bal_arr[idx] = 1000 + ((cur_id - 1) % 1000);
             bal_save_arr[idx] = 1000 + ((cur_id - 1) % 1000);
+#if SMALLBANK_SHUFFLE_CITY
+            city_arr[idx] = city_assignment.city(cur_id);
+#else
             city_arr[idx] = ((cur_id - 1) / (smallbank_account / city_cnt) ) % city_cnt;
+#endif
             
             std::string name = "Account_" + std::to_string(cur_id);
             strncpy(name_arr[idx], name.c_str(), 200);
@@ -1158,7 +1165,10 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
             return;
         }
         int city_cnt = static_cast<int>(SmallBankCityType::Count);
-        
+#if SMALLBANK_SHUFFLE_CITY
+        const SmallBankCityAssignment city_assignment(smallbank_account, city_cnt, true, SMALLBANK_CITY_SEED);
+#endif
+
         int batch_size = 1000;
         std::vector<std::string> batch_tuples;
         batch_tuples.reserve(batch_size);
@@ -1209,7 +1219,11 @@ SmallBank::TableKeyPageMap SmallBank::load_data(pqxx::connection *conn0) {
             int id = id_list[i];
             int balance = 1000 + ((id - 1) % 1000); // Random balance
             std::string name = "Account_" + std::to_string(id);
+#if SMALLBANK_SHUFFLE_CITY
+            int city = city_assignment.city(id);
+#else
             int city = ((id - 1) / (smallbank_account / city_cnt) ) % city_cnt;
+#endif
             assert(city >=0 && city < city_cnt);
             
             std::string tuple_str = "(" + std::to_string(id) + ", " +

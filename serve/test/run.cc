@@ -3655,6 +3655,12 @@ int main(int argc, char *argv[]) {
         return -1;
     }
     std::cout << "SmallBank key permutation: " << (SmallBankPermuteKeys ? "enabled" : "disabled") << std::endl;
+    if (Workload_Type == 0) {
+        std::cout << "SmallBank city assignment: "
+                  << (SMALLBANK_SHUFFLE_CITY ? "shuffled" : "legacy contiguous") << std::endl;
+        if (SMALLBANK_SHUFFLE_CITY)
+            std::cout << "SmallBank city seed: " << SMALLBANK_CITY_SEED << std::endl;
+    }
     if (SmallBankPermuteKeys)
         std::cout << "SmallBank key permutation seed: " << SmallBankKeyPermutationSeed
                   << " (feistel6-cyclewalk-v1; post-permutation account ordering)" << std::endl;

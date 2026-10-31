@@ -1,3 +1,5 @@
+#pragma once
+#include "account_key_permutation.h"
 #include <vector>
 #include <thread>
 #include <random>
@@ -9,8 +11,31 @@
 #include <cassert>
 #include <fstream>
 
+// Map account IDs to cities using a seeded permutation of logical positions.
+// This preserves city sizes without changing actual account IDs or load order.
+class SmallBankCityAssignment {
+public:
+    SmallBankCityAssignment(int num_users, int city_cnt, bool shuffled, uint64_t seed)
+        : permutation_(num_users, seed), per_city_(city_cnt > 0 ? std::max(1, num_users / city_cnt) : 1),
+          city_count_(city_cnt), shuffled_(shuffled) {
+        if (city_cnt <= 0 || city_cnt > num_users)
+            throw std::invalid_argument("Invalid SmallBank city count");
+    }
+
+    int city(int account_id) const {
+        const uint64_t position = shuffled_ ? permutation_(account_id) : account_id;
+        return std::min(static_cast<int>((position - 1) / per_city_), city_count_ - 1);
+    }
+private:
+    AccountKeyPermutation permutation_;
+    int per_city_, city_count_;
+    bool shuffled_;
+};
+
 // 生成模拟社交网络图的函数
-void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, float>>> &adj_list, int num_users, int city_cnt);
+void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, float>>> &adj_list,
+                                        int num_users, int city_cnt,
+                                        bool shuffled = false, uint64_t seed = 42);
 
 // 生成模拟社交网络图的函数, 
 void generate_friend_simulate_graph(std::vector<std::vector<std::pair<int, float>>> &adj_list, int num_users);

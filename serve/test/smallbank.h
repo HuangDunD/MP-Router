@@ -273,7 +273,8 @@ public:
     #if WORKLOAD_AFFINITY_MODE == 0
         generate_friend_simulate_graph(user_friend_graph, num_users);
     #elif WORKLOAD_AFFINITY_MODE == 1
-        generate_friend_city_simulate_graph(user_friend_graph, num_users, (int)SmallBankCityType::Count);
+        generate_friend_city_simulate_graph(user_friend_graph, num_users, (int)SmallBankCityType::Count,
+                                           SMALLBANK_SHUFFLE_CITY != 0, SMALLBANK_CITY_SEED);
         if (dynamic_workload) {
             change_friends_dynamic(user_friend_graph, user_friend_graph_dynamic, 0.5); // 50%变化
         }

@@ -1,3 +1,4 @@
+#include "friend_simulate.h"
 #include <vector>
 #include <thread>
 #include <mutex>
@@ -12,11 +13,15 @@
 #include <fstream>
 
 // 生成模拟社交网络图的函数
-void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, float>>> &adj_list, int num_users, int city_cnt) {
+void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, float>>> &adj_list,
+                                        int num_users, int city_cnt, bool shuffled, uint64_t seed) {
     adj_list.clear();
     if (num_users <= 20) {
         std::cerr << "Number of users must be greater than 20 to generate a meaningful graph." << std::endl;
         return;
+    }
+    if (city_cnt <= 0 || city_cnt > num_users) {
+        throw std::invalid_argument("Invalid SmallBank city count");
     }
 
     adj_list.resize(num_users);
@@ -31,6 +36,16 @@ void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, 
         int start = i * account_per_city;
         int end = (i == city_cnt - 1) ? num_users : (i + 1) * account_per_city;
         city_ranges[i] = {start, end - 1};
+    }
+    const SmallBankCityAssignment city_assignment(num_users, city_cnt, shuffled, seed);
+    // Only the new mode needs an explicit membership list for random friend lookup.
+    std::vector<std::vector<int>> city_members;
+    if (shuffled) {
+        city_members.resize(city_cnt);
+        for (int c = 0; c < city_cnt; ++c)
+            city_members[c].reserve(city_ranges[c].second - city_ranges[c].first + 1);
+        for (int u = 0; u < num_users; ++u)
+            city_members[city_assignment.city(u + 1)].push_back(u);
     }
 
     // Target degrees
@@ -60,10 +75,12 @@ void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, 
         std::mt19937 gen(seed_offset);
         
         for(int u = start_u; u < end_u; ++u) {
-            int city = u / account_per_city;
-            if(city >= city_cnt) city = city_cnt - 1;
+            int city = city_assignment.city(u + 1);
             auto [c_start, c_end] = city_ranges[city];
-            std::uniform_int_distribution<int> city_dist(c_start, c_end);
+            const int member_count = c_end - c_start + 1;
+            std::uniform_int_distribution<int> city_dist(
+                shuffled ? 0 : c_start, shuffled ? member_count - 1 : c_end);
+            const int degree_target = std::min(target[u], member_count - 1);
 
             while(true) {
                 // Check degree of u
@@ -73,9 +90,10 @@ void generate_friend_city_simulate_graph(std::vector<std::vector<std::pair<int, 
                     std::lock_guard<std::mutex> lock(mutexes[u_mutex_idx]);
                     current_degree = adj[u].size();
                 }
-                if (current_degree >= target[u]) break;
+                if (current_degree >= degree_target) break;
 
                 int v = city_dist(gen);
+                if (shuffled) v = city_members[city][v];
                 if (u == v) continue;
 
                 // Add edge (u, v)
@@ -336,7 +354,7 @@ void generate_friend_simulate_graph(std::vector<std::vector<std::pair<int, float
 }
 
 // 导出社交网络图到 CSV: src,dst,prob
-bool dump_friend_graph_csv(const std::vector<std::vector<std::pair<int,float>>> &adj_list, const std::string &path, size_t limit_nodes = 0){
+bool dump_friend_graph_csv(const std::vector<std::vector<std::pair<int,float>>> &adj_list, const std::string &path, size_t limit_nodes){
 	std::ofstream ofs(path, std::ios::out | std::ios::trunc);
 	if(!ofs.is_open()) return false;
 	ofs << "src,dst,prob\n";

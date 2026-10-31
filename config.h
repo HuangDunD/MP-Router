@@ -52,6 +52,8 @@ extern int DB_TYPE;
 #define LOG_KROUTER_SCHEDULING_DEBUG 0 // 0: no log 1: log
 #define LOG_METIS_OWNERSHIP_DECISION 0 // 0: no log 1: log
 #define WORKLOAD_AFFINITY_MODE 1 // 0: key affinity 1: city-key affinity
+#define SMALLBANK_SHUFFLE_CITY 0 // 0: legacy contiguous cities; 1: seeded, scattered account-to-city assignment
+#define SMALLBANK_CITY_SEED 42ULL // city membership only; independent of key-access permutation and load order
 #define SYS_8_DECISION_TYPE_COUNT 19 // for SYSTEM_MODE 8, 17 types of ownership changes
 #define MLP_PREDICTION 0 // 0: no mlp prediction, just use key-value, 1: use mlp prediction
 #define LOG_BATCH_ROUTER 0 // 0: no log 1: log
