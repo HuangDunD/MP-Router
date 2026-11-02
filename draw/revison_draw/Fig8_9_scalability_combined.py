@@ -14,12 +14,12 @@ from matplotlib import rcParams
 from matplotlib.ticker import MultipleLocator
 
 
-SYSTEMS = ["RR", "MWR", "PHR", "PAR", "CPR", "MP-Router"]
+SYSTEMS = ["RR", "MWR", "PHR", "PAR", "CPR", "Seron", "MP-Router"]
 
-COLORS = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#e47474"]
-MARKERS = ["o", "s", "^", "p", "8", "D"]
-LINESTYLES = ["--", "--", "--", "--", "--", "-"]
-LINEWIDTHS = [2.6, 2.6, 2.6, 2.6, 2.6, 3.0]
+COLORS = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#69b9b6", "#e47474"]
+MARKERS = ["o", "s", "^", "p", "8", "v", "D"]
+LINESTYLES = ["--", "--", "--", "--", "--", "--", "-"]
+LINEWIDTHS = [2.6, 2.6, 2.6, 2.6, 2.6, 2.6, 3.0]
 
 rcParams["hatch.linewidth"] = 0.3
 rcParams["text.usetex"] = False
@@ -39,13 +39,18 @@ rcParams["legend.fontsize"] = 12
 
 def build_series(data: list[tuple[str, list[float]]], systems: list[str]) -> tuple[list[str], list[list[float]]]:
     labels = [label for label, _ in data]
-    series = [[values[i] / 1000.0 for _, values in data] for i in range(len(systems))]
+    series = [
+        [values[systems.index(name)] / 1000.0 if name in systems else math.nan for _, values in data]
+        for name in SYSTEMS
+    ]
     return labels, series
 
 
 def plot_panel(ax, labels: list[str], series: list[list[float]], xlabel: str, caption: str) -> None:
     x = list(range(len(labels)))
     for i, values in enumerate(series):
+        if not any(math.isfinite(value) for value in values):
+            continue
         ax.plot(
             x,
             values,
@@ -84,8 +89,8 @@ def main() -> None:
         raise ValueError(f"Unexpected node systems: {node_data.MAIN_SYSTEMS}")
 
     thread_labels, thread_series = build_series(thread_data.thread_scalability_data, SYSTEMS)
-    node_labels, node_series = build_series(node_data.node_scalability_data, SYSTEMS)
-    max_y = max(max(values) for values in thread_series + node_series)
+    node_labels, node_series = build_series(node_data.node_scalability_data, node_data.MAIN_SYSTEMS)
+    max_y = max(value for series in thread_series + node_series for value in series if math.isfinite(value))
     upper = math.ceil(max_y * 1.12 / 20) * 20
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.0, 3.3))
@@ -107,12 +112,12 @@ def main() -> None:
         legend_labels,
         loc="upper center",
         bbox_to_anchor=(0.52, 1.02),
-        prop={"weight": "bold", "size": 16},
+        prop={"weight": "bold", "size": 14},
         handlelength=1.5,
         handleheight=1.2,
         frameon=False,
-        ncol=6,
-        columnspacing=1.0,
+        ncol=7,
+        columnspacing=0.8,
     )
 
     fig.subplots_adjust(left=0.08, right=0.99, bottom=0.26, top=0.85, wspace=0.28)

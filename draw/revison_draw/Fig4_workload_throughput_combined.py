@@ -164,7 +164,7 @@ def main():
         ylabel=r"Throughput ($\times 10^4$ TPM)",
         major_locator=40,
     )
-    ax2.set_ylim(0, 200)
+    ax2.set_ylim(0, 160)
     ax2.text(
         0.47 ,
         -0.35,

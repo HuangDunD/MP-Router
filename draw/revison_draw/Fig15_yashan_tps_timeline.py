@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Plot YashanDB dynamic-workload TPS timeline from result.txt files."""
+"""Plot extracted YashanDB timelines, or explicitly supplied result.txt files."""
 
 import argparse
 import re
@@ -40,16 +40,28 @@ def resample(values, source_interval_s, target_interval_s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("files", nargs="+", help="result.txt files")
-    parser.add_argument("--labels", nargs="+", required=True)
-    parser.add_argument("--output", default="yashan_tps_timeline.pdf")
+    parser.add_argument("files", nargs="*", help="optional result.txt files")
+    parser.add_argument("--labels", nargs="+")
+    parser.add_argument("--output", default="fig15_yashan_tps_timeline.pdf")
     parser.add_argument("--duration-minutes", type=float, default=25.0)
     parser.add_argument("--source-interval-seconds", type=float, default=2.0)
-    parser.add_argument("--target-interval-seconds", type=float, default=5.0)
+    parser.add_argument("--target-interval-seconds", type=float, default=10.0)
     args = parser.parse_args()
 
-    if len(args.files) != len(args.labels):
-        raise ValueError("The number of files must match the number of labels.")
+    if args.files:
+        if not args.labels or len(args.files) != len(args.labels):
+            raise ValueError("The number of files must match the number of labels.")
+        series = [(label, parse_tps(path)) for label, path in zip(args.labels, args.files)]
+    else:
+        from extracted_data import fig15_yashan_phases as data
+        args.labels = args.labels or data.SYSTEMS
+        args.source_interval_seconds = data.SOURCE_INTERVAL_SECONDS
+        series = [(label, data.timeline_throughput_tps[label]) for label in args.labels]
+    if args.source_interval_seconds <= 0 or args.target_interval_seconds <= 0:
+        raise ValueError("Sampling intervals must be positive.")
+    # Use the actual bucket width, including non-integral requested intervals.
+    bucket = max(1, int(round(args.target_interval_seconds / args.source_interval_seconds)))
+    plotted_interval = bucket * args.source_interval_seconds
 
     rcParams["text.usetex"] = False
     rcParams["font.family"] = "sans-serif"
@@ -71,6 +83,7 @@ def main():
         "PHR": "#2ca02c",
         "PAR": "#B157D7",
         "CPR": "#d6d027",
+        "Seron": "#69b9b6",
         "MP-Router": "#e47474",
     }
     linestyles = {
@@ -79,17 +92,16 @@ def main():
         "PHR": "--",
         "PAR": "--",
         "CPR": "-.",
+        "Seron": "-",
         "MP-Router": "--",
     }
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    for label, file_path in zip(args.labels, args.files):
-        values = parse_tps(file_path)
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    for label, values in series:
         values = resample(values, args.source_interval_seconds, args.target_interval_seconds)
         if not values:
-            print(f"No TPS points found: {file_path}")
-            continue
-        x = [i * args.target_interval_seconds / 60.0 for i in range(len(values))]
+            raise ValueError(f"No TPS points found for {label}")
+        x = [i * plotted_interval / 60.0 for i in range(len(values))]
         y = [v / 1000.0 for v in values]
         ax.plot(
             x,
@@ -125,9 +137,12 @@ def main():
     ax.grid(axis="y", linestyle="--", alpha=0.4)
     ax.legend(
         loc="upper center",
-        bbox_to_anchor=(0.47, 1.17),
+        bbox_to_anchor=(0.5, 1.17),
         ncol=len(args.labels),
         frameon=False,
+        columnspacing=0.9,
+        handlelength=1.8,
+        handletextpad=0.4,
         prop={"weight": "bold", "size": 12},
     )
 
@@ -135,6 +150,7 @@ def main():
     out_path = Path("figs") / args.output
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=600, bbox_inches="tight", pad_inches=0.05)
+    plt.savefig(out_path.with_suffix(".png"), dpi=180, bbox_inches="tight", pad_inches=0.05)
     print(f"Saved figure: {out_path}")
 
 

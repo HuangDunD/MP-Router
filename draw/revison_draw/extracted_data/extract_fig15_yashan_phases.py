@@ -23,6 +23,10 @@ DEFAULT_RESULT_DIR = (
     / "smallbank_p1_ZipfTheta0.8_ZipfGenfinite_acc10000000_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0"
 )
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "fig15_yashan_phases.py"
+DEFAULT_SERON_DIR = (
+    PROJECT_ROOT / "vldb_res" / "icde-newdata" / "20261030193248(seron-yashan)"
+    / "smallbank_p1_ZipfTheta0.8_ZipfGenfinite_acc10000000_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"
+)
 
 SYSTEMS = [
     ("RR", "0"),
@@ -30,6 +34,7 @@ SYSTEMS = [
     ("PHR", "2"),
     ("PAR", "23"),
     ("CPR", "28"),
+    ("Seron", "33"),
     ("MP-Router", "11"),
 ]
 
@@ -75,18 +80,20 @@ def phase_slice(
 
 
 def extract(
-    result_dir: Path, source_interval_seconds: float
-) -> tuple[list[tuple[str, list[float]]], list[tuple[str, list[int]]], list[str]]:
+    result_dir: Path, source_interval_seconds: float, seron_dir: Path
+) -> tuple[list, list, list[str], dict, dict]:
     raw_by_system = {}
+    source_files = {}
     warnings = []
     required_samples = round(PHASES[-1][2] * 60.0 / source_interval_seconds)
 
     for system, mode in SYSTEMS:
-        result_file = result_dir / f"m{mode}" / "result.txt"
+        result_file = (seron_dir if system == "Seron" else result_dir) / f"m{mode}" / "result.txt"
         if not result_file.exists():
             raise FileNotFoundError(result_file)
         values = parse_tps(result_file)
         raw_by_system[system] = values
+        source_files[system] = str(result_file.relative_to(PROJECT_ROOT)) if result_file.is_relative_to(PROJECT_ROOT) else str(result_file)
         if len(values) < required_samples - 1:
             warnings.append(
                 f"{system}: expected about {required_samples} samples for 25 minutes, found {len(values)}"
@@ -108,7 +115,7 @@ def extract(
         phase_tps.append((phase, averages))
         phase_counts.append((phase, counts))
 
-    return phase_tps, phase_counts, warnings
+    return phase_tps, phase_counts, warnings, raw_by_system, source_files
 
 
 def derive_metrics(
@@ -148,6 +155,8 @@ def write_module(
     retention: list[tuple[str, list[float]]],
     target_over_baselines: list[tuple[str, list[float]]],
     warnings: list[str],
+    raw_by_system: dict,
+    source_files: dict,
 ) -> None:
     systems = [name for name, _ in SYSTEMS]
     baseline_systems = [name for name in systems if name != TARGET_SYSTEM]
@@ -167,6 +176,8 @@ def write_module(
         "",
         f"SOURCE_INTERVAL_SECONDS = {source_interval_seconds!r}",
         "",
+        f"SOURCE_FILES = {pformat(source_files, width=120, sort_dicts=False)}",
+        "",
         f"PHASE_BOUNDS_MINUTES = {pformat(phase_bounds, width=120)}",
         "",
         f"PHASE_DESCRIPTIONS = {pformat(PHASE_DESCRIPTIONS, width=120, sort_dicts=False)}",
@@ -184,6 +195,9 @@ def write_module(
         "MISSING = []",
         "",
         f"WARNINGS = {pformat(warnings, width=120)}",
+        "",
+        "# Unsmoothed two-second samples for the timeline plot.",
+        f"timeline_throughput_tps = {pformat(raw_by_system, width=120, compact=True, sort_dicts=False)}",
         "",
     ]
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -217,6 +231,7 @@ def print_summary(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--result-dir", type=Path, default=DEFAULT_RESULT_DIR)
+    parser.add_argument("--seron-dir", type=Path, default=DEFAULT_SERON_DIR)
     parser.add_argument("--source-interval-seconds", type=float, default=2.0)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
@@ -224,7 +239,9 @@ def main() -> None:
     if args.source_interval_seconds <= 0:
         raise ValueError("--source-interval-seconds must be positive")
 
-    phase_tps, phase_counts, warnings = extract(args.result_dir, args.source_interval_seconds)
+    phase_tps, phase_counts, warnings, raw_by_system, source_files = extract(
+        args.result_dir.resolve(), args.source_interval_seconds, args.seron_dir.resolve()
+    )
     retention, target_over_baselines = derive_metrics(phase_tps)
     write_module(
         args.output,
@@ -235,10 +252,13 @@ def main() -> None:
         retention,
         target_over_baselines,
         warnings,
+        raw_by_system,
+        source_files,
     )
 
     print(f"Wrote {args.output}")
     print(f"Source: {args.result_dir}")
+    print(f"Seron source: {args.seron_dir}")
     print_summary(phase_tps, retention, target_over_baselines)
     for warning in warnings:
         print(f"Warning: {warning}")
