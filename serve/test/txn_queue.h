@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 #include "common.h"
 #include "config.h"
 #include "tit.h"
@@ -84,6 +85,11 @@ public:
             if (!e) continue;
             if (!e->notification_groups.empty()) {
                 for (const auto& group : e->notification_groups) {
+#if MP_ROUTER_BARRIER_TIMEOUT
+                    // Timeout removal also edits after_txns.
+                    std::unique_lock<std::mutex> lock(group->notify_mutex, std::defer_lock);
+                    if (SYSTEM_MODE == 11) lock.lock();
+#endif
                     prepared.priority += static_cast<int>(group->after_txns.size());
                 }
             }
@@ -222,6 +228,12 @@ public:
     }
 
     int size() { return current_queue_size_; }
+#if MP_ROUTER_REGULAR_AGING
+    int head_window_id_unlocked() const {
+        if (inflight_active_) return inflight_.entries[inflight_pos_]->batch_id;
+        return pq_.top().entries.front()->batch_id;
+    }
+#endif
     bool empty() { return current_queue_size_ == 0; }
     bool empty_unlocked() const { return current_queue_size_.load(std::memory_order_relaxed) == 0; }
     bool is_inflight_active() { return inflight_active_; }
@@ -294,12 +306,62 @@ public:
                 pending_txn_cnt_per_node_[node_id]++;
             }
         } else {
+#if MP_ROUTER_BARRIER_TIMEOUT
+            if (SYSTEM_MODE == 11) tx_entry->barrier_wait_start = std::chrono::steady_clock::now();
+#endif
             pending_target_node_[tx_entry] = node_id;
             pending_txn_cnt_per_node_[node_id]++;
             total_pending_txn_count_.fetch_add(1, std::memory_order_release);
         }
         return true;
     }
+
+#if MP_ROUTER_BARRIER_TIMEOUT
+    // Remove only incoming waits. Successors still wait for this txn's real completion.
+    // The caller holds its node queue mutex and immediately enqueues the returned txns.
+    std::vector<TxnQueueEntry*> pop_expired_on_node(
+            int node_id, std::chrono::steady_clock::time_point now) {
+        static_assert(MP_ROUTER_BARRIER_MAX_WAIT_MS > 0, "Barrier timeout must be positive");
+        std::vector<TxnQueueEntry*> expired;
+        if (SYSTEM_MODE != 11 || empty_fast()) return expired;
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        for (auto it = pending_target_node_.begin(); it != pending_target_node_.end();) {
+            auto* txn = it->first;
+            if (it->second != node_id || now - txn->barrier_wait_start <
+                    std::chrono::milliseconds(MP_ROUTER_BARRIER_MAX_WAIT_MS)) {
+                ++it;
+                continue;
+            }
+            std::vector<std::shared_ptr<DependencyGroup>> groups;
+            for (const auto& weak : txn->waiting_groups) {
+                if (auto group = weak.lock()) groups.push_back(std::move(group));
+            }
+            std::sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) {
+                return std::less<DependencyGroup*>{}(a.get(), b.get());
+            });
+            groups.erase(std::unique(groups.begin(), groups.end()), groups.end());
+            std::vector<std::unique_lock<std::mutex>> group_locks;
+            for (const auto& group : groups) group_locks.emplace_back(group->notify_mutex);
+            // All completion notifications are serialized with these locks. A zero ref
+            // means the normal ready callback owns release; leave it in pending for that path.
+            if (txn->ref.load(std::memory_order_acquire) == 0) {
+                ++it;
+                continue;
+            }
+            for (const auto& group : groups) {
+                auto& after = group->after_txns;
+                after.erase(std::remove(after.begin(), after.end(), txn), after.end());
+            }
+            txn->ref.store(0, std::memory_order_release);
+            expired.push_back(txn);
+            it = pending_target_node_.erase(it);
+            --pending_txn_cnt_per_node_[node_id];
+            total_pending_txn_count_.fetch_sub(1, std::memory_order_release);
+        }
+        if (!expired.empty()) pending_cv_.notify_all();
+        return expired;
+    }
+#endif
 
     int get_pending_txn_count() {
         std::unique_lock<std::mutex> lock(pending_mutex_);
@@ -632,6 +694,9 @@ public:
                 if(ret_type != nullptr) *ret_type = 0;
                 return {};
             }
+#if MP_ROUTER_BARRIER_TIMEOUT
+            release_expired_barriers_unlocked();
+#endif
             if(!prior_read_txn_queue_.empty() || !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked()) {
                 break; // 有事务可弹出
             }
@@ -652,12 +717,18 @@ public:
                 // 目前无事务, 等待
 	                struct timespec wait_start, wait_end;
 	                clock_gettime(CLOCK_MONOTONIC, &wait_start);
-	                queue_cv_.wait(lock, [this]() { 
+	                const auto ready = [this]() {
 	                    if (force_stopped_) return true;
 	                    bool has_txn = !prior_read_txn_queue_.empty() || !txn_queue_.empty() || !dag_txn_queue_->empty_unlocked();
 	                    bool can_exit = (finished_ || batch_finished_) && pending_txn_queue_->empty_node(node_id_);
 	                    return has_txn || can_exit;
-	                });
+	                };
+#if MP_ROUTER_BARRIER_TIMEOUT
+                    if (SYSTEM_MODE == 11) {
+                        queue_cv_.wait_for(lock, std::chrono::milliseconds(10), ready);
+                    } else
+#endif
+                    queue_cv_.wait(lock, ready);
 	                clock_gettime(CLOCK_MONOTONIC, &wait_end);
 	                if (ret_wait_ms != nullptr) {
 	                    *ret_wait_ms += (wait_end.tv_sec - wait_start.tv_sec) * 1000.0 +
@@ -666,7 +737,20 @@ public:
             }
         }
 
-        if(!prior_read_txn_queue_.empty()) {
+        bool serve_regular_first = false;
+#if MP_ROUTER_REGULAR_AGING
+        static_assert(MP_ROUTER_REGULAR_MAX_WINDOW_GAP > 0, "Window gap must be positive");
+        if (SYSTEM_MODE == 11 && !txn_queue_.empty() &&
+                (!prior_read_txn_queue_.empty() || !dag_txn_queue_->empty_unlocked())) {
+            const int critical_window = !prior_read_txn_queue_.empty()
+                ? prior_read_txn_queue_.front().front()->batch_id
+                : dag_txn_queue_->head_window_id_unlocked();
+            const int regular_window = txn_queue_.front().front()->batch_id;
+            serve_regular_first = static_cast<int64_t>(critical_window) - regular_window >=
+                MP_ROUTER_REGULAR_MAX_WINDOW_GAP;
+        }
+#endif
+        if(!serve_regular_first && !prior_read_txn_queue_.empty()) {
             if(ret_type != nullptr) *ret_type = 3; // prior-read type
             batch_entries = std::move(prior_read_txn_queue_.front());
             assert(!batch_entries.empty());
@@ -685,7 +769,7 @@ public:
                             std::to_string(prior_read_txn_vec_cnt));
         #endif
         }
-        else if(!dag_txn_queue_->empty_unlocked()){
+        else if(!serve_regular_first && !dag_txn_queue_->empty_unlocked()){
             if(ret_type != nullptr) *ret_type = 1; // dag type
             // 优先取 DAG-ready，若过大则分块，并与 regular 批次做混合以降低冲突
             bool inflight_active = dag_txn_queue_->is_inflight_active_unlocked();
@@ -1271,6 +1355,39 @@ public:
 
 private:
     std::deque<std::vector<TxnQueueEntry*>> prior_read_txn_queue_;
+#if MP_ROUTER_BARRIER_TIMEOUT
+    std::chrono::steady_clock::time_point next_barrier_timeout_check_;
+
+    void release_expired_barriers_unlocked() {
+        if (SYSTEM_MODE != 11) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_barrier_timeout_check_) return;
+        // Poll from connectors, including idle waits, without a separate monitor thread.
+        next_barrier_timeout_check_ = now + std::chrono::milliseconds(10);
+        auto expired = pending_txn_queue_->pop_expired_on_node(node_id_, now);
+        for (auto* txn : expired) {
+            txn->combine_txn_count = 1;
+            if (txn->schedule_type == TxnScheduleType::SCHEDULE_PRIOR) {
+                if (txn->prior_read_only_on_transfer) {
+                    prior_read_txn_queue_.push_back({txn});
+                    ++prior_read_txn_cnt;
+                    ++prior_read_txn_vec_cnt;
+                } else {
+                    dag_txn_queue_->push_prepared_ready_batch_unlocked(
+                        DAGTxnQueue::prepare_ready_batch({txn}));
+                    ++schedule_txn_cnt;
+                    ++schedule_txn_vec_cnt;
+                }
+            } else {
+                txn_queue_.push_back({txn});
+                ++regular_txn_cnt;
+                ++regular_txn_vec_cnt;
+            }
+            ++current_queue_size_;
+        }
+        if (!expired.empty()) queue_cv_.notify_all();
+    }
+#endif
     SeronPendingQueue<TxnQueueEntry*> seron_pending_;
     std::shared_ptr<SeronPageConflictTable> seron_conflicts_;
     std::atomic<int> seron_conflict_waiters_{0};

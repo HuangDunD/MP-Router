@@ -3576,6 +3576,10 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
     for (auto* txn_entry : *txn_batch) {
         txn_entry->route_start_time = route_start_ms;
         txn_entry->prepared_window_wait_ms = prepared_window_wait_ms;
+#if MP_ROUTER_REGULAR_AGING
+        // Include conflict-free and final regular transactions, not just planned transfers.
+        if (SYSTEM_MODE == 11) txn_entry->batch_id = batch_id;
+#endif
     }
     
     // 计时
@@ -4185,6 +4189,9 @@ void SmartRouter::schedule_prepared_batch_v3(PreparedBatch& prepared) {
                     if(fence_group->unfinish_txn_count.load(std::memory_order_acquire) > 0) {
                         txn->ref++;
                         fence_group->after_txns.push_back(txn);
+#if MP_ROUTER_BARRIER_TIMEOUT
+                        if (SYSTEM_MODE == 11) txn->waiting_groups.push_back(fence_group);
+#endif
                         return true;
                     }
                     return false;
