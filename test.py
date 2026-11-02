@@ -1479,17 +1479,17 @@ db_ready_probe_conninfos = [
     "host=172.16.0.110 port=44321 user=system password=123456 dbname=smallbank",
     "host=172.16.0.109 port=44321 user=system password=123456 dbname=smallbank",
     "host=172.16.0.111 port=44321 user=system password=123456 dbname=smallbank",
-    # "host=172.16.0.30 port=44321 user=system password=123456 dbname=smallbank",
-    # "host=172.16.0.29 port=44321 user=system password=123456 dbname=smallbank",
-    # "host=172.16.0.31 port=44321 user=system password=123456 dbname=smallbank",
-    # "host=172.16.0.32 port=44321 user=system password=123456 dbname=smallbank",
+    # "host=172.16.0.114 port=44321 user=system password=123456 dbname=smallbank",
+    # "host=172.16.0.116 port=44321 user=system password=123456 dbname=smallbank",
+    # "host=172.16.0.115 port=44321 user=system password=123456 dbname=smallbank",
+    # "host=172.16.0.113 port=44321 user=system password=123456 dbname=smallbank",
 ]
 
 yashan_db_conninfos = [
-    "ip_port=172.16.0.24:1688 user=sys password=Wljwlj123.",
-    "ip_port=172.16.0.26:1688 user=sys password=Wljwlj123.",
-    "ip_port=172.16.0.27:1688 user=sys password=Wljwlj123.",
-    "ip_port=172.16.0.25:1688 user=sys password=Wljwlj123.",
+    "ip_port=172.16.0.108:1688 user=sys password=Hcyhcy123.",
+    "ip_port=172.16.0.110:1688 user=sys password=Hcyhcy123.",
+    "ip_port=172.16.0.109:1688 user=sys password=Hcyhcy123.",
+    "ip_port=172.16.0.111:1688 user=sys password=Hcyhcy123.",
 ]
 DBType = 0 # 0: PostgreSQL/KES, 1: YashanDB, 2: MySQL
 UseStoredProcedures = 1
@@ -1501,12 +1501,12 @@ LoadRestartRun = False
 # -------------------------------------------- # test parameters -------------------------------------------- #
 # dynamic
 # RunModeType = [0, 25, 2, 23, 28, 33, 11]
-# RunModeType = [33]
+RunModeType = [11]
 # RunModeType = [33]
 # RunModeType = [23]
-RunModeType = [11]
+# RunModeType = [33]
 # RunModeType = [28]
-TPCCRuleRunModeType = [31]
+TPCCRuleRunModeType = []
 # RunModeType = [11, 13, 2]
 # RunModeType = [28]
 # ! system: 0 random, 2 page hash, 11 MP-Router, 13 without scheduling, 23 metis,
@@ -1516,19 +1516,19 @@ TPCCRuleRunModeType = [31]
 # ! TPCCRuleRunModeType: 31 TPC-C warehouse rule router, auto-added for TPC-C workloads
 # RunModeType = [13]
 # RunModeType = [1]
-Workloads = ["smallbank"] # one script run can cover multiple workloads
+Workloads = ["tpcc-standard"] # one script run can cover multiple workloads
 WorkloadAccessPatterns = {
     "smallbank": [1],
-    "tpcc": [2,0],
-    "tpcc-standard": [2,0],
+    "tpcc": [0],
+    "tpcc-standard": [0],
 }
 SweepMode = "axis" # axis: vary one dimension from defaults; full: Cartesian product
 AccessPattern = [1, 2, 0] # 0 uniform, 1 zipfian, 2 hotspot
 # AccessPattern = [1]
 # ZipfianTheta = [0.4]
-ZipfianTheta = [1.1, 0.9, 0.8, 0.6, 0.1]
+# ZipfianTheta = [1.1, 0.9, 0.8, 0.6, 0.1]
 # ZipfianTheta = [0.9, 0.8, 0.6]
-# ZipfianTheta = [0.8]
+ZipfianTheta = [0.8]
 ZipfianGenerator = "finite" # options: finite, legacy
 SmallBankKeyPermutationSeed = None # None: unchanged workload; integer: enable seeded key permutation
 TPCCWarehousePermutationSeed = None # None: unchanged workload; integer: enable seeded warehouse permutation
@@ -1542,15 +1542,16 @@ HotspotFraction = [0.25]
 # HotspotProb = [0.8]
 HotspotProb = [0.5, 0.8, 0.9]
 # account = 100W, 单个表大概14W个页面, 每个页面8KB, 大小约1.1GB
-AccountCount = [10000000]
+# AccountCount = [100000000]
+AccountCount = [1000000] 
 WarehouseCount = [200]
 WorkerThreadCount = [16]
 # WorkerThreadCount = [16, 2, 4, 8, 32, 64]
 try_count = 35000
 TimeRun = 1 # 0:disable, 1:enable
 EnableDynamicWorkload = 0 # 0:disable, 1:enable dynamic workload phases in ./run
-# WarmupSeconds = 120
-# RunSeconds = 150
+# WarmupSeconds = 180
+# RunSeconds = 90
 WarmupSeconds = 15
 RunSeconds = 30
 VirtualArrivalRate = 150000 # TPS for virtual-arrival latency only; 0 disables it, no pacing
@@ -1562,12 +1563,12 @@ RouterOnlyPreprocessBatchConcurrency = 2
 RouterOnlyGeneratorThreads = 8
 Unlog = 1
 UseDataCache = False # True: restore workload data cache before each case; False: do not restart DB, load data in each run
-RestartDBBeforeEachTPCCMode = True # True: for TPC-C, restart DB before each mode when UseDataCache=False
+RestartDBBeforeEachTPCCMode = False # True: for TPC-C, restart DB before each mode when UseDataCache=False
 workload = Workloads[0]
 sys_extend_size = 300000
 sys_index_extend_size = 30000
 AffinityTxnRatio = [0.8]
-# AffinityTxnRatio = [0.8, 1, 0.6, 0.4, 0.2, 0]
+# AffinityTxnRatio = [1, 0.6, 0.4, 0.2, 0]
 # AffinityTxnRatio = [1, 0.8, 0.6, 0.4, 0.2, 0]
 # BatchSize = [10000, 5000, 1000, 500, 100, 50000, 100000, 10, 50] # default 10000
 BatchSize = [10000]
@@ -1651,6 +1652,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--load-restart-run",
         action="store_true",
+        default=LoadRestartRun,
         help="For every case, pause the same process after loading, restart PostgreSQL/KES, then resume the benchmark.",
     )
     parser.add_argument("--disable-dynamic", action="store_true", help="Disable --enable-dynamic for this run")
