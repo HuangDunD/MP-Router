@@ -7,6 +7,10 @@
 #include <mutex>
 #include <memory>
 #include "common.h"
+#include "config.h"
+#if MP_ROUTER_BARRIER_TIMEOUT
+#include <chrono>
+#endif
 
 enum class TxnScheduleType {
     NONE = -1,
@@ -55,6 +59,11 @@ struct TxnQueueEntry {
     // Dependency Group Logic
     std::vector<std::shared_ptr<DependencyGroup>> notification_groups; // 这是自己属于的优先执行的group, 当这个事务执行完，需要去通知的那些 Group自己已经完成, DependencyGroup存储了后面的事务
     std::atomic<int> ref = 0; // 引用计数, 表示前序依赖的 Group 数量 (Incoming Group Dependencies)
+#if MP_ROUTER_BARRIER_TIMEOUT
+    // Populated before pending registration; outgoing notification_groups are unchanged.
+    std::vector<std::weak_ptr<DependencyGroup>> waiting_groups;
+    std::chrono::steady_clock::time_point barrier_wait_start;
+#endif
     TxnScheduleType schedule_type = TxnScheduleType::NONE; // 0: unconflict, 1: schedule_prior, 2: ownership_ok_back 
     bool prior_read_only_on_transfer = false; // Only for SCHEDULE_PRIOR: reads all pages touched by the transfer that made it prior.
     int group_id; // 事务所属的依赖组ID

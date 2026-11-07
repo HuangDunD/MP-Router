@@ -59,6 +59,19 @@ extern int DB_TYPE;
 #define LOG_BATCH_ROUTER 0 // 0: no log 1: log
 #define LOG_DEPENDENCY 0 // 0: no log 1: log
 #define LOG_QUEUE_STATUS 0 // 0: no log 1: log
+// Mode 11 only. Both safeguards default off to preserve previous experiments.
+#ifndef MP_ROUTER_REGULAR_AGING
+#define MP_ROUTER_REGULAR_AGING 0
+#endif
+#ifndef MP_ROUTER_REGULAR_MAX_WINDOW_GAP
+#define MP_ROUTER_REGULAR_MAX_WINDOW_GAP 3 // critical head window minus regular head window
+#endif
+#ifndef MP_ROUTER_BARRIER_TIMEOUT
+#define MP_ROUTER_BARRIER_TIMEOUT 0
+#endif
+#ifndef MP_ROUTER_BARRIER_MAX_WAIT_MS
+#define MP_ROUTER_BARRIER_MAX_WAIT_MS 10000 // milliseconds since entry into the pending set
+#endif
 #define LOG_TXN_EXEC 0 // 0: no log 1: log
 #define LOG_LOAD_BALANCE 0 // 0: no log 1: log
 #define LOG_PREDICTION_RESULT 0 // 0: no log 1: log

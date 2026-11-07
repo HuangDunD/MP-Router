@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from matplotlib.ticker import MultipleLocator
 
-SYSTEMS = ["RR", "MWR", "PHR", "PAR", "CPR", "MP-Router"]
+SYSTEMS = ["RR", "MWR", "PHR", "PAR", "CPR", "Seron", "MP-Router"]
 
 
 rcParams["hatch.linewidth"] = 0.3
@@ -108,6 +108,8 @@ def main():
 
     colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#e47474"]
     hatches = ["////", "\\\\\\\\", "xxxx", "oo", "OOOO", "...."]
+    colors.insert(-1, "#69b9b6")
+    hatches.insert(-1, "--")
 
     # Match Fig. 4 exactly, including the uncropped PDF canvas.
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.3, 2.65), sharey=False)
@@ -167,8 +169,8 @@ def main():
         handlelength=1.5,
         handleheight=1.2,
         frameon=False,
-        ncol=6,
-        columnspacing=1.5,
+        ncol=7,
+        columnspacing=0.8,
     )
 
     plt.subplots_adjust(left=0.09, right=0.99, bottom=0.28, top=0.82, wspace=0.32)

@@ -2,24 +2,43 @@
 # Do not edit by hand; rerun the extractor with the intended data directory.
 #
 # Metric: cf_waits_per_kwr_business_txn
-# SmallBank source: ../../../vldb_res/20260716160331(smallbank-4kwr)
-# TPC-C source: ../../../vldb_res/20260716232528(tpcc-4kwr)
+# SmallBank source: /Users/hcy/Desktop/Ruc/论文投稿/SIGMOD 2026 MP-Router/vldb_res/20260716160331(smallbank-4kwr)
+# TPC-C source: /Users/hcy/Desktop/Ruc/论文投稿/SIGMOD 2026 MP-Router/vldb_res/icde-newdata/20261029013455(icde)
+# SmallBank Seron source (mode 33): /Users/hcy/Desktop/Ruc/论文投稿/SIGMOD 2026 MP-Router/vldb_res/icde-newdata/20261029192612(icde-seron-sb)
+# TPC-C Seron source (mode 33): /Users/hcy/Desktop/Ruc/论文投稿/SIGMOD 2026 MP-Router/vldb_res/icde-newdata/20261029202213(icde-seron-tpcc)
 
-MAIN_SYSTEMS = ['RR', 'MWR', 'PHR', 'PAR', 'CPR', 'MP-Router']
+MAIN_SYSTEMS = ['RR', 'MWR', 'PHR', 'PAR', 'CPR', 'Seron', 'MP-Router']
 
 CACHE_FUSION_METRIC = 'cf_waits_per_kwr_business_txn'
 
-smallbank_cache_fusion_data = [('0.1', [2.776586, 2.621287, 1.926004, 2.327543, 1.934828, 1.553279]),
- ('0.6', [2.871423, 2.736569, 2.022981, 2.436376, 1.991777, 1.589269]),
- ('0.8', [3.313868, 3.181513, 2.38806, 2.956178, 2.35003, 1.871776]),
- ('0.9', [4.039119, 3.993727, 3.327248, 3.903396, 3.340616, 2.049291]),
- ('1.1', [6.828777, 6.970024, 6.133094, 6.719418, 6.026156, 1.920858])]
+smallbank_cache_fusion_data = [('0.1', [2.776586, 2.621287, 1.926004, 2.327543, 1.934828, 2.495439, 1.553279]),
+ ('0.6', [2.871423, 2.736569, 2.022981, 2.436376, 1.991777, 2.390365, 1.589269]),
+ ('0.8', [3.313868, 3.181513, 2.38806, 2.956178, 2.35003, 2.534235, 1.871776]),
+ ('0.9', [4.039119, 3.993727, 3.327248, 3.903396, 3.340616, 2.710386, 2.049291]),
+ ('1.1', [6.828777, 6.970024, 6.133094, 6.719418, 6.026156, 3.788082, 1.920858])]
 
-tpcc_cache_fusion_data = [('Normal', [30.045367, 30.152023, 27.572682, 28.537056, 27.197105, 5.590761]),
- ('50%', [30.639483, 29.829854, 28.389142, 29.830487, 28.27906, 6.752931]),
- ('80%', [31.77333, 31.284712, 29.172533, 31.572438, 28.119769, 7.449608]),
- ('90%', [32.079573, 32.167345, 29.375473, 32.105079, 28.087723, 6.340527])]
+tpcc_cache_fusion_data = [('Normal', [29.994791, 29.904387, 27.641138, 28.406736, 27.53466, 21.301375, 6.308748]),
+ ('50%', [31.41068, 30.95106, 28.986614, 29.359271, 28.22367, 22.887217, 7.36403]),
+ ('80%', [32.137895, 31.94763, 28.720903, 31.206087, 29.306412, 22.196228, 7.331709]),
+ ('90%', [33.139528, 33.074989, 29.97543, 32.35299, 29.694647, 21.757704, 7.564352])]
 
 MISSING = []
 
-WARNINGS = []
+WARNINGS = ['/Users/hcy/Desktop/Ruc/论文投稿/SIGMOD 2026 '
+ 'MP-Router/vldb_res/icde-newdata/20261029013455(icde)/tpcc-standard_p2_HsFrac0.25_HsProb0.5_wh200_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0/m0: '
+ 'using KWR Load Profile transaction counts (business SQL counts unavailable)',
+ '/Users/hcy/Desktop/Ruc/论文投稿/SIGMOD 2026 '
+ 'MP-Router/vldb_res/icde-newdata/20261029013455(icde)/tpcc-standard_p2_HsFrac0.25_HsProb0.5_wh200_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0/m25: '
+ 'using KWR Load Profile transaction counts (business SQL counts unavailable)',
+ '/Users/hcy/Desktop/Ruc/论文投稿/SIGMOD 2026 '
+ 'MP-Router/vldb_res/icde-newdata/20261029013455(icde)/tpcc-standard_p2_HsFrac0.25_HsProb0.5_wh200_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0/m2: '
+ 'using KWR Load Profile transaction counts (business SQL counts unavailable)',
+ '/Users/hcy/Desktop/Ruc/论文投稿/SIGMOD 2026 '
+ 'MP-Router/vldb_res/icde-newdata/20261029013455(icde)/tpcc-standard_p2_HsFrac0.25_HsProb0.5_wh200_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0/m23: '
+ 'using KWR Load Profile transaction counts (business SQL counts unavailable)',
+ '/Users/hcy/Desktop/Ruc/论文投稿/SIGMOD 2026 '
+ 'MP-Router/vldb_res/icde-newdata/20261029013455(icde)/tpcc-standard_p2_HsFrac0.25_HsProb0.5_wh200_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0/m28: '
+ 'using KWR Load Profile transaction counts (business SQL counts unavailable)',
+ '/Users/hcy/Desktop/Ruc/论文投稿/SIGMOD 2026 '
+ 'MP-Router/vldb_res/icde-newdata/20261029013455(icde)/tpcc-standard_p2_HsFrac0.25_HsProb0.5_wh200_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0/m11: '
+ 'using KWR Load Profile transaction counts (business SQL counts unavailable)']

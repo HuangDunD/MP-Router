@@ -14,12 +14,12 @@ from matplotlib import rcParams
 from matplotlib.ticker import MultipleLocator
 
 
-SYSTEMS = ["RR", "MWR", "PHR", "PAR", "CPR", "MP-Router"]
+SYSTEMS = ["RR", "MWR", "PHR", "PAR", "CPR", "Seron", "MP-Router"]
 
-COLORS = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#e47474"]
-MARKERS = ["o", "s", "^", "p", "8", "D"]
-LINESTYLES = ["--", "--", "--", "--", "--", "-"]
-LINEWIDTHS = [2.6, 2.6, 2.6, 2.6, 2.6, 3.0]
+COLORS = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#69b9b6", "#e47474"]
+MARKERS = ["o", "s", "^", "p", "8", "v", "D"]
+LINESTYLES = ["--", "--", "--", "--", "--", "--", "-"]
+LINEWIDTHS = [2.6, 2.6, 2.6, 2.6, 2.6, 2.6, 3.0]
 
 rcParams["hatch.linewidth"] = 0.3
 rcParams["text.usetex"] = False
@@ -39,10 +39,13 @@ rcParams["legend.fontsize"] = 12
 
 def build_series(data: list[tuple[str, list[float]]], systems: list[str]) -> tuple[list[str], list[list[float]]]:
     labels = [label for label, _ in data]
-    series = [
-        [math.nan if values[i] is None else values[i] / 1000.0 for _, values in data]
-        for i in range(len(systems))
-    ]
+    series = []
+    for name in SYSTEMS:
+        if name not in systems:
+            series.append([math.nan for _ in data])
+            continue
+        i = systems.index(name)
+        series.append([math.nan if values[i] is None else values[i] / 1000.0 for _, values in data])
     return labels, series
 
 
@@ -54,7 +57,7 @@ def max_value(series_groups: list[list[list[float]]]) -> float:
 def plot_panel(ax, labels: list[str], series: list[list[float]], xlabel: str, caption: str) -> None:
     x = list(range(len(labels)))
     for i, values in enumerate(series):
-        if len(values) != len(labels):
+        if len(values) != len(labels) or not any(math.isfinite(value) for value in values):
             continue
         ax.plot(
             x,
@@ -99,8 +102,8 @@ def main() -> None:
         raise ValueError(f"Unexpected account systems: {account_data.MAIN_SYSTEMS}")
 
     thread_labels, thread_series = build_series(thread_data.thread_scalability_data, SYSTEMS)
-    node_labels, node_series = build_series(node_data.node_scalability_data, SYSTEMS)
-    account_labels, account_series = build_series(account_data.account_scalability_data, SYSTEMS)
+    node_labels, node_series = build_series(node_data.node_scalability_data, node_data.MAIN_SYSTEMS)
+    account_labels, account_series = build_series(account_data.account_scalability_data, account_data.MAIN_SYSTEMS)
     if not account_labels:
         account_labels = list(account_data.ACCOUNT_PLACEHOLDER_LABELS)
         account_series = [[] for _ in SYSTEMS]
@@ -131,11 +134,11 @@ def main() -> None:
         loc="upper center",
         bbox_to_anchor=(0.52, 1.02),
         prop={"weight": "bold", "size": 16},
-        handlelength=2.5,
+        handlelength=1.6,
         handleheight=1.1,
         frameon=False,
-        ncol=6,
-        columnspacing=1.8,
+        ncol=7,
+        columnspacing=0.8,
     )
 
     fig.subplots_adjust(left=0.08, right=0.99, bottom=0.27, top=0.84, wspace=0.18)

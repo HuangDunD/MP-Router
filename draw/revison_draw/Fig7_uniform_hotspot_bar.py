@@ -14,7 +14,7 @@ from matplotlib import rcParams
 from matplotlib.ticker import MultipleLocator
 
 
-SYSTEMS = ["RR", "MWR", "PHR", "PAR", "CPR", "MP-Router"]
+SYSTEMS = ["RR", "MWR", "PHR", "PAR", "CPR", "Seron", "MP-Router"]
 
 rcParams["hatch.linewidth"] = 0.3
 rcParams["text.usetex"] = False
@@ -59,7 +59,7 @@ def plot_grouped_bars(ax, data, systems, colors, hatches):
 
     finite_values = [value for values in values_by_system for value in values if math.isfinite(value)]
     upper_val = math.ceil(max(finite_values) * 1.12 / 20) * 20
-    ax.set_ylim(20, 140)
+    ax.set_ylim(0, 140)
     ax.yaxis.set_major_locator(MultipleLocator(20))
     ax.set_xticks(x_base)
     ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=12)
@@ -83,6 +83,8 @@ def main() -> None:
 
     colors = ["#85c0e9", "#ff7e0e8f", "#2ca02c99", "#B157D790", "#d6d027", "#e47474"]
     hatches = ["////", "\\\\\\\\", "xxxx", "oo", "OOOO", "...."]
+    colors.insert(-1, "#69b9b6")
+    hatches.insert(-1, "--")
 
     fig, ax = plt.subplots(1, 1, figsize=(6.0, 4.0))
     plot_grouped_bars(ax, revision_data.uniform_hotspot_data, systems, colors, hatches)
@@ -98,11 +100,11 @@ def main() -> None:
         handleheight=0.6,
         frameon=False,
         handletextpad=0.4,
-        ncol=6,
+        ncol=4,
         columnspacing=0.4,
     )
 
-    fig.subplots_adjust(left=0.12, right=0.98, bottom=0.16, top=0.84)
+    fig.subplots_adjust(left=0.12, right=0.98, bottom=0.16, top=0.76)
     args.outfile.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(args.outfile, dpi=600)
     plt.close(fig)

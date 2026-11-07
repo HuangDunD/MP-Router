@@ -235,6 +235,7 @@ Data sources:
 ```text
 Connection scalability: vldb_res/20260709000616(main)/smallbank_p1_ZipfTheta0.8_*_t*_r0.8_b10000_*/m*/result.txt
 Primary scalability:    vldb_res/20260718005118(8-node)/smallbank_p1_ZipfTheta0.8_*_n*_nb1_whpart0_kp1.1_mlp0/m*/result.txt
+Seron primary scalability: vldb_res/icde-newdata/20261030212030(seron-8node)/smallbank_p1_ZipfTheta0.8_*_n*_nb1_whpart0_kp1.1_mlp0/m33/result.txt
 ```
 
 Output:
@@ -250,7 +251,8 @@ MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 extracted_data/extract_fig
   --main-dir "../../../vldb_res/20260709000616(main)"
 
 MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 extracted_data/extract_fig9_node_scalability.py \
-  --node-dir "../../../vldb_res/20260718005118(8-node)"
+  --node-dir "../../../vldb_res/20260718005118(8-node)" \
+  --seron-dir "../../../vldb_res/icde-newdata/20261030212030(seron-8node)"
 
 MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 Fig8_9_scalability_combined.py
 ```
@@ -260,6 +262,8 @@ Notes:
 - The left panel sweeps the number of connections from `2` to `32`; the right
   panel sweeps the number of primary instances from `1` to `8`.
 - Both panels use the default SmallBank setting with `theta=0.8`.
+- The primary panel includes Seron mode 33 at all eight node counts; the other
+  six methods retain their original data. Fig. C reuses this same node module.
 - The extractors read `Throughput (after warmup)` directly from `result.txt`
   and do not use `summary.md`, `summary.csv`, `case_id`, or `case_plan`.
 
@@ -283,6 +287,7 @@ Data source:
 
 ```text
 vldb_res/20260731203627（data-size)/smallbank_p1_ZipfTheta0.8_*_acc*_t16_r0.8_b10000_n4_*/m*/result.txt
+vldb_res/icde-newdata/20261031012939(seron-datasize)/smallbank_p1_ZipfTheta0.8_*_acc*_t16_r0.8_b10000_n4_*/m33/result.txt
 ```
 
 Output:
@@ -295,7 +300,8 @@ Command:
 
 ```bash
 MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 extracted_data/extract_figC_account_scalability.py \
-  --data-size-dir "../../../vldb_res/20260731203627（data-size)"
+  --data-size-dir "../../../vldb_res/20260731203627（data-size)" \
+  --seron-dir "../../../vldb_res/icde-newdata/20261031012939(seron-datasize)"
 
 MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 FigC_scalability_combined.py
 ```
@@ -305,6 +311,13 @@ Notes:
 - This script is a copy-style variant of `Fig8_9_scalability_combined.py`; the
   original Fig. 8-9 plotting script is unchanged.
 - The third panel sweeps account count from `1M` to `100M`.
+- Seron mode 33 is imported from its own result directory; the original six
+  methods are unchanged. All points use `Throughput (after warmup)`.
+- Seron uses 15s warmup / 30s measurement at 1M--20M, 180s / 150s at 50M,
+  and 180s / 90s at 100M. The original methods use 180s / 150s at 100M,
+  so that point has a different measurement duration. Both 50M and 100M
+  Seron runs restart the database after loading. Actual settings are recorded
+  in `SERON_RUN_SETTINGS` in the generated data module.
 
 ## Fig. 10: Transaction Window Size
 
@@ -581,6 +594,7 @@ Data source:
 
 ```text
 vldb_res/20260715020857(yashan)/smallbank_p1_ZipfTheta0.8_ZipfGenfinite_acc10000000_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0/m*/result.txt
+vldb_res/icde-newdata/20261030193248(seron-yashan)/smallbank_p1_ZipfTheta0.8_ZipfGenfinite_acc10000000_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0/m33/result.txt
 ```
 
 Output:
@@ -592,22 +606,21 @@ figs/fig15_yashan_tps_timeline.pdf
 Command:
 
 ```bash
+python3 extracted_data/extract_fig15_yashan_phases.py
 MPLBACKEND=Agg MPLCONFIGDIR="$PWD/.mplconfig" python3 Fig15_yashan_tps_timeline.py \
-  "../../../vldb_res/20260715020857(yashan)/smallbank_p1_ZipfTheta0.8_ZipfGenfinite_acc10000000_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0/m0/result.txt" \
-  "../../../vldb_res/20260715020857(yashan)/smallbank_p1_ZipfTheta0.8_ZipfGenfinite_acc10000000_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0/m25/result.txt" \
-  "../../../vldb_res/20260715020857(yashan)/smallbank_p1_ZipfTheta0.8_ZipfGenfinite_acc10000000_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0/m2/result.txt" \
-  "../../../vldb_res/20260715020857(yashan)/smallbank_p1_ZipfTheta0.8_ZipfGenfinite_acc10000000_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0/m23/result.txt" \
-  "../../../vldb_res/20260715020857(yashan)/smallbank_p1_ZipfTheta0.8_ZipfGenfinite_acc10000000_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0/m28/result.txt" \
-  "../../../vldb_res/20260715020857(yashan)/smallbank_p1_ZipfTheta0.8_ZipfGenfinite_acc10000000_t16_r0.8_b10000_nb1_whpart0_kp1.1_mlp0/m11/result.txt" \
-  --labels RR MWR PHR PAR CPR MP-Router \
   --target-interval-seconds 10 \
   --output fig15_yashan_tps_timeline.pdf
 ```
 
 Notes:
 
-- The script reads per-interval `[Exec TPS]` lines directly from `result.txt`.
+- The extractor imports raw `[Exec TPS]` samples into the generated data module,
+  including per-method source paths. Seron uses the new mode-33 run; the other
+  six methods retain their original data.
+- The plot reads that module by default. Explicit result files and `--labels`
+  remain supported for one-off plots.
 - The command uses 10-second averaging for a smoother timeline.
+- Both PDF and PNG previews are generated. Seron is the solid teal curve.
 
 Phase statistics extractor:
 

@@ -9,8 +9,9 @@ counts are available, it uses a transaction-weighted average:
     sum(node_cf_waits_per_txn * node_business_txn_count) / sum(node_business_txn_count)
 
 When only one report exists, this naturally reduces to that report's value. If
-transaction counts are unavailable, it falls back to an arithmetic average of
-the KWR-reported waits-per-transaction values.
+business SQL counts are unavailable, it uses the KWR Load Profile transaction
+counts for all nodes in that case. Missing counts are never silently replaced
+with an unweighted average.
 """
 
 from __future__ import annotations
@@ -25,7 +26,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 SUMMARY_SCRIPT = PROJECT_ROOT / "MP-Router" / "draw" / "revison_draw" / "summarize_mp_router_results.py"
 
 DEFAULT_SMALLBANK_DIR = PROJECT_ROOT / "vldb_res" / "20260716160331(smallbank-4kwr)"
-DEFAULT_TPCC_DIR = PROJECT_ROOT / "vldb_res" / "20260716232528(tpcc-4kwr)"
+NEW_DATA_DIR = PROJECT_ROOT / "vldb_res" / "icde-newdata"
+DEFAULT_TPCC_DIR = NEW_DATA_DIR / "20261029013455(icde)"
+DEFAULT_SERON_SMALLBANK_DIR = NEW_DATA_DIR / "20261029192612(icde-seron-sb)"
+DEFAULT_SERON_TPCC_DIR = NEW_DATA_DIR / "20261029202213(icde-seron-tpcc)"
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "fig5_cache_fusion.py"
 
 SYSTEMS = [
@@ -34,10 +38,12 @@ SYSTEMS = [
     ("PHR", "2"),
     ("PAR", "23"),
     ("CPR", "28"),
+    ("Seron", "33"),
     ("MP-Router", "11"),
 ]
 
 METRIC = "cf_waits_per_kwr_business_txn"
+EXTRACTION_WARNINGS: list[str] = []
 
 SMALLBANK_GROUPS = [
     ("0.1", "smallbank_p1_ZipfTheta0.1_ZipfGenfinite_acc10000000_t16_r0.8_b10000_n4_nb1_whpart0_kp1.1_mlp0"),
@@ -76,6 +82,16 @@ def optional_float(raw: str) -> float | None:
     return float(str(raw).replace(",", ""))
 
 
+def kwr_transaction_count(path: Path, parser) -> float:
+    tables = parser.TableParser()
+    tables.feed(parser.read_text(path))
+    for table in tables.tables:
+        for row in table:
+            if len(row) >= 2 and row[0].strip().lower() == "transactions":
+                return to_float(row[1], f"{path} Transactions")
+    raise RuntimeError(f"{path}: neither business SQL nor Load Profile transaction count available")
+
+
 def kwr_cache_fusion(case_dir: Path, parser) -> float:
     kwr_files = sorted(case_dir.glob("*node*_end.html"))
     if not kwr_files:
@@ -92,32 +108,34 @@ def kwr_cache_fusion(case_dir: Path, parser) -> float:
         cf_values.append(cf_per_txn)
         txn_counts.append(txn_count)
 
-    if all(count is not None for count in txn_counts):
-        total_txns = sum(txn_counts)
-        if total_txns <= 0:
-            raise RuntimeError(f"{case_dir}: non-positive business transaction count")
-        weighted_waits = sum(cf * count for cf, count in zip(cf_values, txn_counts))
-        return round(weighted_waits / total_txns, 6)
+    if any(count is None for count in txn_counts):
+        txn_counts = [kwr_transaction_count(path, parser) for path in kwr_files]
+        EXTRACTION_WARNINGS.append(f"{case_dir}: using KWR Load Profile transaction counts (business SQL counts unavailable)")
+    total_txns = sum(txn_counts)
+    if total_txns <= 0:
+        raise RuntimeError(f"{case_dir}: non-positive transaction count")
+    weighted_waits = sum(cf * count for cf, count in zip(cf_values, txn_counts))
+    return round(weighted_waits / total_txns, 6)
 
-    return round(sum(cf_values) / len(cf_values), 6)
 
-
-def extract_smallbank(smallbank_dir: Path, parser) -> list[tuple[str, list[float]]]:
+def extract_smallbank(smallbank_dir: Path, seron_dir: Path, parser) -> list[tuple[str, list[float]]]:
     data = []
     for label, folder in SMALLBANK_GROUPS:
         values = []
         for _, mode in SYSTEMS:
-            values.append(kwr_cache_fusion(smallbank_dir / folder / f"m{mode}", parser))
+            source_dir = seron_dir if mode == "33" else smallbank_dir
+            values.append(kwr_cache_fusion(source_dir / folder / f"m{mode}", parser))
         data.append((label, values))
     return data
 
 
-def extract_tpcc(tpcc_dir: Path, parser) -> list[tuple[str, list[float]]]:
+def extract_tpcc(tpcc_dir: Path, seron_dir: Path, parser) -> list[tuple[str, list[float]]]:
     data = []
     for label, folder in TPCC_GROUPS:
         values = []
         for _, mode in SYSTEMS:
-            values.append(kwr_cache_fusion(tpcc_dir / folder / f"m{mode}", parser))
+            source_dir = seron_dir if mode == "33" else tpcc_dir
+            values.append(kwr_cache_fusion(source_dir / folder / f"m{mode}", parser))
         data.append((label, values))
     return data
 
@@ -126,6 +144,8 @@ def write_module(
     output: Path,
     smallbank_dir: Path,
     tpcc_dir: Path,
+    seron_smallbank_dir: Path,
+    seron_tpcc_dir: Path,
     smallbank_data: list[tuple[str, list[float]]],
     tpcc_data: list[tuple[str, list[float]]],
 ) -> None:
@@ -137,6 +157,8 @@ def write_module(
         f"# Metric: {METRIC}",
         f"# SmallBank source: {smallbank_dir}",
         f"# TPC-C source: {tpcc_dir}",
+        f"# SmallBank Seron source (mode 33): {seron_smallbank_dir}",
+        f"# TPC-C Seron source (mode 33): {seron_tpcc_dir}",
         "",
         f"MAIN_SYSTEMS = {pformat(system_names, width=120)}",
         "",
@@ -148,7 +170,7 @@ def write_module(
         "",
         "MISSING = []",
         "",
-        "WARNINGS = []",
+        f"WARNINGS = {pformat(EXTRACTION_WARNINGS, width=120)}",
         "",
     ]
     output.write_text("\n".join(lines), encoding="utf-8")
@@ -158,18 +180,25 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--smallbank-dir", type=Path, default=DEFAULT_SMALLBANK_DIR)
     parser.add_argument("--tpcc-dir", type=Path, default=DEFAULT_TPCC_DIR)
+    parser.add_argument("--seron-smallbank-dir", type=Path, default=DEFAULT_SERON_SMALLBANK_DIR)
+    parser.add_argument("--seron-tpcc-dir", type=Path, default=DEFAULT_SERON_TPCC_DIR)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
     summary_parser = load_summary_parser()
-    smallbank_data = extract_smallbank(args.smallbank_dir, summary_parser)
-    tpcc_data = extract_tpcc(args.tpcc_dir, summary_parser)
-    write_module(args.output, args.smallbank_dir, args.tpcc_dir, smallbank_data, tpcc_data)
+    smallbank_data = extract_smallbank(args.smallbank_dir, args.seron_smallbank_dir, summary_parser)
+    tpcc_data = extract_tpcc(args.tpcc_dir, args.seron_tpcc_dir, summary_parser)
+    write_module(args.output, args.smallbank_dir, args.tpcc_dir,
+                 args.seron_smallbank_dir, args.seron_tpcc_dir, smallbank_data, tpcc_data)
 
     print(f"Wrote {args.output}")
     print(f"SmallBank source: {args.smallbank_dir}")
     print(f"TPC-C source: {args.tpcc_dir}")
+    print(f"SmallBank Seron source: {args.seron_smallbank_dir}")
+    print(f"TPC-C Seron source: {args.seron_tpcc_dir}")
     print(f"Metric: {METRIC}")
+    for warning in EXTRACTION_WARNINGS:
+        print(f"Warning: {warning}")
 
 
 if __name__ == "__main__":
