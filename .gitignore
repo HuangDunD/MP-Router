@@ -35,3 +35,4 @@ fig*.pdf
 draw/revison_draw/figs/ablation_bar.pdf
 draw/revison_draw/figs/smallbank_latency_table.md
 *.pyc
+/draw/revison_draw/extracted_data/fig*.py
