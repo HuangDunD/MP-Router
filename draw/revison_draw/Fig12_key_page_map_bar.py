@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Plot Fig. 12 throughput under different key-page-map capacities."""
+"""Plot Fig. 12 throughput and MP-Router map hit rate versus map capacity."""
 
 from __future__ import annotations
 
 import argparse
 import importlib
-import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -57,18 +56,15 @@ def plot_grouped_bars(ax, data, systems, colors, hatches):
             zorder=3,
         )
 
-    max_y = max(value for values in values_by_system for value in values)
-    min_y = min(value for values in values_by_system for value in values)
-    lower = math.floor(min_y * 0.85 / 10) * 10
-    upper = math.ceil(max_y * 1.10 / 10) * 10
     ax.set_ylim(60, 120)
     ax.yaxis.set_major_locator(MultipleLocator(20))
+    ax.yaxis.set_minor_locator(MultipleLocator(10))
     ax.set_xticks(x_base)
     ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=12)
     ax.set_xlim(-0.55, len(labels) - 1 + 0.55)
     ax.set_xlabel("Key-Page Map Capacity", fontsize=14)
     ax.set_ylabel("Throughput (KTPS)", fontsize=14)
-    ax.grid(axis="y", linestyle="--", alpha=0.5, zorder=0)
+    ax.grid(axis="y", which="both", linestyle="--", alpha=0.5, zorder=0)
 
 
 def main() -> None:
@@ -88,23 +84,44 @@ def main() -> None:
     fig, ax = plt.subplots(1, 1, figsize=(4.0, 2.5))
     plot_grouped_bars(ax, revision_data.key_page_map_data, systems, colors, hatches)
 
+    hit_rates = revision_data.KP_HIT_RATES["MP-Router"]
+    if len(hit_rates) != len(revision_data.key_page_map_data):
+        raise ValueError("Hit rates and capacity points must have the same length")
+    hit_ax = ax.twinx()
+    hit_line, = hit_ax.plot(
+        range(len(hit_rates)), hit_rates, color="#414040", linestyle="--",
+        marker="D", markersize=4.5, markerfacecolor="white",
+        linewidth=1.4, label="MP-Router map hit rate", zorder=5,
+    )
+    hit_ax.set_ylim(0, 105)
+    hit_ax.yaxis.set_major_locator(MultipleLocator(25))
+    hit_ax.set_ylabel("Map hit rate (%)", fontsize=12, labelpad=3)
+    hit_ax.tick_params(axis="y", labelsize=11, pad=2)
+    hit_ax.grid(False)
+
     handles, labels = ax.get_legend_handles_labels()
     fig.legend(
         handles,
         labels,
         loc="upper center",
-        bbox_to_anchor=(0.52, 1.03),
-        prop={"weight": "bold", "size": 12},
+        bbox_to_anchor=(0.50, 1.02),
+        prop={"weight": "bold", "size": 10},
         handlelength=1.5,
         handleheight=1.2,
         frameon=False,
         ncol=4,
         columnspacing=0.6,
     )
+    fig.legend(
+        [hit_line], [hit_line.get_label()], loc="upper center",
+        bbox_to_anchor=(0.50, 0.925), fontsize=10, frameon=False,
+        handlelength=2.4,
+    )
 
-    fig.subplots_adjust(left=0.17, right=0.98, bottom=0.22, top=0.85)
+    fig.subplots_adjust(left=0.17, right=0.83, bottom=0.22, top=0.79)
     args.outfile.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(args.outfile, dpi=600)
+    plt.savefig(args.outfile.with_suffix(".png"), dpi=240)
     plt.close(fig)
 
     print(f"Saved figure: {args.outfile}")
