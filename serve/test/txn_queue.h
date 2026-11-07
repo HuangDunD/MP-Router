@@ -1368,7 +1368,7 @@ public:
             clock_gettime(CLOCK_MONOTONIC, &ts);
             double now_ms = ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
             const double arrival_first = arrival_clock_
-                ? arrival_clock_->reserve(batch_size, now_ms) : 0;
+                ? arrival_clock_->reserve(batch_size) : 0;
             for (int i = 0; i < batch_size; i++) {
                 TxnQueueEntry* entry = txn_pool_.front();
                 txn_pool_.pop_front();
@@ -1438,6 +1438,10 @@ public:
     }
     ~TxnPool() = default;
 
+    void start_virtual_arrival_measurement(double start_time_ms) {
+        arrival_clock_.start_measurement(start_time_ms);
+    }
+
     void receive_txn_from_client(TxnQueueEntry* entry, int gen_thread_id) {
         pools[gen_thread_id % num_sub_pool_]->receive_txn_from_client(entry);
     }
@@ -1478,7 +1482,7 @@ public:
     
 private:
     int num_sub_pool_;
-    VirtualArrivalClock arrival_clock_; // shared across all sub-pools; never reset at window/warmup boundaries
+    VirtualArrivalClock arrival_clock_; // shared across sub-pools; starts once after warmup
     MiniTxnPool** pools; // 由于单个事务池的开销可能会很大, 这里做一个分区
     bool stop_ = false;
 };

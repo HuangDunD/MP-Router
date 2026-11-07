@@ -1595,7 +1595,7 @@ DefaultAccessPattern = {
     "tpcc": 2,
     "tpcc-standard": 2,
 }
-DefaultZipfianTheta = 0.8
+DefaultZipfianTheta = 0.6
 DefaultHotspotFraction = 0.25
 DefaultHotspotProb = 0.8
 DefaultWorkerThreads = WorkerThreadCount[0]

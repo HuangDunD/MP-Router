@@ -13,13 +13,21 @@ public:
             throw std::invalid_argument("virtual arrival rate must be finite and nonnegative");
     }
 
-    double reserve(uint64_t count, double dequeue_time_ms) {
+    // Start once at the measurement boundary, not at the first warmup dequeue.
+    // Warmup transactions keep a zero timestamp and are excluded from this metric.
+    void start_measurement(double start_time_ms) {
+        if (rate_ == 0) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (started_) return;
+        origin_ms_ = start_time_ms;
+        next_ = 0;
+        started_ = true;
+    }
+
+    double reserve(uint64_t count) {
         if (rate_ == 0 || count == 0) return 0;
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!started_) {
-            origin_ms_ = dequeue_time_ms;
-            started_ = true;
-        }
+        if (!started_) return 0;
         const double first = origin_ms_ + static_cast<double>(next_) * 1000.0 / rate_;
         next_ += count;
         return first;

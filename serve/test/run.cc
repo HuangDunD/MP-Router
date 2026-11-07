@@ -4453,6 +4453,16 @@ int main(int argc, char *argv[]) {
         }
         maybe_finish_warmup(logger_);
     }
+    struct timespec virtual_measurement_start;
+    clock_gettime(CLOCK_MONOTONIC, &virtual_measurement_start);
+    txn_pool->start_virtual_arrival_measurement(
+        virtual_measurement_start.tv_sec * 1000.0 +
+        virtual_measurement_start.tv_nsec / 1000000.0);
+    if (virtual_arrival_rate > 0) {
+        std::cout << "Virtual arrival timeline starts after warmup; "
+                     "transactions dequeued during warmup are excluded from virtual latency stats."
+                  << std::endl;
+    }
     if (SYSTEM_MODE == 33) smart_router->finalize_seron_range_rules();
     std::cout << "\033[31m Warmup rounds completed. Create the smart router snapshot. \033[0m" << std::endl;
     auto warmup_end_time = std::chrono::high_resolution_clock::now();
@@ -4797,6 +4807,7 @@ int main(int argc, char *argv[]) {
             latencies.insert(latencies.end(), v.begin(), v.end());
         std::cout << "Virtual-Arrival-to-Complete Latency Statistics (After Warmup):" << std::endl;
         std::cout << "  Arrival rate: " << virtual_arrival_rate << " TPS" << std::endl;
+        std::cout << "  Timeline origin: end of warmup (post-warmup dequeues only)" << std::endl;
         std::cout << "  Samples: " << count << std::endl;
         if (!latencies.empty()) {
             std::sort(latencies.begin(), latencies.end());
